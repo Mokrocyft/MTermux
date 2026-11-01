@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "termux-neo"
+rootProject.name = "termux"
 include(":app")

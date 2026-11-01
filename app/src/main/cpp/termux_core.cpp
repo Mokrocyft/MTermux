@@ -1,15 +1,4 @@
-/*
- * Termuxx — All-In-One C++23 Engine (libtermuxx-core.so) for Android 17 (API 37)
- *
- * Features:
- * 1. Native C++23 ZIP Decompressor (zlib) + Dual 16-Byte Relocator ("com.termux/files" & "com.termux/cache")
- * 2. Android 17 (minSdk 37 / targetSdk 37) Unified LD_PRELOAD + /system/bin/linker64 executor
- * 3. Silent Second-Stage Bootstrap Initializer + APT Cache Configurator
- * 4. Logical-Line Reflow Engine on Resize/Pinch-Zoom (unwraps & re-wraps scrollback + screen lines dynamically)
- * 5. ColorOS 17 Native Text Selection Engine (logical coordinates + C++23 handle geometry & touch drag state machine)
- * 6. Procedural Box-Drawing (U+2500..U+257F) & Block Elements (U+2580..U+259F) packed in C++23
- * 7. Event-Driven Zero-Idle-CPU PTY Reader (poll(-1) + direct JNI View.postInvalidateOnAnimation wakeup)
- */
+// Termux Native Core
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -99,7 +88,7 @@ constexpr int MODE_SYNC_OUTPUT     = 1 << 7;
 constexpr int MODE_FOCUS_EVENTS    = 1 << 8;
 
 // Pure Dark AMOLED Palette + ColorOS 17 Neutral Gray Selection Highlight (#52525A)
-constexpr uint32_t DEFAULT_FG   = 0xFFE5E9F0u;
+constexpr uint32_t DEFAULT_FG   = 0xFFD0D6E0u;
 constexpr uint32_t DEFAULT_BG   = 0xFF000000u;
 constexpr uint32_t SELECTION_BG = 0xFF52525Au;
 constexpr uint32_t SELECTION_FG = 0xFFFFFFFFu;
@@ -861,7 +850,7 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         "fi\n"
         "alias ll='ls -lah --color=auto'\n"
         "alias update='pkg update -y && pkg upgrade -y'\n"
-        "PS1='\\[\\e[1;38;2;168;199;250m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
+        "PS1='\\[\\e[1;38;2;110;148;204m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
     int fd = open(bashrcPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         writeAllFd(fd, rcText, strlen(rcText));
@@ -2940,14 +2929,43 @@ Java_com_termuxx_app_TermuxActivity_nativeDispatchCustomKey(JNIEnv* env, jclass 
         else if (label == "F10") sendKeyCodeInternal(eng.get(), AKEYCODE_F10, meta);
         else if (label == "F11") sendKeyCodeInternal(eng.get(), AKEYCODE_F11, meta);
         else if (label == "F12") sendKeyCodeInternal(eng.get(), AKEYCODE_F12, meta);
-        else if (label.rfind("CTRL+", 0) == 0 && label.size() == 6) {
-            sendCodepointInternal(eng.get(), static_cast<unsigned char>(label[5]), true, alt);
+        else if (label == "SPACE" || label == "SPC") {
+            sendCodepointInternal(eng.get(), ' ', ctrl, alt);
+        } else if (label.rfind("CTRL+", 0) == 0 && label.size() > 5) {
+            std::string sub = label.substr(5);
+            if (sub == "SPACE" || sub == "SPC") {
+                sendCodepointInternal(eng.get(), ' ', true, alt);
+            } else {
+                size_t consumed = 0;
+                uint32_t cp = decodeFirstUtf8Codepoint(sub, consumed);
+                sendCodepointInternal(eng.get(), static_cast<int>(cp), true, alt);
+            }
+        } else if (label.rfind("ALT+", 0) == 0 && label.size() > 4) {
+            std::string sub = label.substr(4);
+            if (sub == "BKSP" || sub == "DEL") {
+                sendKeyCodeInternal(eng.get(), AKEYCODE_DEL, meta | AMETA_ALT_ON);
+            } else {
+                size_t consumed = 0;
+                uint32_t cp = decodeFirstUtf8Codepoint(sub, consumed);
+                sendCodepointInternal(eng.get(), static_cast<int>(cp), ctrl, true);
+            }
         } else {
+            std::string expanded;
+            expanded.reserve(label.size());
+            for (size_t i = 0; i < label.size(); ++i) {
+                if (label[i] == '\\' && i + 1 < label.size()) {
+                    char nx = label[i + 1];
+                    if (nx == 'n' || nx == 'r') { expanded.push_back('\r'); ++i; continue; }
+                    if (nx == 't') { expanded.push_back('\t'); ++i; continue; }
+                    if (nx == 'e') { expanded.push_back('\x1b'); ++i; continue; }
+                }
+                expanded.push_back(label[i]);
+            }
             size_t consumed = 0;
-            uint32_t cp = decodeFirstUtf8Codepoint(label, consumed);
+            uint32_t cp = decodeFirstUtf8Codepoint(expanded, consumed);
             sendCodepointInternal(eng.get(), static_cast<int>(cp), ctrl, alt);
-            if (consumed < label.size()) {
-                eng->writeToPty(label.data() + consumed, label.size() - consumed);
+            if (consumed < expanded.size()) {
+                eng->writeToPty(expanded.data() + consumed, expanded.size() - consumed);
             }
         }
     }

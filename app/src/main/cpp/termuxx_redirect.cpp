@@ -1,20 +1,4 @@
-/*
- * libtermuxx-redirect.so — C++23 Transparent Path Redirector, Live Binary Patcher & DPKG/APT Engine
- *
- * 1. Rewrites all path forms:
- *    - "com.termux/files" -> "com.termuxx/file"
- *    - "com.termux/cache" -> "com.termuxx/cach"
- *    - "com.termux" (e.g. "./data/data/com.termux" during dpkg --unpack) -> "com.termuxx"
- *    - "/bin/<tool>", "/usr/bin/<tool>", "/system/bin/sh", "/tmp" -> Termuxx usr equivalents
- * 2. Intercepts ALL VFS & metadata syscalls used by dpkg/apt/tar with safe direct syscall fallbacks:
- *    open, open64, openat, openat64, fopen, fopen64, opendir, stat, stat64, lstat, lstat64,
- *    fstatat, fstatat64, statvfs, statvfs64, statfs, statfs64, access, faccessat, mkdir, mkdirat,
- *    rmdir, unlink, unlinkat, rename, renameat, renameat2, link, linkat, symlink, symlinkat,
- *    readlink, readlinkat, realpath, canonicalize_file_name, chmod, fchmodat, chown, lchown,
- *    fchownat, utimensat, utimes, lutimes, chdir.
- * 3. Intercepts ALL exec/spawn family functions (execve, execv, execvp, execvpe, execl, execlp,
- *    execle, system) using direct kernel __NR_execve syscall and preserves LD_PRELOAD & LD_LIBRARY_PATH.
- */
+// Termux VFS & Exec Redirector
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
