@@ -30,8 +30,6 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.text.Editable
 import android.text.InputType
-import android.text.Selection
-import android.text.SpannableStringBuilder
 import android.util.TypedValue
 import android.view.ActionMode
 import android.view.GestureDetector
@@ -50,6 +48,7 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import android.view.inputmethod.TextAttribute
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -62,7 +61,6 @@ import android.window.OnBackInvokedDispatcher
 import com.termuxx.R
 import kotlin.math.abs
 import kotlin.math.ceil
-import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.max
@@ -94,10 +92,10 @@ private const val KEY_CURSOR_SMOOTH_MOVE = "cursor_smooth_move_v1"
 private const val KEY_ANIM_SPEED = "cursor_anim_speed_v1"
 
 private const val DEFAULT_UI_THEME_INDEX = 0
-private const val DEFAULT_CURSOR_SHAPE = 0 // 0: Rounded Block, 1: Underline, 2: Bar
-private const val DEFAULT_CURSOR_BLINK_MODE = 0 // 0: Smooth fade, 1: Classic step, 2: Off
+private const val DEFAULT_CURSOR_SHAPE = 0 // 0: Block, 1: Underline, 2: Bar
+private const val DEFAULT_CURSOR_BLINK_MODE = 0 // 0: VS Code smooth fade, 1: Step, 2: Off
 private const val DEFAULT_CURSOR_SMOOTH_MOVE = true
-private const val DEFAULT_ANIM_SPEED = 1 // 0: Fast, 1: Normal, 2: Relaxed
+private const val DEFAULT_ANIM_SPEED = 1 // 0: Fast, 1: Normal, 2: Smooth
 
 private const val REQ_POST_NOTIFICATIONS = 1001
 
@@ -245,7 +243,7 @@ class TermuxActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         )
 
-        // Bottom Extra Keys Bar (no top border line, uniform tight spacing across rows & buttons)
+        // Bottom Extra Keys Bar (no border line, uniform tight spacing across rows & buttons)
         extraKeysRoot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_AMOLED_BG)
@@ -440,6 +438,7 @@ class TermuxActivity : Activity() {
             text = displayLabel
             tag = actionSpec
             gravity = Gravity.CENTER
+            setSingleLine(true)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.MONOSPACE
             setTextColor(COLOR_TEXT)
@@ -526,7 +525,7 @@ class TermuxActivity : Activity() {
     }
 
     // ========================================================================
-    // Minimalist Unified Settings Dialog (Theme, Cursor, Animations, Extra Keys)
+    // Minimalist Unified Settings Dialog
     // ========================================================================
     private fun showSettingsDialog() {
         var selTheme = uiThemeIndex
@@ -548,14 +547,15 @@ class TermuxActivity : Activity() {
             val d2 = if (lines[1].contains("|")) "|" else ","
             row2Tokens.addAll(lines[1].split(d2).map { it.trim() }.filter { it.isNotEmpty() })
         }
-        var activeEditRow = 0 // 0 = Row 1, 1 = Row 2
+        var activeEditRow = 0
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(10), dp(14), dp(6))
+            setPadding(dp(14), dp(8), dp(14), dp(6))
             setBackgroundColor(COLOR_HEADER_BG)
         }
         val scroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
             addView(root)
         }
 
@@ -567,8 +567,21 @@ class TermuxActivity : Activity() {
                 text = title
                 setTextColor(COLOR_TEXT_DIM)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                setPadding(0, dp(10), 0, dp(4))
+                setPadding(0, dp(9), 0, dp(4))
             }
+        }
+
+        fun makeHorizontalChipRow(): Pair<HorizontalScrollView, LinearLayout> {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val hsv = HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                overScrollMode = View.OVER_SCROLL_NEVER
+                addView(row)
+            }
+            return hsv to row
         }
 
         fun optionChip(title: String, selected: Boolean, onClick: () -> Unit): TextView {
@@ -576,6 +589,7 @@ class TermuxActivity : Activity() {
             val cont = activeContainer()
             return TextView(this).apply {
                 text = title
+                setSingleLine(true)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 setPadding(dp(10), dp(5), dp(10), dp(5))
                 setTextColor(if (selected) acc else COLOR_TEXT)
@@ -599,11 +613,9 @@ class TermuxActivity : Activity() {
             for (cb in refreshAllCallbacks) cb()
         }
 
-        // 1. Цвета интерфейса
+        // 1. Цвет интерфейса
         root.addView(sectionHeader("Цвет интерфейса"))
-        val themeScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-        val themeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        themeScroll.addView(themeRow)
+        val (themeScroll, themeRow) = makeHorizontalChipRow()
         root.addView(themeScroll)
 
         refreshAllCallbacks.add {
@@ -613,6 +625,7 @@ class TermuxActivity : Activity() {
                 val isSel = (selTheme == i)
                 val chip = TextView(this).apply {
                     text = preset.name
+                    setSingleLine(true)
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     setPadding(dp(10), dp(5), dp(10), dp(5))
                     setTextColor(if (isSel) preset.accent else COLOR_TEXT)
@@ -636,10 +649,10 @@ class TermuxActivity : Activity() {
             }
         }
 
-        // 2. Форма курсора
+        // 2. Курсор
         root.addView(sectionHeader("Курсор"))
-        val shapeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(shapeRow)
+        val (shapeScroll, shapeRow) = makeHorizontalChipRow()
+        root.addView(shapeScroll)
 
         refreshAllCallbacks.add {
             shapeRow.removeAllViews()
@@ -652,14 +665,14 @@ class TermuxActivity : Activity() {
             }
         }
 
-        // 3. Мигание и плавное движение (VS Code)
+        // 3. Анимация курсора
         root.addView(sectionHeader("Анимация курсора"))
-        val blinkRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(blinkRow)
+        val (blinkScroll, blinkRow) = makeHorizontalChipRow()
+        root.addView(blinkScroll)
 
         refreshAllCallbacks.add {
             blinkRow.removeAllViews()
-            val modes = listOf("Плавное мигание" to 0, "Обычное" to 1, "Без мигания" to 2)
+            val modes = listOf("Плавное затухание" to 0, "Обычное" to 1, "Без мигания" to 2)
             for ((label, m) in modes) {
                 blinkRow.addView(optionChip(label, selBlinkMode == m) {
                     selBlinkMode = m
@@ -668,12 +681,12 @@ class TermuxActivity : Activity() {
             }
         }
 
-        val moveRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(moveRow)
+        val (moveScroll, moveRow) = makeHorizontalChipRow()
+        root.addView(moveScroll)
 
         refreshAllCallbacks.add {
             moveRow.removeAllViews()
-            moveRow.addView(optionChip("Плавный переход (VS Code)", selSmoothMove) {
+            moveRow.addView(optionChip("Плавный переход", selSmoothMove) {
                 selSmoothMove = !selSmoothMove
                 refreshAllSections()
             })
@@ -686,13 +699,9 @@ class TermuxActivity : Activity() {
             }
         }
 
-        // 4. Настройка нижней панели клавиш
+        // 4. Нижняя панель клавиш
         root.addView(sectionHeader("Нижняя панель клавиш"))
-
-        // Пресеты
-        val presetsScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-        val presetsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        presetsScroll.addView(presetsRow)
+        val (presetsScroll, presetsRow) = makeHorizontalChipRow()
         root.addView(presetsScroll)
 
         fun loadSpecIntoRows(specStr: String) {
@@ -724,25 +733,23 @@ class TermuxActivity : Activity() {
             })
         }
 
-        // Выбор редактируемого ряда (Ряд 1 / Ряд 2) + кнопка "+ Своя кнопка"
-        val rowSelectBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(4), 0, dp(2))
-        }
-        root.addView(rowSelectBar)
+        val (rowSelectScroll, rowSelectBar) = makeHorizontalChipRow()
+        root.addView(rowSelectScroll)
 
         fun targetRowList(): ArrayList<String> = if (activeEditRow == 0) row1Tokens else row2Tokens
 
-        // Интерактивный список кнопок выбранного ряда (нажатие удаляет кнопку)
         val activeRowHint = TextView(this).apply {
-            text = "Кнопки ряда (нажми на кнопку, чтобы удалить):"
+            text = "Кнопки ряда (нажми, чтобы удалить):"
             setTextColor(COLOR_TEXT_DIM)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
             setPadding(0, dp(2), 0, dp(2))
         }
         root.addView(activeRowHint)
 
-        val currentKeysScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val currentKeysScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
         val currentKeysRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(4), dp(4), dp(4), dp(4))
@@ -751,23 +758,18 @@ class TermuxActivity : Activity() {
         currentKeysScroll.addView(currentKeysRow)
         root.addView(currentKeysScroll)
 
-        // Палитра быстрых клавиш для добавления в 1 тап
         val addKeyHint = TextView(this).apply {
-            text = "Добавить клавишу в выбранный ряд:"
+            text = "Добавить клавишу в ряд:"
             setTextColor(COLOR_TEXT_DIM)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
-            setPadding(0, dp(6), 0, dp(2))
+            setPadding(0, dp(5), 0, dp(2))
         }
         root.addView(addKeyHint)
 
-        val paletteScroll1 = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-        val paletteRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        paletteScroll1.addView(paletteRow1)
+        val (paletteScroll1, paletteRow1) = makeHorizontalChipRow()
         root.addView(paletteScroll1)
 
-        val paletteScroll2 = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-        val paletteRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        paletteScroll2.addView(paletteRow2)
+        val (paletteScroll2, paletteRow2) = makeHorizontalChipRow()
         root.addView(paletteScroll2)
 
         val quickKeys1 = listOf(
@@ -786,7 +788,7 @@ class TermuxActivity : Activity() {
                 setBackgroundColor(COLOR_HEADER_BG)
             }
             val labelInput = EditText(this).apply {
-                hint = "Текст на кнопке (напр. C-c или git)"
+                hint = "Надпись на кнопке (напр. C-c или git)"
                 setHintTextColor(COLOR_TEXT_DIM)
                 setTextColor(COLOR_TEXT)
                 typeface = Typeface.MONOSPACE
@@ -796,7 +798,7 @@ class TermuxActivity : Activity() {
                 setSingleLine(true)
             }
             val actionInput = EditText(this).apply {
-                hint = "Клавиша или команда (напр. CTRL+C, ALT+B, ls -la\\n)"
+                hint = "Клавиша или команда (CTRL+C, ALT+B, ls -la\\n)"
                 setHintTextColor(COLOR_TEXT_DIM)
                 setTextColor(COLOR_TEXT)
                 typeface = Typeface.MONOSPACE
@@ -847,7 +849,7 @@ class TermuxActivity : Activity() {
             rowSelectBar.addView(optionChip("+ Своя клавиша", false) {
                 showCustomBindDialog()
             })
-            rowSelectBar.addView(optionChip("Очистить ряд", false) {
+            rowSelectBar.addView(optionChip("Очистить", false) {
                 targetRowList().clear()
                 refreshAllSections()
             })
@@ -857,6 +859,7 @@ class TermuxActivity : Activity() {
             if (list.isEmpty()) {
                 val emptyTv = TextView(this).apply {
                     text = "Ряд пуст"
+                    setSingleLine(true)
                     setTextColor(COLOR_TEXT_DIM)
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     setPadding(dp(6), dp(4), dp(6), dp(4))
@@ -868,6 +871,7 @@ class TermuxActivity : Activity() {
                     val (disp, _) = parseKeyToken(raw)
                     val chip = TextView(this).apply {
                         text = "$disp ✕"
+                        setSingleLine(true)
                         typeface = Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                         setTextColor(activeAccent())
@@ -1002,6 +1006,32 @@ class TermuxActivity : Activity() {
         }
     }
 
+    private fun showTabContextMenu(tabIndex: Int) {
+        if (nativeGetSessionCount() > tabIndex && nativeGetActiveIndex() != tabIndex) {
+            nativeSwitchSession(tabIndex)
+            terminalSurface.syncSize()
+            rebuildTabs()
+            terminalSurface.invalidateAllRows()
+        }
+        val items = arrayOf(
+            "Вставить из буфера",
+            "История вывода",
+            "Очистить экран (Ctrl+L)",
+            "Закрыть сессию"
+        )
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Сессия ${tabIndex + 1}")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> pasteFromClipboard()
+                    1 -> terminalSurface.showTranscriptCopyDialog()
+                    2 -> dispatchExtraKeyWithHoldSupport("CTRL+L")
+                    3 -> closeCurrentSession()
+                }
+            }
+            .show()
+    }
+
     internal fun rebuildTabs() {
         tabStrip.removeAllViews()
         val rawCount = nativeGetSessionCount()
@@ -1014,6 +1044,7 @@ class TermuxActivity : Activity() {
 
             val tab = TextView(this).apply {
                 text = (if (isRoot) "# " else "$ ") + (i + 1)
+                setSingleLine(true)
                 typeface = Typeface.MONOSPACE
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setPadding(dp(10), dp(3), dp(10), dp(3))
@@ -1035,11 +1066,22 @@ class TermuxActivity : Activity() {
                     if (nativeGetSessionCount() > idx) {
                         performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                         terminalSurface.stopTextSelection()
-                        nativeSwitchSession(idx)
-                        terminalSurface.syncSize()
-                        rebuildTabs()
-                        terminalSurface.invalidateAllRows()
+                        if (nativeGetActiveIndex() == idx) {
+                            terminalSurface.resetScrollAndBlink()
+                        } else {
+                            nativeSwitchSession(idx)
+                            terminalSurface.syncSize()
+                            rebuildTabs()
+                            terminalSurface.invalidateAllRows()
+                        }
                     }
+                }
+                setOnLongClickListener {
+                    if (nativeGetSessionCount() > idx) {
+                        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        showTabContextMenu(idx)
+                    }
+                    true
                 }
             }
             tabStrip.addView(tab)
@@ -1083,6 +1125,7 @@ class TermuxActivity : Activity() {
     ): TextView {
         return TextView(this).apply {
             text = label
+            setSingleLine(true)
             gravity = Gravity.CENTER
             typeface = Typeface.MONOSPACE
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
@@ -1145,7 +1188,7 @@ class TermuxActivity : Activity() {
     }
 
     // ========================================================================
-    // Terminal Surface (VS Code Smooth Cursor + Selection Auto-Scroll)
+    // Terminal Surface (VS Code Smooth Fade & Caret + Gboard Clipboard Fix)
     // ========================================================================
     inner class TerminalSurface(context: Context) : View(context) {
 
@@ -1180,7 +1223,7 @@ class TermuxActivity : Activity() {
         private var cursorBlinkOn = true
         private var lastInputTimeMs = SystemClock.uptimeMillis()
 
-        // VS Code Smooth Cursor Interpolation State
+        // VS Code Smooth Caret Interpolation State
         private var animCursorX = 0f
         private var animCursorY = 0f
         private var cursorPosInitialized = false
@@ -1652,7 +1695,21 @@ class TermuxActivity : Activity() {
 
             val selecting = nativeIsSelectingText()
 
-            // Draw Rounded Cursor with VS Code Smooth Movement & Smooth/Step Blinking
+            // Subtle right-edge scrollbar indicator when viewing scrollback history
+            if (scrollOffset > 0 && height > 0) {
+                val maxSb = nativeGetActiveScrollback()
+                if (maxSb > 0) {
+                    val totalRows = maxSb + rows
+                    val thumbH = max(dpF(20f), height.toFloat() * (rows.toFloat() / totalRows.toFloat()))
+                    val fractionFromTop = 1f - (scrollOffset.toFloat() / maxSb.toFloat()).coerceIn(0f, 1f)
+                    val thumbTop = fractionFromTop * (height - thumbH)
+                    bgPaint.color = (0x55 shl 24) or (uiAccent and 0x00FFFFFF)
+                    cursorRectF.set(width - dpF(2.5f), thumbTop, width - dpF(0.5f), thumbTop + thumbH)
+                    canvas.drawRoundRect(cursorRectF, dpF(1f), dpF(1f), bgPaint)
+                }
+            }
+
+            // Draw Cursor (VS Code monaco-cursor-smooth keyframes + smooth caret movement)
             if (scrollOffset == 0 && !selecting) {
                 val cursorState = nativeGetCursorState()
                 if (cursorState >= 0) {
@@ -1685,9 +1742,9 @@ class TermuxActivity : Activity() {
                                     0.008f
                                 }
                                 val rate = when (animSpeedPref) {
-                                    0 -> 38f
-                                    2 -> 16f
-                                    else -> 25f
+                                    0 -> 40f
+                                    2 -> 17f
+                                    else -> 26f
                                 }
                                 val factor = (1f - exp(-rate * dtSec)).coerceIn(0.15f, 1f)
                                 animCursorX += (targetX - animCursorX) * factor
@@ -1702,55 +1759,90 @@ class TermuxActivity : Activity() {
                         }
                         lastCursorFrameNs = nowNs
 
-                        val alphaFloat: Float = when (cursorBlinkMode) {
-                            0 -> { // Smooth breathing blink
+                        // Block cursor is darker/more translucent (0.45f) so text underneath stays legible
+                        val maxAlpha = if (shape == 0) 0.45f else 0.68f
+                        var nextDelayMs = 0L
+                        var needsNextAnimFrame = stillMoving
+
+                        val blinkFactor: Float = when (cursorBlinkMode) {
+                            0 -> {
+                                // VS Code monaco-cursor-smooth keyframes:
+                                // 0%..22%: Hold 1.0 | 22%..62%: ease-in-out fade 1.0 -> 0.0 | 62%..78%: Hold 0.0 | 78%..100%: ease-in-out fade 0.0 -> 1.0
                                 val elapsedMs = SystemClock.uptimeMillis() - lastInputTimeMs
-                                if (elapsedMs < 260L) {
-                                    0.85f
+                                val holdAfterInputMs = 340L
+                                if (elapsedMs < holdAfterInputMs) {
+                                    nextDelayMs = holdAfterInputMs - elapsedMs
+                                    1f
                                 } else {
                                     val cycleMs = when (animSpeedPref) {
-                                        0 -> 780f
-                                        2 -> 1450f
-                                        else -> 1080f
+                                        0 -> 820L
+                                        2 -> 1350L
+                                        else -> 1050L
                                     }
-                                    val phase = ((elapsedMs - 260L).toFloat() / cycleMs) * (2f * Math.PI.toFloat())
-                                    0.14f + 0.72f * (0.5f + 0.5f * cos(phase))
+                                    val posMs = (elapsedMs - holdAfterInputMs) % cycleMs
+                                    val p = posMs.toFloat() / cycleMs.toFloat()
+                                    when {
+                                        p < 0.22f -> {
+                                            nextDelayMs = max(16L, ((0.22f - p) * cycleMs).toLong())
+                                            1f
+                                        }
+                                        p < 0.62f -> {
+                                            needsNextAnimFrame = true
+                                            val t = ((p - 0.22f) / 0.40f).coerceIn(0f, 1f)
+                                            val smooth = t * t * (3f - 2f * t)
+                                            1f - smooth
+                                        }
+                                        p < 0.78f -> {
+                                            nextDelayMs = max(16L, ((0.78f - p) * cycleMs).toLong())
+                                            0f
+                                        }
+                                        else -> {
+                                            needsNextAnimFrame = true
+                                            val t = ((p - 0.78f) / 0.22f).coerceIn(0f, 1f)
+                                            t * t * (3f - 2f * t)
+                                        }
+                                    }
                                 }
                             }
-                            1 -> if (cursorBlinkOn) 0.85f else 0.0f
-                            else -> 0.85f
+                            1 -> if (cursorBlinkOn) 1f else 0f
+                            else -> 1f
                         }
 
-                        if (alphaFloat > 0.02f) {
-                            val aInt = (alphaFloat * 255f).roundToInt().coerceIn(0, 255)
+                        val finalAlpha = maxAlpha * blinkFactor
+                        if (finalAlpha > 0.01f) {
+                            val aInt = (finalAlpha * 255f).roundToInt().coerceIn(0, 255)
                             bgPaint.color = (aInt shl 24) or (uiAccent and 0x00FFFFFF)
                             val cx = animCursorX
                             val cy = animCursorY
                             when (shape) {
-                                1 -> { // Rounded Underline
-                                    val h = dpF(2.4f)
-                                    val r = dpF(1.2f)
+                                1 -> { // Underline
+                                    val h = dpF(2.2f)
+                                    val r = dpF(0.8f)
                                     cursorRectF.set(cx, cy + cellHeight - h, cx + cellWidth, cy + cellHeight)
                                     canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
                                 }
-                                2 -> { // Rounded Beam / Bar
-                                    val w = dpF(2.2f)
-                                    val r = dpF(1.1f)
+                                2 -> { // Beam / Bar
+                                    val w = dpF(2.0f)
+                                    val r = dpF(0.8f)
                                     val vPad = dpF(1f)
                                     cursorRectF.set(cx, cy + vPad, cx + w, cy + cellHeight - vPad)
                                     canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
                                 }
-                                else -> { // Rounded Square/Rectangle Block
-                                    val r = dpF(3.2f)
-                                    val vPad = dpF(0.8f)
+                                else -> { // Block with subtle rounded corners (1.3dp)
+                                    val r = dpF(1.3f)
+                                    val vPad = dpF(0.6f)
                                     cursorRectF.set(cx, cy + vPad, cx + cellWidth, cy + cellHeight - vPad)
                                     canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
                                 }
                             }
                         }
 
-                        if (stillMoving || (cursorBlinkMode == 0 && activityResumed)) {
-                            postInvalidateOnAnimation()
+                        if (activityResumed) {
+                            if (needsNextAnimFrame) {
+                                postInvalidateOnAnimation()
+                            } else if (nextDelayMs > 0L) {
+                                postInvalidateDelayed(nextDelayMs)
+                            }
                         }
                     }
                 }
@@ -1943,85 +2035,99 @@ class TermuxActivity : Activity() {
         override fun onCheckIsTextEditor(): Boolean = true
 
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-            outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
-                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
-                EditorInfo.IME_FLAG_NO_EXTRACT_UI or
-                EditorInfo.IME_ACTION_NONE
+            // Match official Termux: InputType.TYPE_NULL + BaseInputConnection(this, true)
+            // so Gboard inline clipboard suggestion chips and direct key events work seamlessly.
+            outAttrs.inputType = InputType.TYPE_NULL
+            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
 
-            return object : BaseInputConnection(this, false) {
-                private val editableBuf = SpannableStringBuilder()
-                private var lastComposing = ""
+            return object : BaseInputConnection(this, true) {
 
-                override fun getEditable(): Editable {
-                    if (editableBuf.isEmpty()) {
-                        Selection.setSelection(editableBuf, 0)
-                    }
-                    return editableBuf
+                private fun flushEditable() {
+                    val content: Editable = editable ?: return
+                    if (content.isEmpty()) return
+                    val str = content.toString()
+                    content.clear()
+                    stopTextSelection()
+                    nativeSendText(str, str.length > 1)
+                    rearmLockedModifiersIfNeeded()
+                    resetScrollAndBlink()
                 }
 
-                private fun applyComposingDiff(newText: String) {
-                    var common = 0
-                    val minLen = min(lastComposing.length, newText.length)
-                    while (common < minLen && lastComposing[common] == newText[common]) {
-                        common++
-                    }
-                    val toDelete = lastComposing.length - common
-                    repeat(toDelete) {
-                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
-                    }
-                    if (common < newText.length) {
-                        nativeSendText(newText.substring(common), false)
-                    }
+                override fun finishComposingText(): Boolean {
+                    super.finishComposingText()
+                    flushEditable()
+                    return true
                 }
 
                 override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                    val committed = text?.toString() ?: ""
-                    stopTextSelection()
-                    if (lastComposing.isNotEmpty()) {
-                        applyComposingDiff(committed)
-                        lastComposing = ""
-                    } else if (committed.isNotEmpty()) {
-                        nativeSendText(committed, false)
-                    }
-                    rearmLockedModifiersIfNeeded()
-                    resetScrollAndBlink()
-                    editableBuf.clear()
+                    super.commitText(text, newCursorPosition)
+                    flushEditable()
                     return true
                 }
 
                 override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                    val composing = text?.toString() ?: ""
-                    stopTextSelection()
-                    applyComposingDiff(composing)
-                    lastComposing = composing
-                    rearmLockedModifiersIfNeeded()
-                    resetScrollAndBlink()
+                    super.setComposingText(text, newCursorPosition)
+                    flushEditable()
                     return true
                 }
 
-                override fun finishComposingText(): Boolean {
-                    lastComposing = ""
-                    editableBuf.clear()
-                    return true
-                }
-
-                override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-                    stopTextSelection()
-                    if (lastComposing.isNotEmpty()) {
-                        val drop = min(beforeLength, lastComposing.length)
-                        lastComposing = lastComposing.dropLast(drop)
+                override fun replaceText(
+                    start: Int,
+                    end: Int,
+                    text: CharSequence,
+                    newCursorPosition: Int,
+                    textAttribute: TextAttribute?
+                ): Boolean {
+                    editable?.clear()
+                    if (text.isNotEmpty()) {
+                        stopTextSelection()
+                        val s = text.toString()
+                        nativeSendText(s, s.length > 1)
+                        rearmLockedModifiersIfNeeded()
+                        resetScrollAndBlink()
                     }
-                    for (i in 0 until beforeLength) {
+                    return true
+                }
+
+                override fun endBatchEdit(): Boolean {
+                    val res = super.endBatchEdit()
+                    flushEditable()
+                    return res
+                }
+
+                override fun performContextMenuAction(id: Int): Boolean {
+                    when (id) {
+                        android.R.id.paste, android.R.id.pasteAsPlainText -> {
+                            stopTextSelection()
+                            pasteFromClipboard()
+                            return true
+                        }
+                        android.R.id.copy -> {
+                            copyToClipboard(nativeGetSelectedText(), true)
+                            stopTextSelection()
+                            return true
+                        }
+                        android.R.id.selectAll -> {
+                            nativeSelectAll(scrollOffset)
+                            showColorOsFloatingActionMode()
+                            invalidateAllRows()
+                            return true
+                        }
+                    }
+                    return super.performContextMenuAction(id)
+                }
+
+                override fun deleteSurroundingText(leftLength: Int, rightLength: Int): Boolean {
+                    stopTextSelection()
+                    for (i in 0 until leftLength) {
                         nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
                     }
-                    for (i in 0 until afterLength) {
+                    for (i in 0 until rightLength) {
                         nativeSendKeyEvent(KeyEvent.KEYCODE_FORWARD_DEL, 0, 0)
                     }
                     rearmLockedModifiersIfNeeded()
                     resetScrollAndBlink()
-                    return true
+                    return super.deleteSurroundingText(leftLength, rightLength)
                 }
 
                 override fun sendKeyEvent(event: KeyEvent): Boolean {
@@ -2052,6 +2158,10 @@ class TermuxActivity : Activity() {
                 stopTextSelection()
             }
 
+            if (keyCode == KeyEvent.KEYCODE_PASTE) {
+                pasteFromClipboard()
+                return true
+            }
             if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
                 val mask = nativeDispatchCustomKey("CTRL")
                 syncModifierButtons(mask)
@@ -2111,7 +2221,6 @@ class TermuxActivity : Activity() {
         @JvmStatic external fun nativeGetModesMask(): Int
         @JvmStatic external fun nativeGetTranscriptText(): String
         @JvmStatic external fun nativeStartTextSelection(scrollOffset: Int, screenCol: Int, screenRow: Int)
-        @JvmStatic external fun nativeUpdateSelectionHandle(isStartHandle: Boolean, col: Int, logicalY: Int)
         @JvmStatic external fun nativeOnSelectionTouchPx(
             action: Int,
             scrollOffset: Int,
@@ -2135,7 +2244,6 @@ class TermuxActivity : Activity() {
         @JvmStatic external fun nativeStopTextSelection(): Boolean
         @JvmStatic external fun nativeIsSelectingText(): Boolean
         @JvmStatic external fun nativeSelectAll(scrollOffset: Int)
-        @JvmStatic external fun nativeGetSelectionSelectors(outSelectors: IntArray)
         @JvmStatic external fun nativeSetDefaultCursorShape(shape: Int)
         @JvmStatic external fun nativeGetSelectedText(): String
     }

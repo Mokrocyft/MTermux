@@ -826,7 +826,10 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     const char* profText =
         "if [ -f \"/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so\" ]; then\n"
         "  export LD_PRELOAD=\"/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so\"\n"
-        "fi\n";
+        "fi\n"
+        "export HISTCONTROL=ignoredups:erasedups\n"
+        "export HISTSIZE=10000\n"
+        "export HISTFILESIZE=20000\n";
     int pfd = open(profPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (pfd >= 0) {
         writeAllFd(pfd, profText, strlen(profText));
@@ -848,6 +851,11 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
         "  export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so\"\n"
         "fi\n"
+        "export HISTCONTROL=ignoredups:erasedups\n"
+        "export HISTSIZE=10000\n"
+        "export HISTFILESIZE=20000\n"
+        "shopt -s histappend 2>/dev/null || true\n"
+        "PROMPT_COMMAND='history -a'\n"
         "alias ll='ls -lah --color=auto'\n"
         "alias update='pkg update -y && pkg upgrade -y'\n"
         "PS1='\\[\\e[1;38;2;110;148;204m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
@@ -2735,14 +2743,6 @@ Java_com_termuxx_app_TermuxActivity_nativeStartTextSelection(
     }
 }
 
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeUpdateSelectionHandle(
-    JNIEnv* /*env*/, jclass /*clazz*/, jboolean isStartHandle, jint col, jint logicalY) {
-    auto eng = getActiveEngineSafe();
-    if (eng) {
-        eng->updateSelectionHandle(isStartHandle == JNI_TRUE, col, logicalY);
-    }
-}
 
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeOnSelectionTouchPx(
@@ -2826,24 +2826,6 @@ Java_com_termuxx_app_TermuxActivity_nativeSelectAll(JNIEnv* /*env*/, jclass /*cl
     }
 }
 
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetSelectionSelectors(JNIEnv* env, jclass /*clazz*/, jintArray outSelectors) {
-    auto eng = getActiveEngineSafe();
-    jint vals[4] = {-1, -1, -1, -1};
-    if (eng) {
-        eng->lock();
-        if (eng->mSelActive) {
-            vals[0] = eng->mSelY1;
-            vals[1] = eng->mSelY2;
-            vals[2] = eng->mSelX1;
-            vals[3] = eng->mSelX2;
-        }
-        eng->unlock();
-    }
-    if (outSelectors && env->GetArrayLength(outSelectors) >= 4) {
-        env->SetIntArrayRegion(outSelectors, 0, 4, vals);
-    }
-}
 
 JNIEXPORT jstring JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeGetSelectedText(JNIEnv* env, jclass /*clazz*/) {
@@ -3005,34 +2987,55 @@ Java_com_termuxx_app_TermuxActivity_nativeSendText(
         return;
     }
 
-    if (isPaste) {
-        std::string sanitized;
-        sanitized.reserve(payload.size());
-        for (size_t i = 0; i < payload.size(); ++i) {
-            if (payload[i] == '\r' && i + 1 < payload.size() && payload[i + 1] == '\n') {
-                sanitized.push_back('\r');
-                i++;
-            } else if (payload[i] == '\n') {
-                sanitized.push_back('\r');
-            } else {
-                sanitized.push_back(payload[i]);
-            }
+    std::string sanitized;
+    sanitized.reserve(payload.size());
+    for (size_t i = 0; i < payload.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(payload[i]);
+        if (c == 0xC2 && i + 1 < payload.size() && static_cast<unsigned char>(payload[i + 1]) == 0xA0) {
+            sanitized.push_back(' ');
+            i++;
+        } else if (c == '\r' && i + 1 < payload.size() && payload[i + 1] == '\n') {
+            sanitized.push_back('\r');
+            i++;
+        } else if (c == '\n') {
+            sanitized.push_back('\r');
+        } else if (isPaste && (c == 0x1B || (c >= 0x80 && c <= 0x9F))) {
+            continue;
+        } else {
+            sanitized.push_back(static_cast<char>(c));
         }
-        if ((engine->mModes.load(std::memory_order_relaxed) & MODE_BRACKETED_PASTE) != 0) {
+    }
+
+    if (isPaste || sanitized.size() > 1) {
+        // Trim accidental leading spaces on pasted commands if at start of input so ignorespace never drops history
+        size_t firstNonSpace = 0;
+        while (firstNonSpace < sanitized.size() && sanitized[firstNonSpace] == ' ') {
+            firstNonSpace++;
+        }
+        if (firstNonSpace > 0 && firstNonSpace < sanitized.size()) {
+            sanitized.erase(0, firstNonSpace);
+        }
+    }
+
+    if (isPaste) {
+        // Only use bracketed paste if text spans multiple lines (contains an internal newline before the end)
+        size_t firstCr = sanitized.find('\r');
+        bool isMultiLine = (firstCr != std::string::npos && firstCr + 1 < sanitized.size());
+        if (isMultiLine && (engine->mModes.load(std::memory_order_relaxed) & MODE_BRACKETED_PASTE) != 0) {
             std::string wrapped = "\x1b[200~" + sanitized + "\x1b[201~";
             engine->writeToPty(wrapped.data(), wrapped.size());
         } else {
             engine->writeToPty(sanitized.data(), sanitized.size());
         }
-    } else if ((ctrl || alt) && !payload.empty()) {
+    } else if ((ctrl || alt) && !sanitized.empty()) {
         size_t consumed = 0;
-        uint32_t cp = decodeFirstUtf8Codepoint(payload, consumed);
+        uint32_t cp = decodeFirstUtf8Codepoint(sanitized, consumed);
         sendCodepointInternal(engine.get(), static_cast<int>(cp), ctrl, alt);
-        if (consumed < payload.size()) {
-            engine->writeToPty(payload.data() + consumed, payload.size() - consumed);
+        if (consumed < sanitized.size()) {
+            engine->writeToPty(sanitized.data() + consumed, sanitized.size() - consumed);
         }
-    } else {
-        engine->writeToPty(payload.data(), payload.size());
+    } else if (!sanitized.empty()) {
+        engine->writeToPty(sanitized.data(), sanitized.size());
     }
 }
 
