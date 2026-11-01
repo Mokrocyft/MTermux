@@ -699,10 +699,13 @@ class TermuxActivity : Activity() {
         return clip.itemCount > 0 && !clip.getItemAt(0).coerceToText(this).isNullOrEmpty()
     }
 
+    private fun makeHeaderButton(label: String, onClick: () -> Unit): TextView =
+        makeHeaderButton(label, onClick, null)
+
     private fun makeHeaderButton(
         label: String,
         onClick: () -> Unit,
-        onLongClick: (() -> Unit)? = null
+        onLongClick: (() -> Unit)?
     ): TextView {
         return TextView(this).apply {
             text = label
