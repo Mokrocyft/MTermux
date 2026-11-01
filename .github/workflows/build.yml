@@ -1,4 +1,4 @@
-name: Build Signed Termux Neo (OnePlus 15 ARM64)
+name: Build Signed Termuxx (C++23 / OnePlus 15 ARM64)
 
 on:
   push:
@@ -30,11 +30,16 @@ jobs:
         run: |
           yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
 
+      - name: Download & Upgrade Bootstrap Packages Inside APK
+        run: |
+          chmod +x ./gradlew scripts/update_bootstrap.py
+          ./gradlew downloadBootstraps downloadJetBrainsMono --warning-mode none --no-problems-report
+          python3 scripts/update_bootstrap.py
+
       - name: Build Signed Debug & Release APKs
         env:
           TERMUX_PACKAGE_VARIANT: apt-android-7
         run: |
-          chmod +x ./gradlew
           ./gradlew assembleDebug assembleRelease --warning-mode none --no-problems-report --stacktrace
           mkdir -p dist
           DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)

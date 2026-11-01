@@ -51,10 +51,10 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 /**
- * Single-File Java Frontend for Termuxx (com.termuxx).
- * Almost 100% of the terminal logic (ZIP bootstrap extraction, 16-byte ELF relocation,
- * PTY fork/poll threads, SIMD VT520/TrueColor parser, session state, and row render packing)
- * executes natively in C++23 (libtermux-core.so + libtermuxx-redirect.so).
+ * Minimalist JNI/Canvas Bridge for Termuxx (com.termuxx).
+ * Delegates terminal emulation, ZIP bootstrap extraction, 16-byte ELF relocation,
+ * interactive text selection (word/URL long-press + draggable handles + floating [Copy|Paste|All|✕] bar),
+ * and PTY management to C++23 (libtermux-core.so + libtermuxx-redirect.so).
  */
 public final class TermuxActivity extends Activity {
 
@@ -66,6 +66,7 @@ public final class TermuxActivity extends Activity {
         "ESC", "TAB", "CTRL", "ALT", "-", "/", "|", "▲", "END",
         "~", "HOME", "PGUP", "PGDN", "$", ":", "◀", "▼", "▶"
     };
+    private static final String[] SEL_ACTIONS = new String[]{"Copy", "Paste", "All", "✕"};
 
     private static final int AMOLED_BLACK = 0xFF000000;
     private static final int KEY_SURFACE  = 0xFF0A0A0A;
@@ -95,18 +96,13 @@ public final class TermuxActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         configureAmoledWindow();
-        loadJetBrainsMonoFont();
-        buildMinimalistAmoledLayout();
-
-        startForegroundService(new Intent(this, KeepAliveService.class));
-    }
-
-    private void loadJetBrainsMonoFont() {
         try {
             mJetBrainsMono = Typeface.createFromAsset(getAssets(), "fonts/JetBrainsMono.ttf");
         } catch (Throwable ignored) {
             mJetBrainsMono = Typeface.MONOSPACE;
         }
+        buildMinimalistAmoledLayout();
+        startForegroundService(new Intent(this, KeepAliveService.class));
     }
 
     private void configureAmoledWindow() {
@@ -145,7 +141,6 @@ public final class TermuxActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(AMOLED_BLACK);
 
-        // 1. Minimalist Pure-Black Header (28dp)
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
@@ -169,16 +164,10 @@ public final class TermuxActivity extends Activity {
 
         header.addView(makeHeaderButton("+", v -> createAndSwitchSession(false)));
         header.addView(makeHeaderButton("#", v -> createAndSwitchSession(true)));
-        header.addView(makeHeaderButton("cp", v -> {
-            String text = nativeGetTranscriptText();
-            if (text != null && !text.isEmpty()) {
-                ClipboardManager cm = getSystemService(ClipboardManager.class);
-                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Termuxx", text));
-                Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show();
-            }
-        }));
+        header.addView(makeHeaderButton("cp", v -> copySelectionOrTranscript()));
         header.addView(makeHeaderButton("ps", v -> pasteFromClipboard()));
         header.addView(makeHeaderButton("kb", v -> {
+            nativeToggleExtraKeys();
             boolean vis = mExtraKeysBar.getVisibility() == View.VISIBLE;
             mExtraKeysBar.setVisibility(vis ? View.GONE : View.VISIBLE);
         }));
@@ -189,11 +178,9 @@ public final class TermuxActivity extends Activity {
         hairline.setBackgroundColor(0xFF121212);
         root.addView(hairline, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
 
-        // 2. 165Hz Hardware-Accelerated Terminal Surface
         mTerminalSurface = new TerminalSurface(this);
         root.addView(mTerminalSurface, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        // 3. Minimalist Borderless AMOLED Extra Keys Bar
         mExtraKeysBar = buildExtraKeysBar();
         root.addView(mExtraKeysBar, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -258,7 +245,7 @@ public final class TermuxActivity extends Activity {
                     case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_CANCEL:
                         mHandler.removeCallbacks(repeatTask);
-                        syncModifierVisuals(nativeGetModifierMask());
+                        syncModifierVisuals(nativeGetUiStateMask());
                         if (keyId != 2 && keyId != 3) key.setBackground(makeKeyBg(KEY_SURFACE));
                         return true;
                     default:
@@ -344,13 +331,24 @@ public final class TermuxActivity extends Activity {
         }
     }
 
-    private void pasteFromClipboard() {
+    void copySelectionOrTranscript() {
+        String text = nativeGetCopyText(mTerminalSurface.mScrollOffset);
+        if (text != null && !text.isEmpty()) {
+            ClipboardManager cm = getSystemService(ClipboardManager.class);
+            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Termuxx", text));
+            Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show();
+        }
+        mTerminalSurface.invalidateRowCache();
+        mTerminalSurface.postInvalidateOnAnimation();
+    }
+
+    void pasteFromClipboard() {
         ClipboardManager cm = getSystemService(ClipboardManager.class);
         if (cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip() != null && cm.getPrimaryClip().getItemCount() > 0) {
             CharSequence text = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
             if (text != null && text.length() > 0) {
                 nativeSendText(text.toString(), true);
-                syncModifierVisuals(nativeGetModifierMask());
+                syncModifierVisuals(nativeGetUiStateMask());
             }
         }
     }
@@ -379,13 +377,17 @@ public final class TermuxActivity extends Activity {
     }
 
     // ========================================================================
-    // 165Hz Hardware RenderNode Surface (Strict Cell-Locked Glyph Positioning)
+    // 165Hz Hardware RenderNode Surface + C++23 Interactive Text Selection
     // ========================================================================
     private final class TerminalSurface extends View implements Choreographer.FrameCallback {
 
         private final Paint mBgPaint = new Paint();
         private final Paint mTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         private final Paint mCursorPaint = new Paint();
+        private final Paint mHandlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint mActionBarBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint mActionBarStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint mActionBarTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         private final Paint mScrollbarPaint = new Paint();
 
         private final OverScroller mScroller;
@@ -398,8 +400,8 @@ public final class TermuxActivity extends Activity {
         int mFontAscentPx;
         int mVisibleRows = 45;
         int mVisibleCols = 72;
+        int mScrollOffset = 0;
 
-        private int mScrollOffset = 0;
         private int mLastRenderedScrollOffset = -1;
         private float mScrollRemainder = 0f;
         private boolean mAttached = false;
@@ -424,6 +426,20 @@ public final class TermuxActivity extends Activity {
 
             mCursorPaint.setStyle(Paint.Style.FILL);
             mCursorPaint.setColor(0xFFD8DEE9);
+
+            mHandlePaint.setStyle(Paint.Style.FILL);
+            mHandlePaint.setColor(0xFF61AFEF);
+
+            mActionBarBgPaint.setStyle(Paint.Style.FILL);
+            mActionBarBgPaint.setColor(0xFF141820);
+
+            mActionBarStrokePaint.setStyle(Paint.Style.STROKE);
+            mActionBarStrokePaint.setStrokeWidth(2f);
+            mActionBarStrokePaint.setColor(0xFF3B4252);
+
+            mActionBarTextPaint.setTypeface(mJetBrainsMono);
+            mActionBarTextPaint.setColor(0xFFE5E9F0);
+            mActionBarTextPaint.setTextAlign(Paint.Align.CENTER);
 
             mScrollbarPaint.setStyle(Paint.Style.FILL);
             mScrollbarPaint.setColor(0x556E7681);
@@ -459,12 +475,11 @@ public final class TermuxActivity extends Activity {
                 @Override
                 public void onLongPress(MotionEvent e) {
                     performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-                    String text = nativeGetTranscriptText();
-                    if (text != null && !text.isEmpty()) {
-                        ClipboardManager cm = getContext().getSystemService(ClipboardManager.class);
-                        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Termuxx", text));
-                        Toast.makeText(getContext(), "Copied", Toast.LENGTH_SHORT).show();
-                    }
+                    int col = (int) (e.getX() / mCellWidthPx);
+                    int row = (int) (e.getY() / mCellHeightPx);
+                    nativeOnLongPress(mScrollOffset, row, col);
+                    invalidateRowCache();
+                    postInvalidateOnAnimation();
                 }
 
                 @Override
@@ -529,6 +544,7 @@ public final class TermuxActivity extends Activity {
         private void updateFontMetrics(float textSizePx) {
             mTextSizePx = textSizePx;
             mTextPaint.setTextSize(textSizePx);
+            mActionBarTextPaint.setTextSize(Math.max(24f, textSizePx * 0.92f));
             Paint.FontMetrics fm = mTextPaint.getFontMetrics();
             mCellWidthPx = Math.max(5f, mTextPaint.measureText("aaaaaaaaaaMMMMMMMMMM0000000000") / 30f);
             mCellHeightPx = Math.max(10, (int) Math.ceil(fm.descent - fm.ascent + fm.leading));
@@ -543,7 +559,7 @@ public final class TermuxActivity extends Activity {
             postInvalidateOnAnimation();
         }
 
-        private void invalidateRowCache() {
+        void invalidateRowCache() {
             for (int i = 0; i < mRowNodeValid.length; ++i) mRowNodeValid[i] = false;
         }
 
@@ -601,10 +617,7 @@ public final class TermuxActivity extends Activity {
                 }
             }
             if (nativeConsumeFrameDirty()) {
-                if (mScrollOffset != 0) {
-                    mScrollOffset = 0;
-                    invalidateRowCache();
-                }
+                invalidateRowCache();
                 invalidate();
             }
             Choreographer.getInstance().postFrameCallback(this);
@@ -618,6 +631,34 @@ public final class TermuxActivity extends Activity {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
+            // If C++23 Interactive Text Selection is active, let C++23 hit-test handles & floating bar first
+            if ((nativeGetUiStateMask() & 8) != 0) {
+                int selAction = nativeOnSelectionTouch(
+                    event.getActionMasked(),
+                    event.getX(),
+                    event.getY(),
+                    mCellWidthPx,
+                    mCellHeightPx,
+                    getWidth()
+                );
+                if (selAction == 2) { // UI_ACTION_COPY_TEXT
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                    copySelectionOrTranscript();
+                    return true;
+                } else if (selAction == 3) { // UI_ACTION_PASTE_CLIPBOARD
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                    pasteFromClipboard();
+                    invalidateRowCache();
+                    postInvalidateOnAnimation();
+                    return true;
+                } else if (selAction != 0) {
+                    if (selAction == 5) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                    invalidateRowCache();
+                    postInvalidateOnAnimation();
+                    return true;
+                }
+            }
+
             mScaleDetector.onTouchEvent(event);
             if (!mScaleDetector.isInProgress()) mGestureDetector.onTouchEvent(event);
             return true;
@@ -681,6 +722,42 @@ public final class TermuxActivity extends Activity {
                         float top = curRow * mCellHeightPx;
                         canvas.drawRect(left, top, left + mCellWidthPx, top + mCellHeightPx, mCursorPaint);
                     }
+                }
+            }
+
+            // C++23 Interactive Selection Handles & Floating Action Bar Overlay
+            long selBounds = nativeGetSelectionBounds();
+            if (selBounds >= 0L) {
+                int r1 = (int) ((selBounds >>> 48) & 0xFFFF);
+                int c1 = (int) ((selBounds >>> 32) & 0xFFFF);
+                int r2 = (int) ((selBounds >>> 16) & 0xFFFF);
+                int c2 = (int) (selBounds & 0xFFFF);
+
+                float h1x = c1 * mCellWidthPx;
+                float h1y = (r1 + 1) * mCellHeightPx;
+                float h2x = (c2 + 1) * mCellWidthPx;
+                float h2y = (r2 + 1) * mCellHeightPx;
+                float rad = Math.max(10f, mCellHeightPx * 0.32f);
+
+                canvas.drawRect(h1x - 2f, r1 * mCellHeightPx, h1x + 2f, h1y + rad, mHandlePaint);
+                canvas.drawRoundRect(h1x - rad, h1y, h1x + rad, h1y + rad * 2f, rad, rad, mHandlePaint);
+
+                canvas.drawRect(h2x - 2f, r2 * mCellHeightPx, h2x + 2f, h2y + rad, mHandlePaint);
+                canvas.drawRoundRect(h2x - rad, h2y, h2x + rad, h2y + rad * 2f, rad, rad, mHandlePaint);
+
+                float barW = Math.min(viewWidth - 32f, mCellWidthPx * 26f);
+                float barH = mCellHeightPx * 1.35f;
+                float barLeft = Math.max(16f, Math.min(viewWidth - barW - 16f, h1x - barW * 0.25f));
+                float barTop = (r1 >= 2) ? (r1 * mCellHeightPx - barH - 14f) : ((r2 + 1) * mCellHeightPx + 28f);
+
+                canvas.drawRoundRect(barLeft, barTop, barLeft + barW, barTop + barH, 14f, 14f, mActionBarBgPaint);
+                canvas.drawRoundRect(barLeft, barTop, barLeft + barW, barTop + barH, 14f, 14f, mActionBarStrokePaint);
+
+                float segW = barW / 4f;
+                float textY = barTop + barH * 0.68f;
+                for (int i = 0; i < 4; ++i) {
+                    float cx = barLeft + segW * (i + 0.5f);
+                    canvas.drawText(SEL_ACTIONS[i].toCharArray(), 0, SEL_ACTIONS[i].length(), cx, textY, mActionBarTextPaint);
                 }
             }
 
@@ -759,7 +836,7 @@ public final class TermuxActivity extends Activity {
                 public boolean commitText(CharSequence text, int newCursorPosition) {
                     if (text != null && text.length() > 0) {
                         nativeSendText(text.toString(), false);
-                        syncModifierVisuals(nativeGetModifierMask());
+                        syncModifierVisuals(nativeGetUiStateMask());
                     }
                     return true;
                 }
@@ -784,7 +861,7 @@ public final class TermuxActivity extends Activity {
             int meta = event.getMetaState();
             int unicode = event.getUnicodeChar(meta & ~(KeyEvent.META_CTRL_ON | KeyEvent.META_ALT_ON));
             int rc = nativeSendKeyEvent(keyCode, unicode, meta);
-            syncModifierVisuals(nativeGetModifierMask());
+            syncModifierVisuals(nativeGetUiStateMask());
             if (rc == 2) {
                 closeSessionAt(nativeGetActiveIndex());
                 return true;
@@ -906,7 +983,11 @@ public final class TermuxActivity extends Activity {
     private static native void nativeResizeActive(int rows, int cols, int cellW, int cellH);
     private static native boolean nativeConsumeFrameDirty();
     private static native int nativeDispatchExtraKey(int keyId);
-    private static native int nativeGetModifierMask();
+    private static native int nativeGetUiStateMask();
+    private static native void nativeToggleExtraKeys();
+    private static native void nativeOnLongPress(int scrollOffset, int row, int col);
+    private static native long nativeGetSelectionBounds();
+    private static native int nativeOnSelectionTouch(int action, float x, float y, float cellW, int cellH, int viewW);
     private static native void nativeSendText(String text, boolean isPaste);
     private static native int nativeSendKeyEvent(int keyCode, int unicodeChar, int metaState);
     private static native void nativeSendMouse(int button, int col, int row, boolean pressed);
@@ -916,5 +997,5 @@ public final class TermuxActivity extends Activity {
     private static native int nativePackRowRender(int scrollOffset, int screenRow, int[] outBgRuns, int[] outGlyphs);
     private static native int nativeGetCursorState();
     private static native int nativeGetModesMask();
-    private static native String nativeGetTranscriptText();
+    private static native String nativeGetCopyText(int scrollOffset);
 }

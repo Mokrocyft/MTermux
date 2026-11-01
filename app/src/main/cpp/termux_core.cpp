@@ -1,14 +1,14 @@
 /*
- * Termuxx — All-In-One C++23 Core Engine (libtermux-core.so)
+ * Termuxx — All-In-One C++23 Engine & UI Controller (libtermux-core.so)
  *
- * Virtually the entire terminal application lives in this C++23 module:
- * 1. Native C++23 ZIP Decompressor (zlib) + 16-Byte ELF/Script Relocator ("com.termux/files" -> "com.termuxx/file")
- * 2. Automatic First-Boot Package Updater (apt-get update && apt-get dist-upgrade -y)
- * 3. Native Multi-Session Manager (User Shell & Root "su" tabs, active session state)
- * 4. Native Extra-Keys Controller (sticky CTRL/ALT state machine & key dispatcher)
- * 5. Multithreaded Non-Blocking PTY Engine (openpty/fork/execve + pthread poll() 64KB reader + waitpid reaper)
- * 6. ARMv9.2 NEON SIMD-Accelerated VT520 / XTerm / 24-Bit TrueColor Terminal Emulator
- * 7. Cell-Locked Row Render Batch Packer (eliminating any possibility of cursor drift)
+ * Subsystems implemented in C++23:
+ * 1. Native C++23 ZIP Decompressor (zlib) + Dual 16-Byte Relocator ("com.termux/files" & "com.termux/cache")
+ * 2. Silent Second-Stage Bootstrap Initializer + APT Cache Configurator (/data/data/com.termuxx/cach/apt/archives/partial)
+ * 3. Multithreaded Non-Blocking PTY Engine (openpty/fork/execve + pthread poll() 64KB reader + waitpid reaper)
+ * 4. ARMv9.2 NEON SIMD-Accelerated VT520 / XTerm / 24-Bit TrueColor Terminal Emulator
+ * 5. Interactive Text Selection Engine (Long-Press Word/URL Selection, Draggable Start/End Handles,
+ *    Selection Highlighting in Row Packer, Floating [Copy | Paste | All | ✕] Action Bar)
+ * 6. Full-Screen C++23 UI Hit-Tester (Top Header Tabs & Actions, Terminal Viewport, 2-Row Extra Keys Bar)
  */
 
 #ifndef _GNU_SOURCE
@@ -16,9 +16,11 @@
 #endif
 
 #include <jni.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -51,7 +53,7 @@ extern const int32_t blob_size;
 
 namespace {
 
-// Canonical paths for com.termuxx (27-byte "/data/data/com.termuxx/file" matches "/data/data/com.termux/files")
+// Canonical paths for com.termuxx (exact 16-byte token lengths matching com.termux)
 constexpr const char APP_ROOT_PATH[]   = "/data/data/com.termuxx";
 constexpr const char FILES_REAL_PATH[] = "/data/data/com.termuxx/file";
 constexpr const char FILES_LINK_PATH[] = "/data/data/com.termuxx/files";
@@ -61,10 +63,14 @@ constexpr const char BIN_PATH[]        = "/data/data/com.termuxx/file/usr/bin";
 constexpr const char LIB_PATH[]        = "/data/data/com.termuxx/file/usr/lib";
 constexpr const char TMP_PATH[]        = "/data/data/com.termuxx/file/usr/tmp";
 constexpr const char HOME_PATH[]       = "/data/data/com.termuxx/file/home";
-constexpr const char CACHE_PATH[]      = "/data/data/com.termuxx/cach";
+constexpr const char CACHE_REAL_PATH[] = "/data/data/com.termuxx/cach";
+constexpr const char CACHE_LINK_PATH[] = "/data/data/com.termuxx/cache";
+constexpr const char APT_ARCHIVES_PARTIAL[] = "/data/data/com.termuxx/cach/apt/archives/partial";
 
-constexpr const char OLD_TOKEN_16[] = "com.termux/files";
-constexpr const char NEW_TOKEN_16[] = "com.termuxx/file";
+constexpr const char OLD_FILES_16[] = "com.termux/files";
+constexpr const char NEW_FILES_16[] = "com.termuxx/file";
+constexpr const char OLD_CACHE_16[] = "com.termux/cache";
+constexpr const char NEW_CACHE_16[] = "com.termuxx/cach";
 constexpr size_t TOKEN_16_LEN = 16;
 
 // Cell style bit flags
@@ -88,9 +94,19 @@ constexpr int MODE_MOUSE_SGR       = 1 << 4;
 constexpr int MODE_BELL_TRIGGERED  = 1 << 5;
 constexpr int MODE_AUTOWRAP        = 1 << 6;
 
-// Pure Dark AMOLED Palette (#000000 background, #E5E9F0 foreground)
-constexpr uint32_t DEFAULT_FG = 0xFFE5E9F0u;
-constexpr uint32_t DEFAULT_BG = 0xFF000000u;
+// Pure Dark AMOLED Palette (#000000 background, #E5E9F0 foreground, #264F78 selection highlight)
+constexpr uint32_t DEFAULT_FG   = 0xFFE5E9F0u;
+constexpr uint32_t DEFAULT_BG   = 0xFF000000u;
+constexpr uint32_t SELECTION_BG = 0xFF264F78u;
+constexpr uint32_t SELECTION_FG = 0xFFFFFFFFu;
+
+// UI Action return codes from C++23 touch handler to Java
+constexpr int UI_ACTION_NONE            = 0;
+constexpr int UI_ACTION_SHOW_KEYBOARD   = 1;
+constexpr int UI_ACTION_COPY_TEXT       = 2;
+constexpr int UI_ACTION_PASTE_CLIPBOARD = 3;
+constexpr int UI_ACTION_EXIT_APP        = 4;
+constexpr int UI_ACTION_HAPTIC_TAP      = 5;
 
 // Android KeyEvent constants
 constexpr int AKEYCODE_ENTER        = 66;
@@ -230,18 +246,23 @@ static inline uint32_t resolveBgColor(uint32_t fg, uint32_t bg, uint16_t flags) 
     return (flags & FLAG_INVERSE) ? fg : bg;
 }
 
-static void patchBufferTokensInPlace(uint8_t* data, size_t len) noexcept {
+static void replaceAllTokens16(uint8_t* data, size_t len, const char* oldTok, const char* newTok) noexcept {
     if (!data || len < TOKEN_16_LEN) return;
     uint8_t* cur = data;
     size_t rem = len;
     while (rem >= TOKEN_16_LEN) {
-        auto* hit = static_cast<uint8_t*>(memmem(cur, rem, OLD_TOKEN_16, TOKEN_16_LEN));
+        auto* hit = static_cast<uint8_t*>(memmem(cur, rem, oldTok, TOKEN_16_LEN));
         if (!hit) break;
-        memcpy(hit, NEW_TOKEN_16, TOKEN_16_LEN);
+        memcpy(hit, newTok, TOKEN_16_LEN);
         size_t adv = static_cast<size_t>(hit - cur) + TOKEN_16_LEN;
         cur += adv;
         rem -= adv;
     }
+}
+
+static void patchBufferTokensInPlace(uint8_t* data, size_t len) noexcept {
+    replaceAllTokens16(data, len, OLD_FILES_16, NEW_FILES_16);
+    replaceAllTokens16(data, len, OLD_CACHE_16, NEW_CACHE_16);
 }
 
 static void writeAllFd(int fd, const void* buf, size_t len) noexcept {
@@ -331,14 +352,9 @@ static inline uint32_t readLe32(const uint8_t* p) noexcept {
            (static_cast<uint32_t>(p[3]) << 24);
 }
 
-/*
- * Pure C++23 ZIP Central Directory Extractor using zlib inflateInit2(-MAX_WBITS).
- * Extracts embedded bootstrap-aarch64.zip directly from .rodata with 0 bytes of Java heap.
- */
 static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noexcept {
     if (!zipData || zipSize < 22) return false;
 
-    // 1. Locate End of Central Directory (EOCD: 0x06054b50)
     size_t minOff = (zipSize > 65557) ? (zipSize - 65557) : 0;
     size_t eocdOff = zipSize;
     for (size_t pos = zipSize - 22; pos >= minOff; --pos) {
@@ -419,7 +435,7 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
                 if (nl == std::string::npos) nl = text.size();
                 std::string line = text.substr(lineStart, nl - lineStart);
                 if (!line.empty() && line.back() == '\r') line.pop_back();
-                size_t arrow = line.find("\xE2\x86\x90"); // UTF-8 "←"
+                size_t arrow = line.find("\xE2\x86\x90"); // "←"
                 if (arrow != std::string::npos && arrow > 0) {
                     std::string oldTarget = line.substr(0, arrow);
                     std::string relLink   = line.substr(arrow + 3);
@@ -435,6 +451,7 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
                           (entryName.rfind("libexec", 0) == 0) ||
                           (entryName.rfind("lib/apt/apt-helper", 0) == 0) ||
                           (entryName.rfind("lib/apt/methods", 0) == 0) ||
+                          (entryName.rfind("etc/termux/bootstrap/", 0) == 0) ||
                           (entryName.rfind("var/lib/dpkg/info/", 0) == 0);
             mode_t fileMode = isExec ? 0700 : 0600;
             int fd = open(dstFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, fileMode);
@@ -459,61 +476,127 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
     return true;
 }
 
-static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir) noexcept {
+static void runSecondStageBootstrapSilently(const char* preloadPath) noexcept {
+    const char* secondStageScript = "/data/data/com.termuxx/file/usr/etc/termux/bootstrap/termux-bootstrap-second-stage.sh";
+    if (access(secondStageScript, X_OK) != 0) return;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        int devNull = open("/dev/null", O_RDWR);
+        if (devNull >= 0) {
+            dup2(devNull, 0);
+            dup2(devNull, 1);
+            dup2(devNull, 2);
+            if (devNull > 2) close(devNull);
+        }
+        setenv("PREFIX", PREFIX_PATH, 1);
+        setenv("HOME", HOME_PATH, 1);
+        setenv("TMPDIR", TMP_PATH, 1);
+        setenv("PATH", "/data/data/com.termuxx/file/usr/bin:/data/data/com.termuxx/file/usr/bin/applets:/system/bin", 1);
+        setenv("LD_LIBRARY_PATH", LIB_PATH, 1);
+        if (preloadPath && access(preloadPath, R_OK) == 0) {
+            setenv("LD_PRELOAD", preloadPath, 1);
+        }
+        setenv("ANDROID__BUILD_VERSION_SDK", "37", 1);
+        execl("/data/data/com.termuxx/file/usr/bin/sh", "sh", secondStageScript, nullptr);
+        _exit(0);
+    } else if (pid > 0) {
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+}
+
+static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool justExtracted) noexcept {
     mkdirsRecursive(APP_ROOT_PATH, 0700);
     mkdirsRecursive(FILES_REAL_PATH, 0700);
     mkdirsRecursive(FILES_LINK_PATH, 0700);
     mkdirsRecursive(HOME_PATH, 0700);
     mkdirsRecursive(TMP_PATH, 0700);
-    mkdirsRecursive(CACHE_PATH, 0700);
+    mkdirsRecursive(APT_ARCHIVES_PARTIAL, 0700);
+    mkdirsRecursive("/data/data/com.termuxx/cache/apt/archives/partial", 0700);
 
     unlink("/data/data/com.termuxx/files/usr");
     symlink(PREFIX_PATH, "/data/data/com.termuxx/files/usr");
     unlink("/data/data/com.termuxx/files/home");
     symlink(HOME_PATH, "/data/data/com.termuxx/files/home");
 
+    std::string dstSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
     if (nativeLibDir && nativeLibDir[0] != '\0') {
         std::string srcSo = std::string(nativeLibDir) + "/libtermuxx-redirect.so";
-        std::string dstSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
         if (access(srcSo.c_str(), R_OK) == 0) {
             copyFileBinary(srcSo.c_str(), dstSo.c_str(), 0755);
         }
     }
 
-    // Write ~/.bashrc with one-time automatic upgrade of all initial packages to latest versions
-    std::string bashrcPath = std::string(HOME_PATH) + "/.bashrc";
-    if (access(bashrcPath.c_str(), F_OK) != 0) {
-        const char* rcText =
-            "export TERM=xterm-256color\n"
-            "export COLORTERM=truecolor\n"
-            "export PREFIX=/data/data/com.termuxx/file/usr\n"
-            "export HOME=/data/data/com.termuxx/file/home\n"
-            "export TMPDIR=/data/data/com.termuxx/file/usr/tmp\n"
-            "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
-            "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
-            "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
-            "  export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so\"\n"
-            "fi\n"
-            "alias ll='ls -lah --color=auto'\n"
-            "alias update='pkg update -y && pkg upgrade -y'\n"
-            "PS1='\\[\\e[1;37m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n"
-            "\n"
-            "# Automatically update all initial bootstrap packages to the latest versions on first launch\n"
-            "if [ ! -f \"$HOME/.termuxx_pkgs_upgraded\" ] && [ -x \"$PREFIX/bin/apt-get\" ]; then\n"
-            "  touch \"$HOME/.termuxx_pkgs_upgraded\"\n"
-            "  echo -e \"\\e[1;90m[termuxx] updating initial packages to latest versions...\\e[0m\"\n"
-            "  (DEBIAN_FRONTEND=noninteractive apt-get update -yq && \\\n"
-            "   DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -yq \\\n"
-            "     -o Dpkg::Options::=\"--force-confdef\" \\\n"
-            "     -o Dpkg::Options::=\"--force-confold\" && \\\n"
-            "   apt-get clean) || rm -f \"$HOME/.termuxx_pkgs_upgraded\"\n"
-            "fi\n";
-        int fd = open(bashrcPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        if (fd >= 0) {
-            writeAllFd(fd, rcText, strlen(rcText));
-            close(fd);
-        }
+    // Ensure apt cache configuration exists in $PREFIX/etc/apt/apt.conf.d/00termuxx
+    mkdirsRecursive("/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d", 0700);
+    const char* aptConfPath = "/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d/00termuxx";
+    const char* aptConfText =
+        "Dir::Cache \"/data/data/com.termuxx/cach/apt\";\n"
+        "Dir::Cache::archives \"/data/data/com.termuxx/cach/apt/archives\";\n";
+    int afd = open(aptConfPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (afd >= 0) {
+        writeAllFd(afd, aptConfText, strlen(aptConfText));
+        close(afd);
     }
+
+    // Ensure profile.d script preserves libtermuxx-redirect.so alongside libtermux-exec
+    mkdirsRecursive("/data/data/com.termuxx/file/usr/etc/profile.d", 0700);
+    const char* profPath = "/data/data/com.termuxx/file/usr/etc/profile.d/99-termuxx-preload.sh";
+    const char* profText =
+        "if [ -f \"/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so\" ]; then\n"
+        "  case \":$LD_PRELOAD:\" in\n"
+        "    *\":/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so:\"*) ;;\n"
+        "    *) export LD_PRELOAD=\"/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so${LD_PRELOAD:+:$LD_PRELOAD}\" ;;\n"
+        "  esac\n"
+        "fi\n";
+    int pfd = open(profPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (pfd >= 0) {
+        writeAllFd(pfd, profText, strlen(profText));
+        close(pfd);
+    }
+
+    if (justExtracted) {
+        runSecondStageBootstrapSilently(dstSo.c_str());
+    }
+
+    // Write minimalist AMOLED ~/.bashrc
+    std::string bashrcPath = std::string(HOME_PATH) + "/.bashrc";
+    const char* rcText =
+        "export TERM=xterm-256color\n"
+        "export COLORTERM=truecolor\n"
+        "export PREFIX=/data/data/com.termuxx/file/usr\n"
+        "export HOME=/data/data/com.termuxx/file/home\n"
+        "export TMPDIR=/data/data/com.termuxx/file/usr/tmp\n"
+        "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
+        "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
+        "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
+        "  case \":$LD_PRELOAD:\" in\n"
+        "    *\":$PREFIX/lib/libtermuxx-redirect.so:\"*) ;;\n"
+        "    *) export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so${LD_PRELOAD:+:$LD_PRELOAD}\" ;;\n"
+        "  esac\n"
+        "fi\n"
+        "alias ll='ls -lah --color=auto'\n"
+        "alias update='pkg update -y && pkg upgrade -y'\n"
+        "PS1='\\[\\e[1;37m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
+    int fd = open(bashrcPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+        writeAllFd(fd, rcText, strlen(rcText));
+        close(fd);
+    }
+
+    // Suppress default noisy MOTD if desired or keep it clean
+    unlink("/data/data/com.termuxx/file/usr/etc/motd");
+}
+
+static bool isWordChar(uint32_t cp) noexcept {
+    if (cp <= 0x20) return false;
+    if (cp < 0x7F) {
+        const char ch = static_cast<char>(cp);
+        return isalnum(static_cast<unsigned char>(ch)) ||
+               ch == '_' || ch == '-' || ch == '.' || ch == '/' || ch == ':' || ch == '~' || ch == '+' || ch == '@';
+    }
+    return true;
 }
 
 class NeoTerminalEngine {
@@ -561,6 +644,11 @@ public:
 
     std::string mWindowTitle;
     bool mTitleChanged = false;
+
+    // Interactive Text Selection State (screen-space coordinates for current scrollOffset)
+    bool mSelActive = false;
+    int mSelR1 = 0, mSelC1 = 0;
+    int mSelR2 = 0, mSelC2 = 0;
 
     int mPtyFd = -1;
     int mShellPid = -1;
@@ -629,6 +717,100 @@ public:
         mFrameDirty.store(true, std::memory_order_release);
     }
 
+    void clearSelection() noexcept {
+        if (mSelActive) {
+            mSelActive = false;
+            markAllDirty();
+        }
+    }
+
+    void selectWordAt(int scrollOffset, int screenRow, int col) noexcept {
+        lock();
+        screenRow = std::clamp(screenRow, 0, mRows - 1);
+        col = std::clamp(col, 0, mCols - 1);
+        const Row& row = getVisualRow(scrollOffset, screenRow);
+
+        int c1 = col;
+        int c2 = col;
+        if (col < static_cast<int>(row.cells.size()) && isWordChar(row.cells[static_cast<size_t>(col)].codepoint)) {
+            while (c1 > 0 && isWordChar(row.cells[static_cast<size_t>(c1 - 1)].codepoint)) c1--;
+            while (c2 + 1 < static_cast<int>(row.cells.size()) && isWordChar(row.cells[static_cast<size_t>(c2 + 1)].codepoint)) c2++;
+        } else {
+            c2 = std::min(mCols - 1, c1 + 4);
+        }
+
+        mSelActive = true;
+        mSelR1 = screenRow;
+        mSelC1 = c1;
+        mSelR2 = screenRow;
+        mSelC2 = c2;
+        markAllDirty();
+        unlock();
+    }
+
+    void selectAll() noexcept {
+        lock();
+        mSelActive = true;
+        mSelR1 = 0;
+        mSelC1 = 0;
+        mSelR2 = mRows - 1;
+        mSelC2 = mCols - 1;
+        markAllDirty();
+        unlock();
+    }
+
+    void normalizedSel(int& r1, int& c1, int& r2, int& c2) const noexcept {
+        if (mSelR1 < mSelR2 || (mSelR1 == mSelR2 && mSelC1 <= mSelC2)) {
+            r1 = mSelR1; c1 = mSelC1; r2 = mSelR2; c2 = mSelC2;
+        } else {
+            r1 = mSelR2; c1 = mSelC2; r2 = mSelR1; c2 = mSelC1;
+        }
+    }
+
+    bool isCellSelected(int screenRow, int col) const noexcept {
+        if (!mSelActive) return false;
+        int r1, c1, r2, c2;
+        normalizedSel(r1, c1, r2, c2);
+        if (screenRow < r1 || screenRow > r2) return false;
+        if (r1 == r2) return col >= c1 && col <= c2;
+        if (screenRow == r1) return col >= c1;
+        if (screenRow == r2) return col <= c2;
+        return true;
+    }
+
+    std::string extractSelectedText(int scrollOffset) const {
+        if (!mSelActive) return "";
+        int r1, c1, r2, c2;
+        normalizedSel(r1, c1, r2, c2);
+
+        std::string out;
+        out.reserve(4096);
+        for (int r = r1; r <= r2; ++r) {
+            const Row& row = getVisualRow(scrollOffset, r);
+            int startCol = (r == r1) ? std::max(0, c1) : 0;
+            int endCol   = (r == r2) ? std::min<int>(mCols - 1, c2) : (mCols - 1);
+
+            int lastNonSpace = startCol - 1;
+            for (int c = endCol; c >= startCol; --c) {
+                if (c < static_cast<int>(row.cells.size()) &&
+                    row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
+                    !(row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL)) {
+                    lastNonSpace = c;
+                    break;
+                }
+            }
+            for (int c = startCol; c <= lastNonSpace; ++c) {
+                const Cell& cell = row.cells[static_cast<size_t>(c)];
+                if (cell.flags & FLAG_WIDE_TRAIL) continue;
+                appendUtf8(out, cell.codepoint);
+            }
+            if (r < r2 && !row.wrapped) {
+                out.push_back('\n');
+            }
+        }
+        return out;
+    }
+
     void reset() noexcept {
         mCurFg = DEFAULT_FG;
         mCurBg = DEFAULT_BG;
@@ -642,6 +824,7 @@ public:
         mModes = MODE_AUTOWRAP;
         mState = State::NORMAL;
         mUtf8BytesNeeded = 0;
+        mSelActive = false;
         for (auto& r : mPrimaryGrid) r.clear();
         for (auto& r : mAltGrid) r.clear();
         mFrameDirty.store(true, std::memory_order_release);
@@ -1253,7 +1436,7 @@ static bool startSessionProcess(
     engine->mStarted = true;
     engine->resize(rows, cols, cellW, cellH);
 
-    initializeEnvironmentAndAutoUpdater(nativeLibDir);
+    initializeEnvironmentAndAutoUpdater(nativeLibDir, false);
     std::string preloadPath = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
 
     static const char* const userShells[] = {
@@ -1403,7 +1586,7 @@ static bool startSessionProcess(
 }
 
 // ============================================================================
-// Global C++23 Multi-Session & Extra-Keys State Machine
+// Global C++23 Multi-Session, Selection & Extra-Keys Controller
 // ============================================================================
 static pthread_mutex_t gGlobalMutex = PTHREAD_MUTEX_INITIALIZER;
 static std::vector<NeoTerminalEngine*> gSessions;
@@ -1412,6 +1595,8 @@ static std::string gNativeLibDir;
 static std::atomic<int> gBootstrapState{0}; // 0 = unchecked, 1 = extracting, 2 = ready
 static bool gCtrlArmed = false;
 static bool gAltArmed  = false;
+static bool gExtraKeysVisible = true;
+static int gDraggingHandle = 0; // 0 = none, 1 = start handle, 2 = end handle
 
 static NeoTerminalEngine* activeEngineLocked() noexcept {
     if (gActiveIdx >= 0 && gActiveIdx < static_cast<int>(gSessions.size())) {
@@ -1519,16 +1704,17 @@ static void sendCodepointInternal(NeoTerminalEngine* engine, int codepoint, bool
 }
 
 static void* bootstrapWorkerThread(void* /*arg*/) {
+    bool extracted = false;
     if (access("/data/data/com.termuxx/file/usr/bin/bash", X_OK) != 0 &&
         access("/data/data/com.termuxx/file/usr/bin/apt", X_OK) != 0 &&
         blob_size > 0) {
-        extractBootstrapInCpp23(reinterpret_cast<const uint8_t*>(blob), static_cast<size_t>(blob_size));
+        extracted = extractBootstrapInCpp23(reinterpret_cast<const uint8_t*>(blob), static_cast<size_t>(blob_size));
     }
     pthread_mutex_lock(&gGlobalMutex);
     std::string libDir = gNativeLibDir;
     pthread_mutex_unlock(&gGlobalMutex);
 
-    initializeEnvironmentAndAutoUpdater(libDir.c_str());
+    initializeEnvironmentAndAutoUpdater(libDir.c_str(), extracted);
     gBootstrapState.store(2, std::memory_order_release);
     return nullptr;
 }
@@ -1553,7 +1739,7 @@ Java_com_termuxx_app_TermuxActivity_nativeInitAndPollBootstrap(JNIEnv* env, jcla
                 }
             }
             if (access("/data/data/com.termuxx/file/usr/bin/bash", X_OK) == 0) {
-                initializeEnvironmentAndAutoUpdater(gNativeLibDir.c_str());
+                initializeEnvironmentAndAutoUpdater(gNativeLibDir.c_str(), false);
                 gBootstrapState.store(2, std::memory_order_release);
                 pthread_mutex_unlock(&gGlobalMutex);
                 return 2;
@@ -1670,9 +1856,6 @@ Java_com_termuxx_app_TermuxActivity_nativeConsumeFrameDirty(JNIEnv* /*env*/, jcl
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeDispatchExtraKey(JNIEnv* /*env*/, jclass /*clazz*/, jint keyId) {
     pthread_mutex_lock(&gGlobalMutex);
-    // keyId:
-    // Row 0: 0=ESC, 1=TAB, 2=CTRL, 3=ALT, 4='-', 5='/', 6='|', 7=UP, 8=END
-    // Row 1: 9='~', 10=HOME, 11=PGUP, 12=PGDN, 13='$', 14=':', 15=LEFT, 16=DOWN, 17=RIGHT
     if (keyId == 2) {
         gCtrlArmed = !gCtrlArmed;
     } else if (keyId == 3) {
@@ -1680,6 +1863,7 @@ Java_com_termuxx_app_TermuxActivity_nativeDispatchExtraKey(JNIEnv* /*env*/, jcla
     } else {
         NeoTerminalEngine* eng = activeEngineLocked();
         if (eng) {
+            eng->clearSelection();
             int meta = (gCtrlArmed ? AMETA_CTRL_ON : 0) | (gAltArmed ? AMETA_ALT_ON : 0);
             switch (keyId) {
                 case 0:  sendKeyCodeInternal(eng, AKEYCODE_ESCAPE, meta); break;
@@ -1704,17 +1888,171 @@ Java_com_termuxx_app_TermuxActivity_nativeDispatchExtraKey(JNIEnv* /*env*/, jcla
         gCtrlArmed = false;
         gAltArmed = false;
     }
-    int modMask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0);
+    int modMask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0) | (gExtraKeysVisible ? 4 : 0);
     pthread_mutex_unlock(&gGlobalMutex);
     return modMask;
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetModifierMask(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_termuxx_app_TermuxActivity_nativeGetUiStateMask(JNIEnv* /*env*/, jclass /*clazz*/) {
     pthread_mutex_lock(&gGlobalMutex);
-    int modMask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    int mask = (gCtrlArmed ? 1 : 0)
+             | (gAltArmed ? 2 : 0)
+             | (gExtraKeysVisible ? 4 : 0)
+             | ((eng && eng->mSelActive) ? 8 : 0);
     pthread_mutex_unlock(&gGlobalMutex);
-    return modMask;
+    return mask;
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeToggleExtraKeys(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    gExtraKeysVisible = !gExtraKeysVisible;
+    NeoTerminalEngine* eng = activeEngineLocked();
+    if (eng) eng->markAllDirty();
+    pthread_mutex_unlock(&gGlobalMutex);
+}
+
+/**
+ * C++23 Interactive Text Selection & Touch Handler:
+ * - nativeOnLongPress(scrollOffset, row, col): selects word/URL at (row, col)
+ * - nativeGetSelectionBounds(): returns packed [r1, c1, r2, c2] or -1 if inactive
+ * - nativeOnSelectionTouch(action, x, y, cellW, cellH, viewW):
+ *     Hit-tests the floating [Copy | Paste | All | ✕] bar AND draggable start/end handles!
+ */
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeOnLongPress(
+    JNIEnv* /*env*/, jclass /*clazz*/, jint scrollOffset, jint row, jint col) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    if (eng) {
+        eng->selectWordAt(scrollOffset, row, col);
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetSelectionBounds(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    if (!eng || !eng->mSelActive) {
+        pthread_mutex_unlock(&gGlobalMutex);
+        return -1L;
+    }
+    int r1, c1, r2, c2;
+    eng->normalizedSel(r1, c1, r2, c2);
+    pthread_mutex_unlock(&gGlobalMutex);
+    return (static_cast<jlong>(r1 & 0xFFFF) << 48) |
+           (static_cast<jlong>(c1 & 0xFFFF) << 32) |
+           (static_cast<jlong>(r2 & 0xFFFF) << 16) |
+           static_cast<jlong>(c2 & 0xFFFF);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeOnSelectionTouch(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jint action,
+    jfloat x,
+    jfloat y,
+    jfloat cellW,
+    jint cellH,
+    jint viewW) {
+
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    if (!eng || !eng->mSelActive) {
+        gDraggingHandle = 0;
+        pthread_mutex_unlock(&gGlobalMutex);
+        return 0; // Not handled by selection overlay
+    }
+
+    int r1, c1, r2, c2;
+    eng->normalizedSel(r1, c1, r2, c2);
+
+    // Floating Action Bar geometry: 280dp-wide centered above r1 (or below r2 if r1 <= 1)
+    float barW = std::min<float>(viewW - 32.0f, cellW * 26.0f);
+    float barH = static_cast<float>(cellH) * 1.35f;
+    float barLeft = std::clamp((c1 * cellW) - barW * 0.25f, 16.0f, std::max(16.0f, viewW - barW - 16.0f));
+    float barTop = (r1 >= 2) ? ((r1 * cellH) - barH - 14.0f) : (((r2 + 1) * cellH) + 28.0f);
+
+    if (action == 0) { // ACTION_DOWN
+        // 1. Check Floating Action Bar buttons: [Copy | Paste | All | ✕]
+        if (x >= barLeft && x <= barLeft + barW && y >= barTop && y <= barTop + barH) {
+            int seg = static_cast<int>(((x - barLeft) / barW) * 4.0f);
+            gDraggingHandle = 0;
+            if (seg == 0) {
+                pthread_mutex_unlock(&gGlobalMutex);
+                return UI_ACTION_COPY_TEXT;
+            } else if (seg == 1) {
+                eng->clearSelection();
+                pthread_mutex_unlock(&gGlobalMutex);
+                return UI_ACTION_PASTE_CLIPBOARD;
+            } else if (seg == 2) {
+                eng->selectAll();
+                pthread_mutex_unlock(&gGlobalMutex);
+                return UI_ACTION_HAPTIC_TAP;
+            } else {
+                eng->clearSelection();
+                pthread_mutex_unlock(&gGlobalMutex);
+                return UI_ACTION_HAPTIC_TAP;
+            }
+        }
+
+        // 2. Check Start Handle & End Handle hit radius
+        float h1x = c1 * cellW;
+        float h1y = (r1 + 1) * cellH;
+        float h2x = (c2 + 1) * cellW;
+        float h2y = (r2 + 1) * cellH;
+        float radius = std::max(48.0f, cellH * 1.4f);
+
+        float d1 = hypotf(x - h1x, y - h1y);
+        float d2 = hypotf(x - h2x, y - h2y);
+        if (d1 <= radius || d2 <= radius) {
+            // Normalize stored coordinates before dragging
+            eng->mSelR1 = r1; eng->mSelC1 = c1;
+            eng->mSelR2 = r2; eng->mSelC2 = c2;
+            gDraggingHandle = (d1 <= d2) ? 1 : 2;
+            pthread_mutex_unlock(&gGlobalMutex);
+            return UI_ACTION_HAPTIC_TAP;
+        }
+
+        // Tapped outside selection -> dismiss selection
+        eng->clearSelection();
+        gDraggingHandle = 0;
+        pthread_mutex_unlock(&gGlobalMutex);
+        return UI_ACTION_HAPTIC_TAP;
+    } else if (action == 2) { // ACTION_MOVE
+        if (gDraggingHandle != 0) {
+            int targetCol = std::clamp(static_cast<int>(x / std::max(1.0f, cellW)), 0, eng->mCols - 1);
+            int targetRow = std::clamp(static_cast<int>((y - cellH * 0.5f) / std::max(1, cellH)), 0, eng->mRows - 1);
+            if (gDraggingHandle == 1) {
+                if (eng->mSelR1 != targetRow || eng->mSelC1 != targetCol) {
+                    eng->mSelR1 = targetRow;
+                    eng->mSelC1 = targetCol;
+                    eng->markAllDirty();
+                }
+            } else {
+                if (eng->mSelR2 != targetRow || eng->mSelC2 != targetCol) {
+                    eng->mSelR2 = targetRow;
+                    eng->mSelC2 = targetCol;
+                    eng->markAllDirty();
+                }
+            }
+            pthread_mutex_unlock(&gGlobalMutex);
+            return 1; // Consumed drag move
+        }
+    } else if (action == 1 || action == 3) { // ACTION_UP / ACTION_CANCEL
+        if (gDraggingHandle != 0) {
+            gDraggingHandle = 0;
+            pthread_mutex_unlock(&gGlobalMutex);
+            return 1;
+        }
+    }
+
+    pthread_mutex_unlock(&gGlobalMutex);
+    return 0;
 }
 
 JNIEXPORT void JNICALL
@@ -1727,6 +2065,7 @@ Java_com_termuxx_app_TermuxActivity_nativeSendText(
     bool alt  = gAltArmed;
     gCtrlArmed = false;
     gAltArmed  = false;
+    if (engine) engine->clearSelection();
     pthread_mutex_unlock(&gGlobalMutex);
     if (!engine) return;
 
@@ -1773,11 +2112,12 @@ Java_com_termuxx_app_TermuxActivity_nativeSendKeyEvent(
         pthread_mutex_unlock(&gGlobalMutex);
         return 0;
     }
+    engine->clearSelection();
 
     if (!engine->mRunning.load(std::memory_order_acquire) &&
         (keyCode == AKEYCODE_ENTER || keyCode == AKEYCODE_NUMPAD_ENTER)) {
         pthread_mutex_unlock(&gGlobalMutex);
-        return 2; // Signal Java to close the finished session
+        return 2;
     }
 
     int meta = metaState | (gCtrlArmed ? AMETA_CTRL_ON : 0) | (gAltArmed ? AMETA_ALT_ON : 0);
@@ -1785,9 +2125,7 @@ Java_com_termuxx_app_TermuxActivity_nativeSendKeyEvent(
     gAltArmed  = false;
     pthread_mutex_unlock(&gGlobalMutex);
 
-    if (sendKeyCodeInternal(engine, keyCode, meta)) {
-        return 1;
-    }
+    if (sendKeyCodeInternal(engine, keyCode, meta)) return 1;
     if (unicodeChar > 0) {
         sendCodepointInternal(engine, unicodeChar, (meta & AMETA_CTRL_ON) != 0, (meta & AMETA_ALT_ON) != 0);
         return 1;
@@ -1870,14 +2208,17 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     int glCount = 0;
 
     if (bgPtr && glPtr) {
+        auto cellBgAt = [&](int c) -> uint32_t {
+            if (engine->isCellSelected(screenRow, c)) return SELECTION_BG;
+            const Cell& cell = row.cells[static_cast<size_t>(c)];
+            return resolveBgColor(cell.fg, cell.bg, cell.flags);
+        };
+
         int runStart = 0;
         while (runStart < cols) {
-            const Cell& c0 = row.cells[static_cast<size_t>(runStart)];
-            uint32_t bg = resolveBgColor(c0.fg, c0.bg, c0.flags);
+            uint32_t bg = cellBgAt(runStart);
             int runEnd = runStart + 1;
-            while (runEnd < cols) {
-                const Cell& c1 = row.cells[static_cast<size_t>(runEnd)];
-                if (resolveBgColor(c1.fg, c1.bg, c1.flags) != bg) break;
+            while (runEnd < cols && cellBgAt(runEnd) == bg) {
                 runEnd++;
             }
             if (bg != DEFAULT_BG) {
@@ -1895,7 +2236,9 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
             if (cell.codepoint <= ' ' || (cell.flags & (FLAG_INVISIBLE | FLAG_WIDE_TRAIL)) != 0) {
                 continue;
             }
-            uint32_t fg = resolveFgColor(cell.fg, cell.bg, cell.flags);
+            uint32_t fg = engine->isCellSelected(screenRow, c)
+                ? SELECTION_FG
+                : resolveFgColor(cell.fg, cell.bg, cell.flags);
             int base = glCount * 4;
             glPtr[base]     = static_cast<jint>(cell.codepoint);
             glPtr[base + 1] = c;
@@ -1934,33 +2277,38 @@ Java_com_termuxx_app_TermuxActivity_nativeGetModesMask(JNIEnv* /*env*/, jclass /
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetTranscriptText(JNIEnv* env, jclass /*clazz*/) {
+Java_com_termuxx_app_TermuxActivity_nativeGetCopyText(
+    JNIEnv* env, jclass /*clazz*/, jint scrollOffset) {
     pthread_mutex_lock(&gGlobalMutex);
     NeoTerminalEngine* engine = activeEngineLocked();
     pthread_mutex_unlock(&gGlobalMutex);
     if (!engine) return env->NewStringUTF("");
 
     std::string out;
-    out.reserve(16384);
-
     engine->lock();
-    int sbCount = (engine->mModes & MODE_ALT_SCREEN) ? 0 : engine->mScrollbackCount;
-    for (int i = -sbCount; i < engine->mRows; ++i) {
-        const Row& row = engine->getVisualRow(0, i);
-        int lastNonSpace = -1;
-        for (int c = static_cast<int>(row.cells.size()) - 1; c >= 0; --c) {
-            if (row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
-                !(row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL)) {
-                lastNonSpace = c;
-                break;
+    if (engine->mSelActive) {
+        out = engine->extractSelectedText(scrollOffset);
+        engine->clearSelection();
+    } else {
+        out.reserve(16384);
+        int sbCount = (engine->mModes & MODE_ALT_SCREEN) ? 0 : engine->mScrollbackCount;
+        for (int i = -sbCount; i < engine->mRows; ++i) {
+            const Row& row = engine->getVisualRow(0, i);
+            int lastNonSpace = -1;
+            for (int c = static_cast<int>(row.cells.size()) - 1; c >= 0; --c) {
+                if (row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
+                    !(row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL)) {
+                    lastNonSpace = c;
+                    break;
+                }
             }
+            for (int c = 0; c <= lastNonSpace; ++c) {
+                const Cell& cell = row.cells[static_cast<size_t>(c)];
+                if (cell.flags & FLAG_WIDE_TRAIL) continue;
+                appendUtf8(out, cell.codepoint);
+            }
+            if (!row.wrapped && i < engine->mRows - 1) out.push_back('\n');
         }
-        for (int c = 0; c <= lastNonSpace; ++c) {
-            const Cell& cell = row.cells[static_cast<size_t>(c)];
-            if (cell.flags & FLAG_WIDE_TRAIL) continue;
-            appendUtf8(out, cell.codepoint);
-        }
-        if (!row.wrapped && i < engine->mRows - 1) out.push_back('\n');
     }
     engine->unlock();
     return env->NewStringUTF(out.c_str());
