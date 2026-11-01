@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(termux-core LANGUAGES C CXX ASM)
+project(termuxx-core LANGUAGES C CXX ASM)
 
 include(CheckCXXCompilerFlag)
 
@@ -18,7 +18,7 @@ set(COMMON_CXX_FLAGS
     -fdata-sections -ffunction-sections
 )
 
-add_library(termux-core SHARED
+add_library(termuxx-core SHARED
     termux-bootstrap-zip.S
     termux_core.cpp
 )
@@ -27,7 +27,7 @@ add_library(termuxx-redirect SHARED
     termuxx_redirect.cpp
 )
 
-target_compile_options(termux-core PRIVATE
+target_compile_options(termuxx-core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${COMMON_CXX_FLAGS}>
     "-Wa,-I${CMAKE_CURRENT_SOURCE_DIR}"
 )
@@ -38,17 +38,17 @@ target_compile_options(termuxx-redirect PRIVATE
 
 check_cxx_compiler_flag("-march=armv9.2-a+sve2+crypto+dotprod+fp16+bf16+i8mm" HAS_ARMV9_2_SVE2)
 if(HAS_ARMV9_2_SVE2)
-    target_compile_options(termux-core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv9.2-a+sve2+crypto+dotprod+fp16+bf16+i8mm>)
+    target_compile_options(termuxx-core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv9.2-a+sve2+crypto+dotprod+fp16+bf16+i8mm>)
     target_compile_options(termuxx-redirect PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv9.2-a+sve2+crypto+dotprod+fp16+bf16+i8mm>)
 else()
-    target_compile_options(termux-core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
+    target_compile_options(termuxx-core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
     target_compile_options(termuxx-redirect PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
 endif()
 
 find_library(log-lib log)
 find_library(z-lib z)
 
-target_link_libraries(termux-core
+target_link_libraries(termuxx-core
     ${log-lib}
     ${z-lib}
 )
@@ -64,5 +64,5 @@ set(COMMON_LINK_FLAGS
     -Wl,-O3
 )
 
-target_link_options(termux-core PRIVATE ${COMMON_LINK_FLAGS})
+target_link_options(termuxx-core PRIVATE ${COMMON_LINK_FLAGS})
 target_link_options(termuxx-redirect PRIVATE ${COMMON_LINK_FLAGS})

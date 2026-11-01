@@ -25,6 +25,12 @@ android {
         ndk {
             abiFilters += setOf("arm64-v8a")
         }
+
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_static")
+            }
+        }
     }
 
     // Embedded signing keystore so both Debug and Release APKs are pre-signed out of the box
@@ -205,11 +211,11 @@ tasks.withType<JavaCompile>().configureEach {
 }
 
 tasks.configureEach {
-    if (name.startsWith("compile") && name.endsWith("Kotlin") ||
+    if (((name.startsWith("compile") && name.endsWith("Kotlin")) ||
         name.startsWith("configureCMake") ||
         name.startsWith("buildCMake") ||
         name.startsWith("externalNativeBuild") ||
-        name.startsWith("merge")
+        name.startsWith("merge"))
     ) {
         dependsOn(downloadBootstraps, downloadJetBrainsMono)
     }

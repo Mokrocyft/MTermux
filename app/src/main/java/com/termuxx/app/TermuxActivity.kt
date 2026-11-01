@@ -1604,7 +1604,11 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
 
     companion object {
         init {
-            System.loadLibrary("termuxx-core")
+            try {
+                System.loadLibrary("termuxx-core")
+            } catch (_: UnsatisfiedLinkError) {
+                System.loadLibrary("termux-core")
+            }
         }
 
         @JvmStatic external fun nativeInitAndPollBootstrap(nativeLibDir: String): Int
