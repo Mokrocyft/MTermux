@@ -1,0 +1,64 @@
+name: Build Signed Termux Neo (OnePlus 15 ARM64)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Pre-Signed Debug & Release APKs (C++23 / Android 17)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+
+      - name: Build Signed Debug & Release APKs
+        env:
+          TERMUX_PACKAGE_VARIANT: apt-android-7
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug assembleRelease --warning-mode none --no-problems-report --stacktrace
+          mkdir -p dist
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          cp -f "$DEBUG_APK" dist/termux-oneplus15-arm64-debug.apk
+          cp -f "$RELEASE_APK" dist/termux-oneplus15-arm64-release.apk
+          APKSIGNER=$(find ${ANDROID_HOME}/build-tools -name apksigner | sort -V | tail -n 1)
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --verbose dist/termux-oneplus15-arm64-debug.apk
+            "$APKSIGNER" verify --verbose dist/termux-oneplus15-arm64-release.apk
+          fi
+          ls -lh dist/*.apk
+          sha256sum dist/*.apk
+
+      - name: Upload Signed Debug APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: termux-oneplus15-arm64-debug
+          path: dist/termux-oneplus15-arm64-debug.apk
+          if-no-files-found: error
+
+      - name: Upload Signed Release APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: termux-oneplus15-arm64-release
+          path: dist/termux-oneplus15-arm64-release.apk
+          if-no-files-found: error

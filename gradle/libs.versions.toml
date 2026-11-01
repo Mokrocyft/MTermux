@@ -1,0 +1,16 @@
+[versions]
+agp = "9.5.0"
+ndk = "30.0.16248370"
+compileSdk = "37"
+minSdk = "35"
+# targetSdk = 28 preserves SELinux execute permissions in /data/data/com.termux/files/usr/bin for apt & pkg
+targetSdk = "28"
+appVersionCode = "200"
+appVersionName = "2.0.0-neo"
+androidx-annotation = "1.9.1"
+
+[libraries]
+androidx-annotation = { module = "androidx.annotation:annotation", version.ref = "androidx-annotation" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
