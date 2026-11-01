@@ -46,9 +46,11 @@ else()
 endif()
 
 find_library(log-lib log)
+find_library(z-lib z)
 
 target_link_libraries(termux-core
     ${log-lib}
+    ${z-lib}
 )
 
 target_link_libraries(termuxx-redirect

@@ -1,13 +1,14 @@
 /*
- * Termuxx Neo — Unified C++23 Native Core
+ * Termuxx — All-In-One C++23 Core Engine (libtermux-core.so)
  *
- * Subsystems implemented in C++23:
- * 1. Zero-Copy Bootstrap Access & 16-Byte Binary Relocator ("com.termux/files" -> "com.termuxx/file")
- * 2. Native Shell & Root ("su") Environment Builder & PTY Process Launcher
- * 3. Multithreaded Non-Blocking PTY Reader & Process Reaper (pthread + poll)
- * 4. ARM NEON SIMD-Accelerated VT520 / XTerm / 24-Bit TrueColor Terminal Engine
- * 5. Native Key / UTF-8 / Bracketed Paste / SGR Mouse Input Encoder
- * 6. Native Row Render Batch Packer (resolving colors & packing cell coordinates for 165Hz RenderNode UI)
+ * Virtually the entire terminal application lives in this C++23 module:
+ * 1. Native C++23 ZIP Decompressor (zlib) + 16-Byte ELF/Script Relocator ("com.termux/files" -> "com.termuxx/file")
+ * 2. Automatic First-Boot Package Updater (apt-get update && apt-get dist-upgrade -y)
+ * 3. Native Multi-Session Manager (User Shell & Root "su" tabs, active session state)
+ * 4. Native Extra-Keys Controller (sticky CTRL/ALT state machine & key dispatcher)
+ * 5. Multithreaded Non-Blocking PTY Engine (openpty/fork/execve + pthread poll() 64KB reader + waitpid reaper)
+ * 6. ARMv9.2 NEON SIMD-Accelerated VT520 / XTerm / 24-Bit TrueColor Terminal Emulator
+ * 7. Cell-Locked Row Render Batch Packer (eliminating any possibility of cursor drift)
  */
 
 #ifndef _GNU_SOURCE
@@ -31,10 +32,12 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include <algorithm>
 #include <atomic>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(__aarch64__)
@@ -48,12 +51,12 @@ extern const int32_t blob_size;
 
 namespace {
 
-// Canonical paths for com.termuxx (note: "/data/data/com.termuxx/file" is 27 bytes,
-// matching "/data/data/com.termux/files" byte-for-byte in all ELF binaries!)
+// Canonical paths for com.termuxx (27-byte "/data/data/com.termuxx/file" matches "/data/data/com.termux/files")
 constexpr const char APP_ROOT_PATH[]   = "/data/data/com.termuxx";
 constexpr const char FILES_REAL_PATH[] = "/data/data/com.termuxx/file";
 constexpr const char FILES_LINK_PATH[] = "/data/data/com.termuxx/files";
 constexpr const char PREFIX_PATH[]     = "/data/data/com.termuxx/file/usr";
+constexpr const char STAGING_PATH[]    = "/data/data/com.termuxx/file/usr-staging";
 constexpr const char BIN_PATH[]        = "/data/data/com.termuxx/file/usr/bin";
 constexpr const char LIB_PATH[]        = "/data/data/com.termuxx/file/usr/lib";
 constexpr const char TMP_PATH[]        = "/data/data/com.termuxx/file/usr/tmp";
@@ -85,11 +88,11 @@ constexpr int MODE_MOUSE_SGR       = 1 << 4;
 constexpr int MODE_BELL_TRIGGERED  = 1 << 5;
 constexpr int MODE_AUTOWRAP        = 1 << 6;
 
-// Pure Dark AMOLED Palette (#000000 background, crisp #E5E9F0 foreground)
+// Pure Dark AMOLED Palette (#000000 background, #E5E9F0 foreground)
 constexpr uint32_t DEFAULT_FG = 0xFFE5E9F0u;
 constexpr uint32_t DEFAULT_BG = 0xFF000000u;
 
-// Android KeyEvent constants (matching android.view.KeyEvent)
+// Android KeyEvent constants
 constexpr int AKEYCODE_ENTER        = 66;
 constexpr int AKEYCODE_NUMPAD_ENTER = 160;
 constexpr int AKEYCODE_DEL          = 67;
@@ -241,24 +244,6 @@ static void patchBufferTokensInPlace(uint8_t* data, size_t len) noexcept {
     }
 }
 
-static void copyFileBinary(const char* srcPath, const char* dstPath, mode_t mode) noexcept {
-    int inFd = open(srcPath, O_RDONLY | O_CLOEXEC);
-    if (inFd < 0) return;
-    int outFd = open(dstPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
-    if (outFd < 0) {
-        close(inFd);
-        return;
-    }
-    uint8_t buf[32768];
-    ssize_t n;
-    while ((n = read(inFd, buf, sizeof(buf))) > 0) {
-        (void)write(outFd, buf, static_cast<size_t>(n));
-    }
-    close(outFd);
-    close(inFd);
-    chmod(dstPath, mode);
-}
-
 static void writeAllFd(int fd, const void* buf, size_t len) noexcept {
     if (fd < 0 || !buf || len == 0) return;
     const auto* p = static_cast<const uint8_t*>(buf);
@@ -271,6 +256,263 @@ static void writeAllFd(int fd, const void* buf, size_t len) noexcept {
         }
         p += n;
         left -= static_cast<size_t>(n);
+    }
+}
+
+static void copyFileBinary(const char* srcPath, const char* dstPath, mode_t mode) noexcept {
+    int inFd = open(srcPath, O_RDONLY | O_CLOEXEC);
+    if (inFd < 0) return;
+    int outFd = open(dstPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    if (outFd < 0) {
+        close(inFd);
+        return;
+    }
+    uint8_t buf[65536];
+    ssize_t n;
+    while ((n = read(inFd, buf, sizeof(buf))) > 0) {
+        writeAllFd(outFd, buf, static_cast<size_t>(n));
+    }
+    close(outFd);
+    close(inFd);
+    chmod(dstPath, mode);
+}
+
+static void mkdirsRecursive(const char* dirPath, mode_t mode = 0700) noexcept {
+    char tmp[1024];
+    snprintf(tmp, sizeof(tmp), "%s", dirPath);
+    size_t len = strlen(tmp);
+    if (len == 0) return;
+    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
+    for (char* p = tmp + 1; *p; ++p) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, mode);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, mode);
+}
+
+static void mkdirsForFile(const char* filePath, mode_t mode = 0700) noexcept {
+    const char* lastSlash = strrchr(filePath, '/');
+    if (!lastSlash || lastSlash == filePath) return;
+    std::string parent(filePath, static_cast<size_t>(lastSlash - filePath));
+    mkdirsRecursive(parent.c_str(), mode);
+}
+
+static void removeRecursiveNative(const char* path) noexcept {
+    struct stat st{};
+    if (lstat(path, &st) != 0) return;
+    if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+        DIR* d = opendir(path);
+        if (d) {
+            struct dirent* de;
+            while ((de = readdir(d)) != nullptr) {
+                if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+                std::string child = std::string(path) + "/" + de->d_name;
+                removeRecursiveNative(child.c_str());
+            }
+            closedir(d);
+        }
+        rmdir(path);
+    } else {
+        unlink(path);
+    }
+}
+
+static inline uint16_t readLe16(const uint8_t* p) noexcept {
+    return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+}
+
+static inline uint32_t readLe32(const uint8_t* p) noexcept {
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
+}
+
+/*
+ * Pure C++23 ZIP Central Directory Extractor using zlib inflateInit2(-MAX_WBITS).
+ * Extracts embedded bootstrap-aarch64.zip directly from .rodata with 0 bytes of Java heap.
+ */
+static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noexcept {
+    if (!zipData || zipSize < 22) return false;
+
+    // 1. Locate End of Central Directory (EOCD: 0x06054b50)
+    size_t minOff = (zipSize > 65557) ? (zipSize - 65557) : 0;
+    size_t eocdOff = zipSize;
+    for (size_t pos = zipSize - 22; pos >= minOff; --pos) {
+        if (readLe32(zipData + pos) == 0x06054b50u) {
+            eocdOff = pos;
+            break;
+        }
+        if (pos == 0) break;
+    }
+    if (eocdOff == zipSize) return false;
+
+    uint16_t totalEntries = readLe16(zipData + eocdOff + 10);
+    uint32_t cdSize       = readLe32(zipData + eocdOff + 12);
+    uint32_t cdOffset     = readLe32(zipData + eocdOff + 16);
+    if (static_cast<size_t>(cdOffset) + cdSize > zipSize) return false;
+
+    removeRecursiveNative(STAGING_PATH);
+    mkdirsRecursive(STAGING_PATH, 0700);
+
+    std::vector<uint8_t> outBuf;
+    outBuf.reserve(512 * 1024);
+    std::vector<std::pair<std::string, std::string>> symlinks;
+    symlinks.reserve(1024);
+
+    size_t ptr = cdOffset;
+    for (uint16_t i = 0; i < totalEntries && ptr + 46 <= zipSize; ++i) {
+        if (readLe32(zipData + ptr) != 0x02014b50u) break;
+
+        uint16_t method    = readLe16(zipData + ptr + 10);
+        uint32_t compSize  = readLe32(zipData + ptr + 20);
+        uint32_t uncompSz  = readLe32(zipData + ptr + 24);
+        uint16_t nameLen   = readLe16(zipData + ptr + 28);
+        uint16_t extraLen  = readLe16(zipData + ptr + 30);
+        uint16_t commLen   = readLe16(zipData + ptr + 32);
+        uint32_t lfhOffset = readLe32(zipData + ptr + 42);
+
+        if (ptr + 46 + nameLen > zipSize) break;
+        std::string entryName(reinterpret_cast<const char*>(zipData + ptr + 46), nameLen);
+        ptr += 46 + nameLen + extraLen + commLen;
+
+        if (lfhOffset + 30 > zipSize || readLe32(zipData + lfhOffset) != 0x04034b50u) continue;
+        uint16_t lfhNameLen  = readLe16(zipData + lfhOffset + 26);
+        uint16_t lfhExtraLen = readLe16(zipData + lfhOffset + 28);
+        size_t dataOffset = static_cast<size_t>(lfhOffset) + 30 + lfhNameLen + lfhExtraLen;
+        if (dataOffset + compSize > zipSize) continue;
+
+        if (!entryName.empty() && entryName.back() == '/') {
+            std::string dirPath = std::string(STAGING_PATH) + "/" + entryName;
+            mkdirsRecursive(dirPath.c_str(), 0700);
+            continue;
+        }
+
+        outBuf.resize(uncompSz);
+        if (uncompSz > 0) {
+            if (method == 0 && compSize == uncompSz) {
+                memcpy(outBuf.data(), zipData + dataOffset, uncompSz);
+            } else if (method == Z_DEFLATED) {
+                z_stream strm{};
+                strm.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(zipData + dataOffset));
+                strm.avail_in = compSize;
+                strm.next_out = reinterpret_cast<Bytef*>(outBuf.data());
+                strm.avail_out = uncompSz;
+                if (inflateInit2(&strm, -MAX_WBITS) != Z_OK) continue;
+                int ret = inflate(&strm, Z_FINISH);
+                inflateEnd(&strm);
+                if (ret != Z_STREAM_END) continue;
+            } else {
+                continue;
+            }
+            patchBufferTokensInPlace(outBuf.data(), outBuf.size());
+        }
+
+        if (entryName == "SYMLINKS.txt") {
+            std::string text(reinterpret_cast<const char*>(outBuf.data()), outBuf.size());
+            size_t lineStart = 0;
+            while (lineStart < text.size()) {
+                size_t nl = text.find('\n', lineStart);
+                if (nl == std::string::npos) nl = text.size();
+                std::string line = text.substr(lineStart, nl - lineStart);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                size_t arrow = line.find("\xE2\x86\x90"); // UTF-8 "←"
+                if (arrow != std::string::npos && arrow > 0) {
+                    std::string oldTarget = line.substr(0, arrow);
+                    std::string relLink   = line.substr(arrow + 3);
+                    std::string fullLink  = std::string(STAGING_PATH) + "/" + relLink;
+                    symlinks.emplace_back(std::move(oldTarget), std::move(fullLink));
+                }
+                lineStart = nl + 1;
+            }
+        } else {
+            std::string dstFile = std::string(STAGING_PATH) + "/" + entryName;
+            mkdirsForFile(dstFile.c_str(), 0700);
+            bool isExec = (entryName.rfind("bin/", 0) == 0) ||
+                          (entryName.rfind("libexec", 0) == 0) ||
+                          (entryName.rfind("lib/apt/apt-helper", 0) == 0) ||
+                          (entryName.rfind("lib/apt/methods", 0) == 0) ||
+                          (entryName.rfind("var/lib/dpkg/info/", 0) == 0);
+            mode_t fileMode = isExec ? 0700 : 0600;
+            int fd = open(dstFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, fileMode);
+            if (fd >= 0) {
+                if (!outBuf.empty()) writeAllFd(fd, outBuf.data(), outBuf.size());
+                close(fd);
+                if (isExec) chmod(dstFile.c_str(), 0700);
+            }
+        }
+    }
+
+    for (const auto& pair : symlinks) {
+        mkdirsForFile(pair.second.c_str(), 0700);
+        unlink(pair.second.c_str());
+        symlink(pair.first.c_str(), pair.second.c_str());
+    }
+
+    removeRecursiveNative(PREFIX_PATH);
+    if (rename(STAGING_PATH, PREFIX_PATH) != 0) {
+        return false;
+    }
+    return true;
+}
+
+static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir) noexcept {
+    mkdirsRecursive(APP_ROOT_PATH, 0700);
+    mkdirsRecursive(FILES_REAL_PATH, 0700);
+    mkdirsRecursive(FILES_LINK_PATH, 0700);
+    mkdirsRecursive(HOME_PATH, 0700);
+    mkdirsRecursive(TMP_PATH, 0700);
+    mkdirsRecursive(CACHE_PATH, 0700);
+
+    unlink("/data/data/com.termuxx/files/usr");
+    symlink(PREFIX_PATH, "/data/data/com.termuxx/files/usr");
+    unlink("/data/data/com.termuxx/files/home");
+    symlink(HOME_PATH, "/data/data/com.termuxx/files/home");
+
+    if (nativeLibDir && nativeLibDir[0] != '\0') {
+        std::string srcSo = std::string(nativeLibDir) + "/libtermuxx-redirect.so";
+        std::string dstSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
+        if (access(srcSo.c_str(), R_OK) == 0) {
+            copyFileBinary(srcSo.c_str(), dstSo.c_str(), 0755);
+        }
+    }
+
+    // Write ~/.bashrc with one-time automatic upgrade of all initial packages to latest versions
+    std::string bashrcPath = std::string(HOME_PATH) + "/.bashrc";
+    if (access(bashrcPath.c_str(), F_OK) != 0) {
+        const char* rcText =
+            "export TERM=xterm-256color\n"
+            "export COLORTERM=truecolor\n"
+            "export PREFIX=/data/data/com.termuxx/file/usr\n"
+            "export HOME=/data/data/com.termuxx/file/home\n"
+            "export TMPDIR=/data/data/com.termuxx/file/usr/tmp\n"
+            "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
+            "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
+            "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
+            "  export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so\"\n"
+            "fi\n"
+            "alias ll='ls -lah --color=auto'\n"
+            "alias update='pkg update -y && pkg upgrade -y'\n"
+            "PS1='\\[\\e[1;37m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n"
+            "\n"
+            "# Automatically update all initial bootstrap packages to the latest versions on first launch\n"
+            "if [ ! -f \"$HOME/.termuxx_pkgs_upgraded\" ] && [ -x \"$PREFIX/bin/apt-get\" ]; then\n"
+            "  touch \"$HOME/.termuxx_pkgs_upgraded\"\n"
+            "  echo -e \"\\e[1;90m[termuxx] updating initial packages to latest versions...\\e[0m\"\n"
+            "  (DEBIAN_FRONTEND=noninteractive apt-get update -yq && \\\n"
+            "   DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -yq \\\n"
+            "     -o Dpkg::Options::=\"--force-confdef\" \\\n"
+            "     -o Dpkg::Options::=\"--force-confold\" && \\\n"
+            "   apt-get clean) || rm -f \"$HOME/.termuxx_pkgs_upgraded\"\n"
+            "fi\n";
+        int fd = open(bashrcPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            writeAllFd(fd, rcText, strlen(rcText));
+            close(fd);
+        }
     }
 }
 
@@ -320,22 +562,23 @@ public:
     std::string mWindowTitle;
     bool mTitleChanged = false;
 
-    // Native PTY & Thread state
     int mPtyFd = -1;
     int mShellPid = -1;
     bool mIsRoot = false;
+    bool mStarted = false;
     std::atomic<bool> mRunning{false};
     std::atomic<bool> mFrameDirty{true};
     std::atomic<int> mExitCode{0};
     pthread_t mReaderThread{};
     bool mThreadStarted = false;
 
-    NeoTerminalEngine(int rows, int cols, int maxScrollback)
+    NeoTerminalEngine(int rows, int cols, int maxScrollback, bool isRoot)
         : mRows(std::max(2, rows)),
           mCols(std::max(4, cols)),
           mMaxScrollback(std::max(100, maxScrollback)),
           mScrollTop(0),
-          mScrollBottom(std::max(2, rows) - 1) {
+          mScrollBottom(std::max(2, rows) - 1),
+          mIsRoot(isRoot) {
         pthread_mutex_init(&mMutex, nullptr);
         initPalette();
         mPrimaryGrid.reserve(static_cast<size_t>(mRows));
@@ -357,22 +600,10 @@ public:
 
     void initPalette() noexcept {
         static constexpr uint32_t base16[16] = {
-            0xFF000000u, // 0: Pure AMOLED Black
-            0xFFE06C75u, // 1: Red
-            0xFF98C379u, // 2: Green
-            0xFFE5C07Bu, // 3: Yellow
-            0xFF61AFEFu, // 4: Blue
-            0xFFC678DDu, // 5: Magenta
-            0xFF56B6C2u, // 6: Cyan
-            0xFFABB2BFu, // 7: White
-            0xFF5C6370u, // 8: Bright Black (Gray)
-            0xFFFF7A85u, // 9: Bright Red
-            0xFFB5E890u, // 10: Bright Green
-            0xFFFFD68Au, // 11: Bright Yellow
-            0xFF82C8FFu, // 12: Bright Blue
-            0xFFDE98F5u, // 13: Bright Magenta
-            0xFF70D6E3u, // 14: Bright Cyan
-            0xFFFFFFFFu  // 15: Bright White
+            0xFF000000u, 0xFFE06C75u, 0xFF98C379u, 0xFFE5C07Bu,
+            0xFF61AFEFu, 0xFFC678DDu, 0xFF56B6C2u, 0xFFABB2BFu,
+            0xFF5C6370u, 0xFFFF7A85u, 0xFFB5E890u, 0xFFFFD68Au,
+            0xFF82C8FFu, 0xFFDE98F5u, 0xFF70D6E3u, 0xFFFFFFFFu
         };
         for (int i = 0; i < 16; ++i) mPalette[i] = base16[i];
         static constexpr uint8_t cube[6] = {0, 95, 135, 175, 215, 255};
@@ -575,104 +806,58 @@ public:
 
     void handleControlChar(uint8_t b) noexcept {
         switch (b) {
-            case 0x07:
-                mModes |= MODE_BELL_TRIGGERED;
-                break;
-            case 0x08:
-                mPendingWrap = false;
-                if (mCursorCol > 0) mCursorCol--;
-                break;
-            case 0x09: {
-                mPendingWrap = false;
-                int nextTab = (mCursorCol & ~7) + 8;
-                mCursorCol = std::min(mCols - 1, nextTab);
-                break;
-            }
+            case 0x07: mModes |= MODE_BELL_TRIGGERED; break;
+            case 0x08: mPendingWrap = false; if (mCursorCol > 0) mCursorCol--; break;
+            case 0x09: mPendingWrap = false; mCursorCol = std::min(mCols - 1, (mCursorCol & ~7) + 8); break;
             case 0x0A:
             case 0x0B:
-            case 0x0C:
-                lineFeed();
-                break;
-            case 0x0D:
-                mPendingWrap = false;
-                mCursorCol = 0;
-                break;
-            case 0x1B:
-                mState = State::ESC;
-                break;
-            default:
-                break;
+            case 0x0C: lineFeed(); break;
+            case 0x0D: mPendingWrap = false; mCursorCol = 0; break;
+            case 0x1B: mState = State::ESC; break;
+            default: break;
         }
     }
 
     void handleSgr() noexcept {
-        if (mCsiParams.empty()) {
-            mCsiParams.push_back(0);
-        }
+        if (mCsiParams.empty()) mCsiParams.push_back(0);
         for (size_t i = 0; i < mCsiParams.size(); ++i) {
             int p = mCsiParams[i];
-            if (p <= 0) {
-                mCurFg = DEFAULT_FG;
-                mCurBg = DEFAULT_BG;
-                mCurFlags = 0;
-            } else if (p == 1) {
-                mCurFlags |= FLAG_BOLD;
-            } else if (p == 2) {
-                mCurFlags |= FLAG_DIM;
-            } else if (p == 3) {
-                mCurFlags |= FLAG_ITALIC;
-            } else if (p == 4) {
-                mCurFlags |= FLAG_UNDERLINE;
-            } else if (p == 5 || p == 6) {
-                mCurFlags |= FLAG_BLINK;
-            } else if (p == 7) {
-                mCurFlags |= FLAG_INVERSE;
-            } else if (p == 8) {
-                mCurFlags |= FLAG_INVISIBLE;
-            } else if (p == 9) {
-                mCurFlags |= FLAG_STRIKETHROUGH;
-            } else if (p == 21 || p == 22) {
-                mCurFlags &= ~(FLAG_BOLD | FLAG_DIM);
-            } else if (p == 23) {
-                mCurFlags &= ~FLAG_ITALIC;
-            } else if (p == 24) {
-                mCurFlags &= ~FLAG_UNDERLINE;
-            } else if (p == 25) {
-                mCurFlags &= ~FLAG_BLINK;
-            } else if (p == 27) {
-                mCurFlags &= ~FLAG_INVERSE;
-            } else if (p == 28) {
-                mCurFlags &= ~FLAG_INVISIBLE;
-            } else if (p == 29) {
-                mCurFlags &= ~FLAG_STRIKETHROUGH;
-            } else if (p >= 30 && p <= 37) {
-                mCurFg = mPalette[p - 30];
-            } else if (p == 39) {
-                mCurFg = DEFAULT_FG;
-            } else if (p >= 40 && p <= 47) {
-                mCurBg = mPalette[p - 40];
-            } else if (p == 49) {
-                mCurBg = DEFAULT_BG;
-            } else if (p >= 90 && p <= 97) {
-                mCurFg = mPalette[8 + (p - 90)];
-            } else if (p >= 100 && p <= 107) {
-                mCurBg = mPalette[8 + (p - 100)];
-            } else if (p == 38 || p == 48) {
+            if (p <= 0) { mCurFg = DEFAULT_FG; mCurBg = DEFAULT_BG; mCurFlags = 0; }
+            else if (p == 1) mCurFlags |= FLAG_BOLD;
+            else if (p == 2) mCurFlags |= FLAG_DIM;
+            else if (p == 3) mCurFlags |= FLAG_ITALIC;
+            else if (p == 4) mCurFlags |= FLAG_UNDERLINE;
+            else if (p == 5 || p == 6) mCurFlags |= FLAG_BLINK;
+            else if (p == 7) mCurFlags |= FLAG_INVERSE;
+            else if (p == 8) mCurFlags |= FLAG_INVISIBLE;
+            else if (p == 9) mCurFlags |= FLAG_STRIKETHROUGH;
+            else if (p == 21 || p == 22) mCurFlags &= ~(FLAG_BOLD | FLAG_DIM);
+            else if (p == 23) mCurFlags &= ~FLAG_ITALIC;
+            else if (p == 24) mCurFlags &= ~FLAG_UNDERLINE;
+            else if (p == 25) mCurFlags &= ~FLAG_BLINK;
+            else if (p == 27) mCurFlags &= ~FLAG_INVERSE;
+            else if (p == 28) mCurFlags &= ~FLAG_INVISIBLE;
+            else if (p == 29) mCurFlags &= ~FLAG_STRIKETHROUGH;
+            else if (p >= 30 && p <= 37) mCurFg = mPalette[p - 30];
+            else if (p == 39) mCurFg = DEFAULT_FG;
+            else if (p >= 40 && p <= 47) mCurBg = mPalette[p - 40];
+            else if (p == 49) mCurBg = DEFAULT_BG;
+            else if (p >= 90 && p <= 97) mCurFg = mPalette[8 + (p - 90)];
+            else if (p >= 100 && p <= 107) mCurBg = mPalette[8 + (p - 100)];
+            else if (p == 38 || p == 48) {
                 bool isFg = (p == 38);
                 if (i + 1 < mCsiParams.size()) {
                     int mode = mCsiParams[i + 1];
                     if (mode == 5 && i + 2 < mCsiParams.size()) {
                         int idx = std::clamp(mCsiParams[i + 2], 0, 255);
-                        if (isFg) mCurFg = mPalette[idx];
-                        else mCurBg = mPalette[idx];
+                        if (isFg) mCurFg = mPalette[idx]; else mCurBg = mPalette[idx];
                         i += 2;
                     } else if (mode == 2 && i + 4 < mCsiParams.size()) {
                         uint32_t r = static_cast<uint32_t>(std::clamp(mCsiParams[i + 2], 0, 255));
                         uint32_t g = static_cast<uint32_t>(std::clamp(mCsiParams[i + 3], 0, 255));
                         uint32_t b = static_cast<uint32_t>(std::clamp(mCsiParams[i + 4], 0, 255));
                         uint32_t color = 0xFF000000u | (r << 16) | (g << 8) | b;
-                        if (isFg) mCurFg = color;
-                        else mCurBg = color;
+                        if (isFg) mCurFg = color; else mCurBg = color;
                         i += 4;
                     }
                 }
@@ -682,17 +867,9 @@ public:
 
     void setDecPrivateMode(int mode, bool enabled) noexcept {
         switch (mode) {
-            case 1:
-                if (enabled) mModes |= MODE_APP_CURSOR_KEYS;
-                else mModes &= ~MODE_APP_CURSOR_KEYS;
-                break;
-            case 7:
-                if (enabled) mModes |= MODE_AUTOWRAP;
-                else mModes &= ~MODE_AUTOWRAP;
-                break;
-            case 25:
-                mCursorVisible = enabled;
-                break;
+            case 1: if (enabled) mModes |= MODE_APP_CURSOR_KEYS; else mModes &= ~MODE_APP_CURSOR_KEYS; break;
+            case 7: if (enabled) mModes |= MODE_AUTOWRAP; else mModes &= ~MODE_AUTOWRAP; break;
+            case 25: mCursorVisible = enabled; break;
             case 47:
             case 1047:
             case 1049: {
@@ -702,9 +879,7 @@ public:
                     mSavedColPrimary = mCursorCol;
                     mModes |= MODE_ALT_SCREEN;
                     for (auto& r : mAltGrid) r.clear(DEFAULT_FG, DEFAULT_BG, 0);
-                    mCursorRow = 0;
-                    mCursorCol = 0;
-                    mPendingWrap = false;
+                    mCursorRow = 0; mCursorCol = 0; mPendingWrap = false;
                     markAllDirty();
                 } else if (!enabled && currentlyAlt) {
                     mModes &= ~MODE_ALT_SCREEN;
@@ -717,20 +892,10 @@ public:
             }
             case 1000:
             case 1002:
-            case 1003:
-                if (enabled) mModes |= MODE_MOUSE_TRACKING;
-                else mModes &= ~MODE_MOUSE_TRACKING;
-                break;
-            case 1006:
-                if (enabled) mModes |= MODE_MOUSE_SGR;
-                else mModes &= ~MODE_MOUSE_SGR;
-                break;
-            case 2004:
-                if (enabled) mModes |= MODE_BRACKETED_PASTE;
-                else mModes &= ~MODE_BRACKETED_PASTE;
-                break;
-            default:
-                break;
+            case 1003: if (enabled) mModes |= MODE_MOUSE_TRACKING; else mModes &= ~MODE_MOUSE_TRACKING; break;
+            case 1006: if (enabled) mModes |= MODE_MOUSE_SGR; else mModes &= ~MODE_MOUSE_SGR; break;
+            case 2004: if (enabled) mModes |= MODE_BRACKETED_PASTE; else mModes &= ~MODE_BRACKETED_PASTE; break;
+            default: break;
         }
     }
 
@@ -742,7 +907,6 @@ public:
             if (idx >= mCsiParams.size() || mCsiParams[idx] <= 0) return defVal;
             return mCsiParams[idx];
         };
-
         auto& grid = activeGrid();
 
         if (mCsiPrefix == '?') {
@@ -754,47 +918,21 @@ public:
         }
 
         switch (finalByte) {
-            case 'A':
-                mPendingWrap = false;
-                mCursorRow = std::max(mScrollTop, mCursorRow - param(0, 1));
-                break;
-            case 'B':
-                mPendingWrap = false;
-                mCursorRow = std::min(mScrollBottom, mCursorRow + param(0, 1));
-                break;
-            case 'C':
-                mPendingWrap = false;
-                mCursorCol = std::min(mCols - 1, mCursorCol + param(0, 1));
-                break;
-            case 'D':
-                mPendingWrap = false;
-                mCursorCol = std::max(0, mCursorCol - param(0, 1));
-                break;
-            case 'E':
-                mPendingWrap = false;
-                mCursorCol = 0;
-                mCursorRow = std::min(mScrollBottom, mCursorRow + param(0, 1));
-                break;
-            case 'F':
-                mPendingWrap = false;
-                mCursorCol = 0;
-                mCursorRow = std::max(mScrollTop, mCursorRow - param(0, 1));
-                break;
+            case 'A': mPendingWrap = false; mCursorRow = std::max(mScrollTop, mCursorRow - param(0, 1)); break;
+            case 'B': mPendingWrap = false; mCursorRow = std::min(mScrollBottom, mCursorRow + param(0, 1)); break;
+            case 'C': mPendingWrap = false; mCursorCol = std::min(mCols - 1, mCursorCol + param(0, 1)); break;
+            case 'D': mPendingWrap = false; mCursorCol = std::max(0, mCursorCol - param(0, 1)); break;
+            case 'E': mPendingWrap = false; mCursorCol = 0; mCursorRow = std::min(mScrollBottom, mCursorRow + param(0, 1)); break;
+            case 'F': mPendingWrap = false; mCursorCol = 0; mCursorRow = std::max(mScrollTop, mCursorRow - param(0, 1)); break;
             case 'G':
-            case '`':
-                mPendingWrap = false;
-                mCursorCol = std::clamp(param(0, 1) - 1, 0, mCols - 1);
-                break;
+            case '`': mPendingWrap = false; mCursorCol = std::clamp(param(0, 1) - 1, 0, mCols - 1); break;
             case 'H':
             case 'f':
                 mPendingWrap = false;
                 mCursorRow = std::clamp(param(0, 1) - 1, 0, mRows - 1);
                 mCursorCol = std::clamp(param(1, 1) - 1, 0, mCols - 1);
                 break;
-            case 'd':
-                mPendingWrap = false;
-                mCursorRow = std::clamp(param(0, 1) - 1, 0, mRows - 1);
-                break;
+            case 'd': mPendingWrap = false; mCursorRow = std::clamp(param(0, 1) - 1, 0, mRows - 1); break;
             case 'J': {
                 int mode = mCsiParams.empty() ? 0 : mCsiParams[0];
                 if (mode == 0) {
@@ -809,10 +947,7 @@ public:
                     cur.dirty = true;
                 } else if (mode == 2 || mode == 3) {
                     for (int r = 0; r < mRows; ++r) grid[static_cast<size_t>(r)].clear(mCurFg, mCurBg, 0);
-                    if (mode == 3) {
-                        mScrollbackHead = 0;
-                        mScrollbackCount = 0;
-                    }
+                    if (mode == 3) { mScrollbackHead = 0; mScrollbackCount = 0; }
                 }
                 break;
             }
@@ -829,84 +964,46 @@ public:
                 }
                 break;
             }
-            case 'L':
-                if (mCursorRow >= mScrollTop && mCursorRow <= mScrollBottom) {
-                    scrollDown(mCursorRow, mScrollBottom, param(0, 1));
-                }
-                break;
-            case 'M':
-                if (mCursorRow >= mScrollTop && mCursorRow <= mScrollBottom) {
-                    scrollUp(mCursorRow, mScrollBottom, param(0, 1));
-                }
-                break;
+            case 'L': if (mCursorRow >= mScrollTop && mCursorRow <= mScrollBottom) scrollDown(mCursorRow, mScrollBottom, param(0, 1)); break;
+            case 'M': if (mCursorRow >= mScrollTop && mCursorRow <= mScrollBottom) scrollUp(mCursorRow, mScrollBottom, param(0, 1)); break;
             case '@': {
                 int count = std::min(param(0, 1), mCols - mCursorCol);
                 Row& cur = grid[static_cast<size_t>(mCursorRow)];
                 cur.dirty = true;
-                for (int c = mCols - 1; c >= mCursorCol + count; --c) {
-                    cur.cells[static_cast<size_t>(c)] = cur.cells[static_cast<size_t>(c - count)];
-                }
-                for (int c = mCursorCol; c < mCursorCol + count; ++c) {
-                    cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
-                }
+                for (int c = mCols - 1; c >= mCursorCol + count; --c) cur.cells[static_cast<size_t>(c)] = cur.cells[static_cast<size_t>(c - count)];
+                for (int c = mCursorCol; c < mCursorCol + count; ++c) cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
                 break;
             }
             case 'P': {
                 int count = std::min(param(0, 1), mCols - mCursorCol);
                 Row& cur = grid[static_cast<size_t>(mCursorRow)];
                 cur.dirty = true;
-                for (int c = mCursorCol; c < mCols - count; ++c) {
-                    cur.cells[static_cast<size_t>(c)] = cur.cells[static_cast<size_t>(c + count)];
-                }
-                for (int c = mCols - count; c < mCols; ++c) {
-                    cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
-                }
+                for (int c = mCursorCol; c < mCols - count; ++c) cur.cells[static_cast<size_t>(c)] = cur.cells[static_cast<size_t>(c + count)];
+                for (int c = mCols - count; c < mCols; ++c) cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
                 break;
             }
             case 'X': {
                 int count = std::min(param(0, 1), mCols - mCursorCol);
                 Row& cur = grid[static_cast<size_t>(mCursorRow)];
                 cur.dirty = true;
-                for (int c = mCursorCol; c < mCursorCol + count; ++c) {
-                    cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
-                }
+                for (int c = mCursorCol; c < mCursorCol + count; ++c) cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
                 break;
             }
-            case 'S':
-                scrollUp(mScrollTop, mScrollBottom, param(0, 1));
-                break;
-            case 'T':
-                scrollDown(mScrollTop, mScrollBottom, param(0, 1));
-                break;
+            case 'S': scrollUp(mScrollTop, mScrollBottom, param(0, 1)); break;
+            case 'T': scrollDown(mScrollTop, mScrollBottom, param(0, 1)); break;
             case 'r': {
                 int top = std::clamp(param(0, 1) - 1, 0, mRows - 1);
                 int bottom = std::clamp(param(1, mRows) - 1, 0, mRows - 1);
-                if (top < bottom) {
-                    mScrollTop = top;
-                    mScrollBottom = bottom;
-                    mCursorRow = 0;
-                    mCursorCol = 0;
-                    mPendingWrap = false;
-                }
+                if (top < bottom) { mScrollTop = top; mScrollBottom = bottom; mCursorRow = 0; mCursorCol = 0; mPendingWrap = false; }
                 break;
             }
-            case 'm':
-                handleSgr();
-                break;
-            case 's':
-                mSavedRowPrimary = mCursorRow;
-                mSavedColPrimary = mCursorCol;
-                break;
-            case 'u':
-                mCursorRow = std::clamp(mSavedRowPrimary, 0, mRows - 1);
-                mCursorCol = std::clamp(mSavedColPrimary, 0, mCols - 1);
-                mPendingWrap = false;
-                break;
+            case 'm': handleSgr(); break;
+            case 's': mSavedRowPrimary = mCursorRow; mSavedColPrimary = mCursorCol; break;
+            case 'u': mCursorRow = std::clamp(mSavedRowPrimary, 0, mRows - 1); mCursorCol = std::clamp(mSavedColPrimary, 0, mCols - 1); mPendingWrap = false; break;
             case 'n': {
                 int p = param(0, 0);
-                if (p == 5) {
-                    reply += "\x1b[0n";
-                } else if (p == 6) {
+                if (p == 5) reply += "\x1b[0n";
+                else if (p == 6) {
                     char buf[32];
                     snprintf(buf, sizeof(buf), "\x1b[%d;%dR", mCursorRow + 1, mCursorCol + 1);
                     reply += buf;
@@ -914,14 +1011,10 @@ public:
                 break;
             }
             case 'c':
-                if (mCsiPrefix == 0) {
-                    reply += "\x1b[?62;22c";
-                } else if (mCsiPrefix == '>') {
-                    reply += "\x1b[>41;350;0c";
-                }
+                if (mCsiPrefix == 0) reply += "\x1b[?62;22c";
+                else if (mCsiPrefix == '>') reply += "\x1b[>41;350;0c";
                 break;
-            default:
-                break;
+            default: break;
         }
     }
 
@@ -983,19 +1076,14 @@ public:
                 } else if ((b & 0xC0) == 0x80) {
                     if (mUtf8BytesNeeded > 0) {
                         mUtf8Codepoint = (mUtf8Codepoint << 6) | (b & 0x3F);
-                        if (--mUtf8BytesNeeded == 0) {
-                            emitCodepoint(mUtf8Codepoint);
-                        }
+                        if (--mUtf8BytesNeeded == 0) emitCodepoint(mUtf8Codepoint);
                     }
                 } else if ((b & 0xE0) == 0xC0) {
-                    mUtf8Codepoint = b & 0x1F;
-                    mUtf8BytesNeeded = 1;
+                    mUtf8Codepoint = b & 0x1F; mUtf8BytesNeeded = 1;
                 } else if ((b & 0xF0) == 0xE0) {
-                    mUtf8Codepoint = b & 0x0F;
-                    mUtf8BytesNeeded = 2;
+                    mUtf8Codepoint = b & 0x0F; mUtf8BytesNeeded = 2;
                 } else if ((b & 0xF8) == 0xF0) {
-                    mUtf8Codepoint = b & 0x07;
-                    mUtf8BytesNeeded = 3;
+                    mUtf8Codepoint = b & 0x07; mUtf8BytesNeeded = 3;
                 } else {
                     mUtf8BytesNeeded = 0;
                 }
@@ -1005,89 +1093,46 @@ public:
             switch (mState) {
                 case State::ESC:
                     if (b == '[') {
-                        mState = State::CSI;
-                        mCsiPrefix = 0;
-                        mCsiIntermediate = 0;
-                        mCsiParams.clear();
-                        mCurParam = -1;
+                        mState = State::CSI; mCsiPrefix = 0; mCsiIntermediate = 0; mCsiParams.clear(); mCurParam = -1;
                     } else if (b == ']') {
-                        mState = State::OSC;
-                        mOscBuffer.clear();
+                        mState = State::OSC; mOscBuffer.clear();
                     } else if (b == '(' || b == ')' || b == '*' || b == '+') {
                         mState = State::CHARSET;
                     } else {
                         if (b == '7') {
-                            mSavedRowPrimary = mCursorRow;
-                            mSavedColPrimary = mCursorCol;
-                            mSavedFg = mCurFg;
-                            mSavedBg = mCurBg;
-                            mSavedFlags = mCurFlags;
+                            mSavedRowPrimary = mCursorRow; mSavedColPrimary = mCursorCol;
+                            mSavedFg = mCurFg; mSavedBg = mCurBg; mSavedFlags = mCurFlags;
                         } else if (b == '8') {
                             mCursorRow = std::clamp(mSavedRowPrimary, 0, mRows - 1);
                             mCursorCol = std::clamp(mSavedColPrimary, 0, mCols - 1);
-                            mCurFg = mSavedFg;
-                            mCurBg = mSavedBg;
-                            mCurFlags = mSavedFlags;
-                            mPendingWrap = false;
-                        } else if (b == 'D') {
-                            lineFeed();
-                        } else if (b == 'E') {
-                            mCursorCol = 0;
-                            lineFeed();
-                        } else if (b == 'M') {
-                            reverseIndex();
-                        } else if (b == 'c') {
-                            reset();
-                        }
+                            mCurFg = mSavedFg; mCurBg = mSavedBg; mCurFlags = mSavedFlags; mPendingWrap = false;
+                        } else if (b == 'D') lineFeed();
+                        else if (b == 'E') { mCursorCol = 0; lineFeed(); }
+                        else if (b == 'M') reverseIndex();
+                        else if (b == 'c') reset();
                         mState = State::NORMAL;
                     }
                     break;
-
-                case State::CHARSET:
-                    mState = State::NORMAL;
-                    break;
-
+                case State::CHARSET: mState = State::NORMAL; break;
                 case State::CSI:
-                    if (b == 0x1B) {
-                        mState = State::ESC;
-                    } else if (b >= '0' && b <= '9') {
-                        mCurParam = (mCurParam < 0 ? 0 : mCurParam * 10) + (b - '0');
-                    } else if (b == ';' || b == ':') {
-                        mCsiParams.push_back(mCurParam < 0 ? 0 : mCurParam);
-                        mCurParam = -1;
-                    } else if (b >= '<' && b <= '?') {
-                        mCsiPrefix = static_cast<char>(b);
-                    } else if (b >= 0x20 && b <= 0x2F) {
-                        mCsiIntermediate = static_cast<char>(b);
-                    } else if (b >= 0x40 && b <= 0x7E) {
-                        dispatchCsi(static_cast<char>(b), reply);
-                        mState = State::NORMAL;
-                    } else if (b < 0x20) {
-                        handleControlChar(b);
-                    }
+                    if (b == 0x1B) mState = State::ESC;
+                    else if (b >= '0' && b <= '9') mCurParam = (mCurParam < 0 ? 0 : mCurParam * 10) + (b - '0');
+                    else if (b == ';' || b == ':') { mCsiParams.push_back(mCurParam < 0 ? 0 : mCurParam); mCurParam = -1; }
+                    else if (b >= '<' && b <= '?') mCsiPrefix = static_cast<char>(b);
+                    else if (b >= 0x20 && b <= 0x2F) mCsiIntermediate = static_cast<char>(b);
+                    else if (b >= 0x40 && b <= 0x7E) { dispatchCsi(static_cast<char>(b), reply); mState = State::NORMAL; }
+                    else if (b < 0x20) handleControlChar(b);
                     break;
-
                 case State::OSC:
-                    if (b == 0x07) {
-                        handleOscComplete();
-                        mState = State::NORMAL;
-                    } else if (b == 0x1B) {
-                        mState = State::OSC_ESC;
-                    } else if (mOscBuffer.size() < 1024) {
-                        mOscBuffer.push_back(static_cast<char>(b));
-                    }
+                    if (b == 0x07) { handleOscComplete(); mState = State::NORMAL; }
+                    else if (b == 0x1B) mState = State::OSC_ESC;
+                    else if (mOscBuffer.size() < 1024) mOscBuffer.push_back(static_cast<char>(b));
                     break;
-
                 case State::OSC_ESC:
-                    if (b == '\\') {
-                        handleOscComplete();
-                    }
+                    if (b == '\\') handleOscComplete();
                     mState = State::NORMAL;
                     break;
-
-                default:
-                    mState = State::NORMAL;
-                    break;
+                default: mState = State::NORMAL; break;
             }
         }
         mFrameDirty.store(true, std::memory_order_release);
@@ -1144,9 +1189,7 @@ public:
                 lock();
                 processStream(buf, static_cast<size_t>(n), reply);
                 unlock();
-                if (!reply.empty()) {
-                    writeAllFd(fd, reply.data(), reply.size());
-                }
+                if (!reply.empty()) writeAllFd(fd, reply.data(), reply.size());
             }
         }
 
@@ -1177,17 +1220,9 @@ public:
 
     void stopSession() noexcept {
         mRunning.store(false, std::memory_order_release);
-        if (mShellPid > 0) {
-            kill(mShellPid, SIGHUP);
-        }
-        if (mPtyFd >= 0) {
-            close(mPtyFd);
-            mPtyFd = -1;
-        }
-        if (mThreadStarted) {
-            pthread_join(mReaderThread, nullptr);
-            mThreadStarted = false;
-        }
+        if (mShellPid > 0) kill(mShellPid, SIGHUP);
+        if (mPtyFd >= 0) { close(mPtyFd); mPtyFd = -1; }
+        if (mThreadStarted) { pthread_join(mReaderThread, nullptr); mThreadStarted = false; }
     }
 
     void writeToPty(const void* data, size_t len) noexcept {
@@ -1205,30 +1240,21 @@ static const char* resolveExecutable(const char* const* candidates, size_t count
 
 static bool startSessionProcess(
     NeoTerminalEngine* engine,
-    bool asRoot,
     const char* nativeLibDir,
     int rows,
     int cols,
     int cellW,
     int cellH) noexcept {
 
-    engine->mIsRoot = asRoot;
+    if (engine->mStarted) {
+        engine->resize(rows, cols, cellW, cellH);
+        return true;
+    }
+    engine->mStarted = true;
     engine->resize(rows, cols, cellW, cellH);
 
-    // Ensure directories exist
-    mkdir(FILES_REAL_PATH, 0700);
-    mkdir(HOME_PATH, 0700);
-    mkdir(TMP_PATH, 0700);
-    mkdir(CACHE_PATH, 0700);
-
-    // Copy libtermuxx-redirect.so into $PREFIX/lib if not yet present
+    initializeEnvironmentAndAutoUpdater(nativeLibDir);
     std::string preloadPath = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
-    if (nativeLibDir && nativeLibDir[0] != '\0') {
-        std::string apkSo = std::string(nativeLibDir) + "/libtermuxx-redirect.so";
-        if (access(apkSo.c_str(), R_OK) == 0) {
-            copyFileBinary(apkSo.c_str(), preloadPath.c_str(), 0755);
-        }
-    }
 
     static const char* const userShells[] = {
         "/data/data/com.termuxx/file/usr/bin/zsh",
@@ -1271,7 +1297,7 @@ static bool startSessionProcess(
     std::string execPath;
     std::vector<std::string> argStrings;
 
-    if (asRoot) {
+    if (engine->mIsRoot) {
         execPath = resolveExecutable(suBins, 7);
         std::string rootCmd =
             "export PATH=\"" + std::string(BIN_PATH) + ":" + std::string(BIN_PATH) + "/applets:/sbin:/system/bin:/system/xbin:$PATH\"; "
@@ -1289,30 +1315,21 @@ static bool startSessionProcess(
         argStrings.push_back(execPath);
         argStrings.push_back("-c");
         argStrings.push_back(rootCmd);
-        engine->mWindowTitle = "root #";
     } else if (hasLogin) {
         execPath = loginBin;
         argStrings.push_back("-login");
-        engine->mWindowTitle = "bash";
     } else {
         execPath = userShell;
         argStrings.push_back("-sh");
-        engine->mWindowTitle = "sh";
     }
 
     int ptm = open("/dev/ptmx", O_RDWR | O_CLOEXEC);
     if (ptm < 0) return false;
 
-    if (grantpt(ptm) != 0 || unlockpt(ptm) != 0) {
-        close(ptm);
-        return false;
-    }
+    if (grantpt(ptm) != 0 || unlockpt(ptm) != 0) { close(ptm); return false; }
 
     char devname[64];
-    if (ptsname_r(ptm, devname, sizeof(devname)) != 0) {
-        close(ptm);
-        return false;
-    }
+    if (ptsname_r(ptm, devname, sizeof(devname)) != 0) { close(ptm); return false; }
 
     struct termios tios{};
     tcgetattr(ptm, &tios);
@@ -1334,10 +1351,7 @@ static bool startSessionProcess(
     ioctl(ptm, TIOCSWINSZ, &sz);
 
     pid_t pid = fork();
-    if (pid < 0) {
-        close(ptm);
-        return false;
-    }
+    if (pid < 0) { close(ptm); return false; }
 
     if (pid == 0) {
         sigset_t mask;
@@ -1367,13 +1381,8 @@ static bool startSessionProcess(
         }
 
         clearenv();
-        for (const auto& s : envStrings) {
-            putenv(strdup(s.c_str()));
-        }
-
-        if (chdir(HOME_PATH) != 0) {
-            (void)chdir("/");
-        }
+        for (const auto& s : envStrings) putenv(strdup(s.c_str()));
+        if (chdir(HOME_PATH) != 0) (void)chdir("/");
 
         std::vector<char*> argv;
         for (const auto& a : argStrings) argv.push_back(strdup(a.c_str()));
@@ -1393,205 +1402,26 @@ static bool startSessionProcess(
     return true;
 }
 
-} // namespace
+// ============================================================================
+// Global C++23 Multi-Session & Extra-Keys State Machine
+// ============================================================================
+static pthread_mutex_t gGlobalMutex = PTHREAD_MUTEX_INITIALIZER;
+static std::vector<NeoTerminalEngine*> gSessions;
+static int gActiveIdx = -1;
+static std::string gNativeLibDir;
+static std::atomic<int> gBootstrapState{0}; // 0 = unchecked, 1 = extracting, 2 = ready
+static bool gCtrlArmed = false;
+static bool gAltArmed  = false;
 
-extern "C" {
-
-JNIEXPORT jobject JNICALL
-Java_com_termuxx_app_NativeBridge_getBootstrapBuffer(JNIEnv* env, jclass /*clazz*/) {
-    if (blob_size <= 0) return nullptr;
-    return env->NewDirectByteBuffer(const_cast<jbyte*>(blob), static_cast<jlong>(blob_size));
-}
-
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_NativeBridge_patchBytesInPlace(JNIEnv* env, jclass /*clazz*/, jbyteArray buf, jint len) {
-    if (!buf || len < static_cast<jint>(TOKEN_16_LEN)) return;
-    auto* raw = static_cast<uint8_t*>(env->GetPrimitiveArrayCritical(buf, nullptr));
-    if (raw) {
-        patchBufferTokensInPlace(raw, static_cast<size_t>(len));
-        env->ReleasePrimitiveArrayCritical(buf, raw, 0);
+static NeoTerminalEngine* activeEngineLocked() noexcept {
+    if (gActiveIdx >= 0 && gActiveIdx < static_cast<int>(gSessions.size())) {
+        return gSessions[static_cast<size_t>(gActiveIdx)];
     }
+    return nullptr;
 }
 
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_NativeBridge_finalizeBootstrapNative(JNIEnv* env, jclass /*clazz*/, jstring nativeLibDir) {
-    mkdir(APP_ROOT_PATH, 0700);
-    mkdir(FILES_REAL_PATH, 0700);
-    mkdir(FILES_LINK_PATH, 0700);
-    mkdir(HOME_PATH, 0700);
-    mkdir(TMP_PATH, 0700);
-    mkdir(CACHE_PATH, 0700);
-
-    // Bridge /data/data/com.termuxx/files/{usr,home} <-> /data/data/com.termuxx/file/{usr,home}
-    unlink("/data/data/com.termuxx/files/usr");
-    symlink(PREFIX_PATH, "/data/data/com.termuxx/files/usr");
-    unlink("/data/data/com.termuxx/files/home");
-    symlink(HOME_PATH, "/data/data/com.termuxx/files/home");
-
-    if (nativeLibDir != nullptr) {
-        const char* libUtf = env->GetStringUTFChars(nativeLibDir, nullptr);
-        if (libUtf) {
-            std::string srcSo = std::string(libUtf) + "/libtermuxx-redirect.so";
-            std::string dstSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
-            copyFileBinary(srcSo.c_str(), dstSo.c_str(), 0755);
-            env->ReleaseStringUTFChars(nativeLibDir, libUtf);
-        }
-    }
-
-    // Write minimalist AMOLED ~/.bashrc if not present
-    std::string bashrcPath = std::string(HOME_PATH) + "/.bashrc";
-    if (access(bashrcPath.c_str(), F_OK) != 0) {
-        const char* rcText =
-            "export TERM=xterm-256color\n"
-            "export COLORTERM=truecolor\n"
-            "export PREFIX=/data/data/com.termuxx/file/usr\n"
-            "export HOME=/data/data/com.termuxx/file/home\n"
-            "export TMPDIR=/data/data/com.termuxx/file/usr/tmp\n"
-            "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
-            "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
-            "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
-            "  export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so\"\n"
-            "fi\n"
-            "alias ll='ls -lah --color=auto'\n"
-            "alias update='pkg update && pkg upgrade -y'\n"
-            "PS1='\\[\\e[1;37m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
-        int fd = open(bashrcPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        if (fd >= 0) {
-            writeAllFd(fd, rcText, strlen(rcText));
-            close(fd);
-        }
-    }
-}
-
-JNIEXPORT jlong JNICALL
-Java_com_termuxx_app_NativeBridge_createEngine(
-    JNIEnv* /*env*/, jclass /*clazz*/, jint rows, jint cols, jint scrollbackRows) {
-    auto* engine = new NeoTerminalEngine(rows, cols, scrollbackRows);
-    return reinterpret_cast<jlong>(engine);
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_NativeBridge_startSession(
-    JNIEnv* env,
-    jclass /*clazz*/,
-    jlong handle,
-    jboolean asRoot,
-    jstring nativeLibDir,
-    jint rows,
-    jint cols,
-    jint cellW,
-    jint cellH) {
-    if (!handle) return JNI_FALSE;
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
-    const char* libUtf = nativeLibDir ? env->GetStringUTFChars(nativeLibDir, nullptr) : nullptr;
-    bool ok = startSessionProcess(engine, asRoot == JNI_TRUE, libUtf, rows, cols, cellW, cellH);
-    if (libUtf) env->ReleaseStringUTFChars(nativeLibDir, libUtf);
-    return ok ? JNI_TRUE : JNI_FALSE;
-}
-
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_NativeBridge_destroyEngine(JNIEnv* /*env*/, jclass /*clazz*/, jlong handle) {
-    delete reinterpret_cast<NeoTerminalEngine*>(handle);
-}
-
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_NativeBridge_resizeEngine(
-    JNIEnv* /*env*/, jclass /*clazz*/, jlong handle, jint rows, jint cols, jint cellW, jint cellH) {
-    if (!handle) return;
-    reinterpret_cast<NeoTerminalEngine*>(handle)->resize(rows, cols, cellW, cellH);
-}
-
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_NativeBridge_resetEngine(JNIEnv* /*env*/, jclass /*clazz*/, jlong handle) {
-    if (!handle) return;
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
-    engine->lock();
-    engine->reset();
-    engine->unlock();
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_NativeBridge_isRunning(JNIEnv* /*env*/, jclass /*clazz*/, jlong handle) {
-    if (!handle) return JNI_FALSE;
-    return reinterpret_cast<NeoTerminalEngine*>(handle)->mRunning.load(std::memory_order_acquire) ? JNI_TRUE : JNI_FALSE;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_NativeBridge_consumeFrameDirty(JNIEnv* /*env*/, jclass /*clazz*/, jlong handle) {
-    if (!handle) return JNI_FALSE;
-    return reinterpret_cast<NeoTerminalEngine*>(handle)->mFrameDirty.exchange(false, std::memory_order_acq_rel)
-        ? JNI_TRUE
-        : JNI_FALSE;
-}
-
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_NativeBridge_sendText(
-    JNIEnv* env, jclass /*clazz*/, jlong handle, jstring text, jboolean isPaste) {
-    if (!handle || !text) return;
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
-    const char* utf = env->GetStringUTFChars(text, nullptr);
-    if (!utf) return;
-
-    std::string payload(utf);
-    env->ReleaseStringUTFChars(text, utf);
-
-    if (isPaste) {
-        // Normalize newlines for terminal paste
-        std::string sanitized;
-        sanitized.reserve(payload.size());
-        for (size_t i = 0; i < payload.size(); ++i) {
-            if (payload[i] == '\r' && i + 1 < payload.size() && payload[i + 1] == '\n') {
-                sanitized.push_back('\r');
-                i++;
-            } else if (payload[i] == '\n') {
-                sanitized.push_back('\r');
-            } else {
-                sanitized.push_back(payload[i]);
-            }
-        }
-        bool bracketed = (engine->mModes & MODE_BRACKETED_PASTE) != 0;
-        if (bracketed) {
-            std::string wrapped = "\x1b[200~" + sanitized + "\x1b[201~";
-            engine->writeToPty(wrapped.data(), wrapped.size());
-        } else {
-            engine->writeToPty(sanitized.data(), sanitized.size());
-        }
-    } else {
-        engine->writeToPty(payload.data(), payload.size());
-    }
-}
-
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_NativeBridge_sendCodepoint(
-    JNIEnv* /*env*/, jclass /*clazz*/, jlong handle, jint cp, jboolean ctrlDown, jboolean altDown) {
-    if (!handle) return;
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
-
-    int codepoint = cp;
-    if (ctrlDown) {
-        if (codepoint >= 'a' && codepoint <= 'z') codepoint = codepoint - 'a' + 1;
-        else if (codepoint >= 'A' && codepoint <= 'Z') codepoint = codepoint - 'A' + 1;
-        else if (codepoint == ' ' || codepoint == '2' || codepoint == '@') codepoint = 0;
-        else if (codepoint == '[' || codepoint == '3') codepoint = 27;
-        else if (codepoint == '\\' || codepoint == '4') codepoint = 28;
-        else if (codepoint == ']' || codepoint == '5') codepoint = 29;
-        else if (codepoint == '^' || codepoint == '6') codepoint = 30;
-        else if (codepoint == '_' || codepoint == '/' || codepoint == '7') codepoint = 31;
-        else if (codepoint == '8' || codepoint == '?') codepoint = 127;
-    }
-
-    std::string out;
-    if (altDown) out.push_back('\x1b');
-    appendUtf8(out, static_cast<uint32_t>(codepoint));
-    engine->writeToPty(out.data(), out.size());
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_NativeBridge_sendKeyCode(
-    JNIEnv* /*env*/, jclass /*clazz*/, jlong handle, jint keyCode, jint metaState) {
-    if (!handle) return JNI_FALSE;
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
-
+static bool sendKeyCodeInternal(NeoTerminalEngine* engine, int keyCode, int metaState) noexcept {
+    if (!engine) return false;
     bool appCursor = (engine->mModes & MODE_APP_CURSOR_KEYS) != 0;
     bool shift = (metaState & AMETA_SHIFT_ON) != 0;
     bool alt   = (metaState & AMETA_ALT_ON) != 0;
@@ -1603,12 +1433,8 @@ Java_com_termuxx_app_NativeBridge_sendKeyCode(
 
     switch (keyCode) {
         case AKEYCODE_ENTER:
-        case AKEYCODE_NUMPAD_ENTER:
-            seq = alt ? "\x1b\r" : "\r";
-            break;
-        case AKEYCODE_DEL:
-            seq = alt ? "\x1b\x7f" : (ctrl ? "\x08" : "\x7f");
-            break;
+        case AKEYCODE_NUMPAD_ENTER: seq = alt ? "\x1b\r" : "\r"; break;
+        case AKEYCODE_DEL: seq = alt ? "\x1b\x7f" : (ctrl ? "\x08" : "\x7f"); break;
         case AKEYCODE_FORWARD_DEL:
             if (mod > 1) { snprintf(buf, sizeof(buf), "\x1b[3;%d~", mod); seq = buf; }
             else seq = "\x1b[3~";
@@ -1617,12 +1443,8 @@ Java_com_termuxx_app_NativeBridge_sendKeyCode(
             if (mod > 1) { snprintf(buf, sizeof(buf), "\x1b[2;%d~", mod); seq = buf; }
             else seq = "\x1b[2~";
             break;
-        case AKEYCODE_TAB:
-            seq = shift ? "\x1b[Z" : "\t";
-            break;
-        case AKEYCODE_ESCAPE:
-            seq = "\x1b";
-            break;
+        case AKEYCODE_TAB: seq = shift ? "\x1b[Z" : "\t"; break;
+        case AKEYCODE_ESCAPE: seq = "\x1b"; break;
         case AKEYCODE_DPAD_UP:
             if (mod > 1) { snprintf(buf, sizeof(buf), "\x1b[1;%dA", mod); seq = buf; }
             else seq = appCursor ? "\x1bOA" : "\x1b[A";
@@ -1667,22 +1489,319 @@ Java_com_termuxx_app_NativeBridge_sendKeyCode(
         case AKEYCODE_F10: seq = "\x1b[21~"; break;
         case AKEYCODE_F11: seq = "\x1b[23~"; break;
         case AKEYCODE_F12: seq = "\x1b[24~"; break;
-        default:
-            break;
+        default: break;
     }
 
     if (seq) {
         engine->writeToPty(seq, strlen(seq));
-        return JNI_TRUE;
+        return true;
     }
-    return JNI_FALSE;
+    return false;
+}
+
+static void sendCodepointInternal(NeoTerminalEngine* engine, int codepoint, bool ctrlDown, bool altDown) noexcept {
+    if (!engine) return;
+    if (ctrlDown) {
+        if (codepoint >= 'a' && codepoint <= 'z') codepoint = codepoint - 'a' + 1;
+        else if (codepoint >= 'A' && codepoint <= 'Z') codepoint = codepoint - 'A' + 1;
+        else if (codepoint == ' ' || codepoint == '2' || codepoint == '@') codepoint = 0;
+        else if (codepoint == '[' || codepoint == '3') codepoint = 27;
+        else if (codepoint == '\\' || codepoint == '4') codepoint = 28;
+        else if (codepoint == ']' || codepoint == '5') codepoint = 29;
+        else if (codepoint == '^' || codepoint == '6') codepoint = 30;
+        else if (codepoint == '_' || codepoint == '/' || codepoint == '7') codepoint = 31;
+        else if (codepoint == '8' || codepoint == '?') codepoint = 127;
+    }
+    std::string out;
+    if (altDown) out.push_back('\x1b');
+    appendUtf8(out, static_cast<uint32_t>(codepoint));
+    engine->writeToPty(out.data(), out.size());
+}
+
+static void* bootstrapWorkerThread(void* /*arg*/) {
+    if (access("/data/data/com.termuxx/file/usr/bin/bash", X_OK) != 0 &&
+        access("/data/data/com.termuxx/file/usr/bin/apt", X_OK) != 0 &&
+        blob_size > 0) {
+        extractBootstrapInCpp23(reinterpret_cast<const uint8_t*>(blob), static_cast<size_t>(blob_size));
+    }
+    pthread_mutex_lock(&gGlobalMutex);
+    std::string libDir = gNativeLibDir;
+    pthread_mutex_unlock(&gGlobalMutex);
+
+    initializeEnvironmentAndAutoUpdater(libDir.c_str());
+    gBootstrapState.store(2, std::memory_order_release);
+    return nullptr;
+}
+
+} // namespace
+
+extern "C" {
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeInitAndPollBootstrap(JNIEnv* env, jclass /*clazz*/, jstring nativeLibDir) {
+    int state = gBootstrapState.load(std::memory_order_acquire);
+    if (state == 2) return 2;
+
+    if (state == 0) {
+        pthread_mutex_lock(&gGlobalMutex);
+        if (gBootstrapState.load(std::memory_order_relaxed) == 0) {
+            if (nativeLibDir) {
+                const char* utf = env->GetStringUTFChars(nativeLibDir, nullptr);
+                if (utf) {
+                    gNativeLibDir = utf;
+                    env->ReleaseStringUTFChars(nativeLibDir, utf);
+                }
+            }
+            if (access("/data/data/com.termuxx/file/usr/bin/bash", X_OK) == 0) {
+                initializeEnvironmentAndAutoUpdater(gNativeLibDir.c_str());
+                gBootstrapState.store(2, std::memory_order_release);
+                pthread_mutex_unlock(&gGlobalMutex);
+                return 2;
+            }
+            gBootstrapState.store(1, std::memory_order_release);
+            pthread_t th{};
+            pthread_create(&th, nullptr, &bootstrapWorkerThread, nullptr);
+            pthread_detach(th);
+        }
+        pthread_mutex_unlock(&gGlobalMutex);
+    }
+    return gBootstrapState.load(std::memory_order_acquire);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeNewSession(
+    JNIEnv* /*env*/, jclass /*clazz*/, jboolean asRoot, jint rows, jint cols, jint cellW, jint cellH) {
+    pthread_mutex_lock(&gGlobalMutex);
+    auto* engine = new NeoTerminalEngine(rows, cols, 4000, asRoot == JNI_TRUE);
+    if (rows > 0 && cols > 0) {
+        startSessionProcess(engine, gNativeLibDir.c_str(), rows, cols, cellW, cellH);
+    }
+    gSessions.push_back(engine);
+    gActiveIdx = static_cast<int>(gSessions.size()) - 1;
+    int idx = gActiveIdx;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return idx;
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_NativeBridge_sendMouse(
-    JNIEnv* /*env*/, jclass /*clazz*/, jlong handle, jint button, jint col, jint row, jboolean pressed) {
-    if (!handle) return;
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
+Java_com_termuxx_app_TermuxActivity_nativeSwitchSession(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
+    pthread_mutex_lock(&gGlobalMutex);
+    if (index >= 0 && index < static_cast<int>(gSessions.size())) {
+        gActiveIdx = index;
+        gSessions[static_cast<size_t>(index)]->markAllDirty();
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeCloseSession(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
+    pthread_mutex_lock(&gGlobalMutex);
+    if (index >= 0 && index < static_cast<int>(gSessions.size())) {
+        NeoTerminalEngine* eng = gSessions[static_cast<size_t>(index)];
+        gSessions.erase(gSessions.begin() + index);
+        delete eng;
+        if (gSessions.empty()) {
+            gActiveIdx = -1;
+        } else if (gActiveIdx >= static_cast<int>(gSessions.size())) {
+            gActiveIdx = static_cast<int>(gSessions.size()) - 1;
+        }
+        if (gActiveIdx >= 0) {
+            gSessions[static_cast<size_t>(gActiveIdx)]->markAllDirty();
+        }
+    }
+    int rem = static_cast<int>(gSessions.size());
+    pthread_mutex_unlock(&gGlobalMutex);
+    return rem;
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeDestroyAll(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    for (auto* eng : gSessions) delete eng;
+    gSessions.clear();
+    gActiveIdx = -1;
+    pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetSessionCount(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    int c = static_cast<int>(gSessions.size());
+    pthread_mutex_unlock(&gGlobalMutex);
+    return c;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetActiveIndex(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    int idx = gActiveIdx;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return idx;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeIsSessionRoot(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
+    pthread_mutex_lock(&gGlobalMutex);
+    bool r = (index >= 0 && index < static_cast<int>(gSessions.size())) && gSessions[static_cast<size_t>(index)]->mIsRoot;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return r ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeResizeActive(
+    JNIEnv* /*env*/, jclass /*clazz*/, jint rows, jint cols, jint cellW, jint cellH) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    if (eng) {
+        startSessionProcess(eng, gNativeLibDir.c_str(), rows, cols, cellW, cellH);
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeConsumeFrameDirty(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    bool d = eng && eng->mFrameDirty.exchange(false, std::memory_order_acq_rel);
+    pthread_mutex_unlock(&gGlobalMutex);
+    return d ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeDispatchExtraKey(JNIEnv* /*env*/, jclass /*clazz*/, jint keyId) {
+    pthread_mutex_lock(&gGlobalMutex);
+    // keyId:
+    // Row 0: 0=ESC, 1=TAB, 2=CTRL, 3=ALT, 4='-', 5='/', 6='|', 7=UP, 8=END
+    // Row 1: 9='~', 10=HOME, 11=PGUP, 12=PGDN, 13='$', 14=':', 15=LEFT, 16=DOWN, 17=RIGHT
+    if (keyId == 2) {
+        gCtrlArmed = !gCtrlArmed;
+    } else if (keyId == 3) {
+        gAltArmed = !gAltArmed;
+    } else {
+        NeoTerminalEngine* eng = activeEngineLocked();
+        if (eng) {
+            int meta = (gCtrlArmed ? AMETA_CTRL_ON : 0) | (gAltArmed ? AMETA_ALT_ON : 0);
+            switch (keyId) {
+                case 0:  sendKeyCodeInternal(eng, AKEYCODE_ESCAPE, meta); break;
+                case 1:  sendKeyCodeInternal(eng, AKEYCODE_TAB, meta); break;
+                case 4:  sendCodepointInternal(eng, '-', gCtrlArmed, gAltArmed); break;
+                case 5:  sendCodepointInternal(eng, '/', gCtrlArmed, gAltArmed); break;
+                case 6:  sendCodepointInternal(eng, '|', gCtrlArmed, gAltArmed); break;
+                case 7:  sendKeyCodeInternal(eng, AKEYCODE_DPAD_UP, meta); break;
+                case 8:  sendKeyCodeInternal(eng, AKEYCODE_MOVE_END, meta); break;
+                case 9:  sendCodepointInternal(eng, '~', gCtrlArmed, gAltArmed); break;
+                case 10: sendKeyCodeInternal(eng, AKEYCODE_MOVE_HOME, meta); break;
+                case 11: sendKeyCodeInternal(eng, AKEYCODE_PAGE_UP, meta); break;
+                case 12: sendKeyCodeInternal(eng, AKEYCODE_PAGE_DOWN, meta); break;
+                case 13: sendCodepointInternal(eng, '$', gCtrlArmed, gAltArmed); break;
+                case 14: sendCodepointInternal(eng, ':', gCtrlArmed, gAltArmed); break;
+                case 15: sendKeyCodeInternal(eng, AKEYCODE_DPAD_LEFT, meta); break;
+                case 16: sendKeyCodeInternal(eng, AKEYCODE_DPAD_DOWN, meta); break;
+                case 17: sendKeyCodeInternal(eng, AKEYCODE_DPAD_RIGHT, meta); break;
+                default: break;
+            }
+        }
+        gCtrlArmed = false;
+        gAltArmed = false;
+    }
+    int modMask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0);
+    pthread_mutex_unlock(&gGlobalMutex);
+    return modMask;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetModifierMask(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    int modMask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0);
+    pthread_mutex_unlock(&gGlobalMutex);
+    return modMask;
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSendText(
+    JNIEnv* env, jclass /*clazz*/, jstring text, jboolean isPaste) {
+    if (!text) return;
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* engine = activeEngineLocked();
+    bool ctrl = gCtrlArmed;
+    bool alt  = gAltArmed;
+    gCtrlArmed = false;
+    gAltArmed  = false;
+    pthread_mutex_unlock(&gGlobalMutex);
+    if (!engine) return;
+
+    const char* utf = env->GetStringUTFChars(text, nullptr);
+    if (!utf) return;
+    std::string payload(utf);
+    env->ReleaseStringUTFChars(text, utf);
+
+    if (isPaste) {
+        std::string sanitized;
+        sanitized.reserve(payload.size());
+        for (size_t i = 0; i < payload.size(); ++i) {
+            if (payload[i] == '\r' && i + 1 < payload.size() && payload[i + 1] == '\n') {
+                sanitized.push_back('\r');
+                i++;
+            } else if (payload[i] == '\n') {
+                sanitized.push_back('\r');
+            } else {
+                sanitized.push_back(payload[i]);
+            }
+        }
+        if ((engine->mModes & MODE_BRACKETED_PASTE) != 0) {
+            std::string wrapped = "\x1b[200~" + sanitized + "\x1b[201~";
+            engine->writeToPty(wrapped.data(), wrapped.size());
+        } else {
+            engine->writeToPty(sanitized.data(), sanitized.size());
+        }
+    } else if ((ctrl || alt) && !payload.empty()) {
+        sendCodepointInternal(engine, static_cast<unsigned char>(payload[0]), ctrl, alt);
+        if (payload.size() > 1) {
+            engine->writeToPty(payload.data() + 1, payload.size() - 1);
+        }
+    } else {
+        engine->writeToPty(payload.data(), payload.size());
+    }
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSendKeyEvent(
+    JNIEnv* /*env*/, jclass /*clazz*/, jint keyCode, jint unicodeChar, jint metaState) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* engine = activeEngineLocked();
+    if (!engine) {
+        pthread_mutex_unlock(&gGlobalMutex);
+        return 0;
+    }
+
+    if (!engine->mRunning.load(std::memory_order_acquire) &&
+        (keyCode == AKEYCODE_ENTER || keyCode == AKEYCODE_NUMPAD_ENTER)) {
+        pthread_mutex_unlock(&gGlobalMutex);
+        return 2; // Signal Java to close the finished session
+    }
+
+    int meta = metaState | (gCtrlArmed ? AMETA_CTRL_ON : 0) | (gAltArmed ? AMETA_ALT_ON : 0);
+    gCtrlArmed = false;
+    gAltArmed  = false;
+    pthread_mutex_unlock(&gGlobalMutex);
+
+    if (sendKeyCodeInternal(engine, keyCode, meta)) {
+        return 1;
+    }
+    if (unicodeChar > 0) {
+        sendCodepointInternal(engine, unicodeChar, (meta & AMETA_CTRL_ON) != 0, (meta & AMETA_ALT_ON) != 0);
+        return 1;
+    }
+    return 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSendMouse(
+    JNIEnv* /*env*/, jclass /*clazz*/, jint button, jint col, jint row, jboolean pressed) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* engine = activeEngineLocked();
+    pthread_mutex_unlock(&gGlobalMutex);
+    if (!engine) return;
     if ((engine->mModes & MODE_MOUSE_TRACKING) == 0) return;
     if ((engine->mModes & MODE_MOUSE_SGR) != 0) {
         int c = std::clamp<int>(col, 1, engine->mCols);
@@ -1693,50 +1812,52 @@ Java_com_termuxx_app_NativeBridge_sendMouse(
     }
 }
 
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetActiveScrollback(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    int sb = (eng && !(eng->mModes & MODE_ALT_SCREEN)) ? eng->mScrollbackCount : 0;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return sb;
+}
+
 JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_NativeBridge_isRowDirty(
-    JNIEnv* /*env*/, jclass /*clazz*/, jlong handle, jint screenRow) {
-    if (!handle) return JNI_FALSE;
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
-    auto& grid = engine->activeGrid();
-    if (screenRow < 0 || screenRow >= engine->mRows) return JNI_FALSE;
-    return grid[static_cast<size_t>(screenRow)].dirty ? JNI_TRUE : JNI_FALSE;
+Java_com_termuxx_app_TermuxActivity_nativeIsRowDirty(JNIEnv* /*env*/, jclass /*clazz*/, jint screenRow) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    bool dirty = false;
+    if (eng && screenRow >= 0 && screenRow < eng->mRows) {
+        dirty = eng->activeGrid()[static_cast<size_t>(screenRow)].dirty;
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+    return dirty ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_NativeBridge_clearDirtyFlags(JNIEnv* /*env*/, jclass /*clazz*/, jlong handle) {
-    if (!handle) return;
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
-    engine->lock();
-    for (auto& r : engine->activeGrid()) r.dirty = false;
-    engine->unlock();
+Java_com_termuxx_app_TermuxActivity_nativeClearDirtyFlags(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    if (eng) {
+        eng->lock();
+        for (auto& r : eng->activeGrid()) r.dirty = false;
+        eng->unlock();
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_NativeBridge_getActiveScrollback(JNIEnv* /*env*/, jclass /*clazz*/, jlong handle) {
-    if (!handle) return 0;
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
-    return (engine->mModes & MODE_ALT_SCREEN) ? 0 : engine->mScrollbackCount;
-}
-
-/**
- * Packs a single row's render data in C++23:
- * - outBgRuns: triples [startCol, endCol, bgArgb] for non-black background spans
- * - outGlyphs: quads   [codepoint, col, fgArgb, flags] for visible non-space characters
- * Returns: (bgRunCount << 16) | glyphCount
- */
-JNIEXPORT jint JNICALL
-Java_com_termuxx_app_NativeBridge_packRowRender(
+Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     JNIEnv* env,
     jclass /*clazz*/,
-    jlong handle,
     jint scrollOffset,
     jint screenRow,
     jintArray outBgRuns,
     jintArray outGlyphs) {
 
-    if (!handle) return 0;
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* engine = activeEngineLocked();
+    pthread_mutex_unlock(&gGlobalMutex);
+    if (!engine) return 0;
 
     engine->lock();
     const Row& row = engine->getVisualRow(scrollOffset, screenRow);
@@ -1791,17 +1912,39 @@ Java_com_termuxx_app_NativeBridge_packRowRender(
     return (bgCount << 16) | (glCount & 0xFFFF);
 }
 
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetCursorState(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    int state = -1;
+    if (eng && eng->mCursorVisible) {
+        state = ((eng->mCursorRow & 0x7FFF) << 16) | (eng->mCursorCol & 0xFFFF);
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+    return state;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetModesMask(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    int m = eng ? eng->mModes : 0;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return m;
+}
+
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_NativeBridge_getTranscriptText(
-    JNIEnv* env, jclass /*clazz*/, jlong handle, jint maxScrollbackLines) {
-    if (!handle) return env->NewStringUTF("");
-    auto* engine = reinterpret_cast<NeoTerminalEngine*>(handle);
+Java_com_termuxx_app_TermuxActivity_nativeGetTranscriptText(JNIEnv* env, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* engine = activeEngineLocked();
+    pthread_mutex_unlock(&gGlobalMutex);
+    if (!engine) return env->NewStringUTF("");
 
     std::string out;
     out.reserve(16384);
 
     engine->lock();
-    int sbCount = (engine->mModes & MODE_ALT_SCREEN) ? 0 : std::min<int>(engine->mScrollbackCount, maxScrollbackLines);
+    int sbCount = (engine->mModes & MODE_ALT_SCREEN) ? 0 : engine->mScrollbackCount;
     for (int i = -sbCount; i < engine->mRows; ++i) {
         const Row& row = engine->getVisualRow(0, i);
         int lastNonSpace = -1;
@@ -1817,33 +1960,10 @@ Java_com_termuxx_app_NativeBridge_getTranscriptText(
             if (cell.flags & FLAG_WIDE_TRAIL) continue;
             appendUtf8(out, cell.codepoint);
         }
-        if (!row.wrapped && i < engine->mRows - 1) {
-            out.push_back('\n');
-        }
+        if (!row.wrapped && i < engine->mRows - 1) out.push_back('\n');
     }
     engine->unlock();
-
     return env->NewStringUTF(out.c_str());
-}
-
-JNIEXPORT jint JNICALL
-Java_com_termuxx_app_NativeBridge_getCursorRow(JNIEnv* /*env*/, jclass /*clazz*/, jlong handle) {
-    return handle ? reinterpret_cast<NeoTerminalEngine*>(handle)->mCursorRow : 0;
-}
-
-JNIEXPORT jint JNICALL
-Java_com_termuxx_app_NativeBridge_getCursorCol(JNIEnv* /*env*/, jclass /*clazz*/, jlong handle) {
-    return handle ? reinterpret_cast<NeoTerminalEngine*>(handle)->mCursorCol : 0;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_NativeBridge_isCursorVisible(JNIEnv* /*env*/, jclass /*clazz*/, jlong handle) {
-    return (handle && reinterpret_cast<NeoTerminalEngine*>(handle)->mCursorVisible) ? JNI_TRUE : JNI_FALSE;
-}
-
-JNIEXPORT jint JNICALL
-Java_com_termuxx_app_NativeBridge_getModesMask(JNIEnv* /*env*/, jclass /*clazz*/, jlong handle) {
-    return handle ? reinterpret_cast<NeoTerminalEngine*>(handle)->mModes : 0;
 }
 
 } // extern "C"
