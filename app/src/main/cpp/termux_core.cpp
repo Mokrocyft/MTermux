@@ -3,7 +3,7 @@
  *
  * Features:
  * 1. Native C++23 ZIP Decompressor (zlib) + Dual 16-Byte Relocator ("com.termux/files" & "com.termux/cache")
- * 2. Android 17 (minSdk 37 / targetSdk 37) Safer DCL (0500 ELF mode) + SELinux context & /system/bin/linker64 executor
+ * 2. Android 17 (minSdk 37 / targetSdk 37) Safer DCL + SELinux context & /system/bin/linker64 executor
  * 3. Silent Second-Stage Bootstrap Initializer + APT Cache Configurator
  * 4. Logical-Line Reflow Engine on Resize/Pinch-Zoom (unwraps & re-wraps scrollback + screen lines dynamically)
  * 5. ColorOS 17 Native Text Selection Engine (logical coordinates + C++23 handle geometry & touch drag state machine)
@@ -38,6 +38,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -63,6 +65,7 @@ constexpr const char LIB_PATH[]        = "/data/data/com.termuxx/file/usr/lib";
 constexpr const char TMP_PATH[]        = "/data/data/com.termuxx/file/usr/tmp";
 constexpr const char HOME_PATH[]       = "/data/data/com.termuxx/file/home";
 constexpr const char APT_ARCHIVES_PARTIAL[] = "/data/data/com.termuxx/cach/apt/archives/partial";
+constexpr const char SECOND_STAGE_MARKER[]  = "/data/data/com.termuxx/file/usr/etc/termux/.termuxx_stage2_done";
 
 constexpr const char OLD_FILES_16[] = "com.termux/files";
 constexpr const char NEW_FILES_16[] = "com.termuxx/file";
@@ -182,7 +185,8 @@ struct alignas(16) Cell {
 
     bool isDefaultBlank() const noexcept {
         return codepoint == ' ' && bg == DEFAULT_BG &&
-               (flags & (FLAG_INVERSE | FLAG_UNDERLINE | FLAG_UNDERCURL | FLAG_STRIKETHROUGH | FLAG_WIDE_LEAD | FLAG_WIDE_TRAIL)) == 0;
+               (flags & (FLAG_INVERSE | FLAG_UNDERLINE | FLAG_UNDERCURL | FLAG_DOUBLE_UNDERLINE |
+                         FLAG_STRIKETHROUGH | FLAG_WIDE_LEAD | FLAG_WIDE_TRAIL)) == 0;
     }
 };
 
@@ -191,11 +195,12 @@ struct Row {
     bool dirty = true;
     bool wrapped = false;
 
-    explicit Row(int cols = 80) : cells(static_cast<size_t>(cols)) {
+    explicit Row(int cols = 80) : cells(static_cast<size_t>(std::max(1, cols))) {
         clear(DEFAULT_FG, DEFAULT_BG, 0);
     }
 
     void resize(int newCols) {
+        newCols = std::max(1, newCols);
         size_t oldSize = cells.size();
         cells.resize(static_cast<size_t>(newCols));
         for (size_t i = oldSize; i < cells.size(); ++i) {
@@ -268,6 +273,38 @@ static void appendUtf8(std::string& out, uint32_t cp) {
     }
 }
 
+static uint32_t decodeFirstUtf8Codepoint(const std::string& s, size_t& bytesConsumed) noexcept {
+    if (s.empty()) {
+        bytesConsumed = 0;
+        return 0;
+    }
+    const auto b0 = static_cast<uint8_t>(s[0]);
+    if ((b0 & 0x80) == 0) {
+        bytesConsumed = 1;
+        return b0;
+    }
+    if ((b0 & 0xE0) == 0xC0 && s.size() >= 2) {
+        bytesConsumed = 2;
+        if (b0 == 0xC0 && static_cast<uint8_t>(s[1]) == 0x80) return 0; // Modified UTF-8 null
+        return ((b0 & 0x1Fu) << 6) | (static_cast<uint8_t>(s[1]) & 0x3Fu);
+    }
+    if ((b0 & 0xF0) == 0xE0 && s.size() >= 3) {
+        bytesConsumed = 3;
+        return ((b0 & 0x0Fu) << 12) |
+               ((static_cast<uint8_t>(s[1]) & 0x3Fu) << 6) |
+               (static_cast<uint8_t>(s[2]) & 0x3Fu);
+    }
+    if ((b0 & 0xF8) == 0xF0 && s.size() >= 4) {
+        bytesConsumed = 4;
+        return ((b0 & 0x07u) << 18) |
+               ((static_cast<uint8_t>(s[1]) & 0x3Fu) << 12) |
+               ((static_cast<uint8_t>(s[2]) & 0x3Fu) << 6) |
+               (static_cast<uint8_t>(s[3]) & 0x3Fu);
+    }
+    bytesConsumed = 1;
+    return b0;
+}
+
 static std::string decodeBase64(const std::string& in) {
     static constexpr int8_t T[256] = {
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
@@ -333,11 +370,13 @@ static bool emitProceduralBoxOrBlockInCpp23(
     int col,
     uint32_t fg,
     jint* glPtr,
-    int& glCount) noexcept {
+    int& glCount,
+    int maxGlyphs) noexcept {
 
     if (cp < 0x2500 || cp > 0x259F) return false;
 
     auto pushRect = [&](int x0, int y0, int x1, int y1) {
+        if (glCount >= maxGlyphs) return;
         int base = glCount * 4;
         glPtr[base]     = -1; // Procedural rect marker
         glPtr[base + 1] = col;
@@ -504,8 +543,11 @@ static inline uint32_t readLe32(const uint8_t* p) noexcept {
            (static_cast<uint32_t>(p[3]) << 24);
 }
 
-static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noexcept {
-    if (!zipData || zipSize < 22) return false;
+static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize, std::string& errOut) noexcept {
+    if (!zipData || zipSize < 22) {
+        errOut = "Встроенный архив bootstrap-aarch64.zip пуст или повреждён";
+        return false;
+    }
 
     size_t minOff = (zipSize > 65557) ? (zipSize - 65557) : 0;
     size_t eocdOff = zipSize;
@@ -516,12 +558,18 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
         }
         if (pos == 0) break;
     }
-    if (eocdOff == zipSize) return false;
+    if (eocdOff == zipSize) {
+        errOut = "Не найден заголовок EOCD в bootstrap-aarch64.zip";
+        return false;
+    }
 
     uint16_t totalEntries = readLe16(zipData + eocdOff + 10);
     uint32_t cdSize       = readLe32(zipData + eocdOff + 12);
     uint32_t cdOffset     = readLe32(zipData + eocdOff + 16);
-    if (static_cast<size_t>(cdOffset) + cdSize > zipSize) return false;
+    if (static_cast<size_t>(cdOffset) + cdSize > zipSize) {
+        errOut = "Некорректное смещение Central Directory в bootstrap-aarch64.zip";
+        return false;
+    }
 
     removeRecursiveNative(STAGING_PATH);
     mkdirsRecursive(STAGING_PATH, 0700);
@@ -541,12 +589,14 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
         uint16_t nameLen   = readLe16(zipData + ptr + 28);
         uint16_t extraLen  = readLe16(zipData + ptr + 30);
         uint16_t commLen   = readLe16(zipData + ptr + 32);
+        uint32_t extAttr   = readLe32(zipData + ptr + 38);
         uint32_t lfhOffset = readLe32(zipData + ptr + 42);
 
         if (ptr + 46 + nameLen > zipSize) break;
         std::string entryName(reinterpret_cast<const char*>(zipData + ptr + 46), nameLen);
         ptr += 46 + nameLen + extraLen + commLen;
 
+        if (uncompSz > 256u * 1024u * 1024u) continue;
         if (lfhOffset + 30 > zipSize || readLe32(zipData + lfhOffset) != 0x04034b50u) continue;
         uint16_t lfhNameLen  = readLe16(zipData + lfhOffset + 26);
         uint16_t lfhExtraLen = readLe16(zipData + lfhOffset + 28);
@@ -599,16 +649,18 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
         } else {
             std::string dstFile = std::string(STAGING_PATH) + "/" + entryName;
             mkdirsForFile(dstFile.c_str(), 0700);
+            uint16_t zipUnixMode = static_cast<uint16_t>((extAttr >> 16) & 0xFFFFu);
             bool isElf = (outBuf.size() >= 4 &&
                           outBuf[0] == 0x7F && outBuf[1] == 'E' && outBuf[2] == 'L' && outBuf[3] == 'F');
-            bool isExec = isElf ||
+            bool isShebang = (outBuf.size() >= 2 && outBuf[0] == '#' && outBuf[1] == '!');
+            bool isExec = isElf || isShebang ||
+                          ((zipUnixMode & 0111u) != 0) ||
                           (entryName.rfind("bin/", 0) == 0) ||
                           (entryName.rfind("libexec", 0) == 0) ||
                           (entryName.rfind("lib/apt/apt-helper", 0) == 0) ||
                           (entryName.rfind("lib/apt/methods", 0) == 0) ||
                           (entryName.rfind("etc/termux/bootstrap/", 0) == 0) ||
                           (entryName.rfind("var/lib/dpkg/info/", 0) == 0);
-            // Android 17 (targetSdk 37) Safer Dynamic Code Loading requires ELF files to be read-only (0500)
             mode_t finalMode = isExec ? 0700 : 0600;
             int fd = open(dstFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
             if (fd >= 0) {
@@ -627,6 +679,7 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
 
     removeRecursiveNative(PREFIX_PATH);
     if (rename(STAGING_PATH, PREFIX_PATH) != 0) {
+        errOut = "Не удалось переименовать usr-staging в usr";
         return false;
     }
     return true;
@@ -672,8 +725,6 @@ static void installUnifiedRedirectLibrary(const char* nativeLibDir) noexcept {
     }
     if (access(dstSo.c_str(), R_OK) == 0) {
         chmod(dstSo.c_str(), 0700);
-        // Unify termux-exec preload targets to point to libtermuxx-redirect.so
-        // so there is never a two-library RTLD_NEXT conflict during apt's execv() calls
         static const char* const execAliases[] = {
             "/data/data/com.termuxx/file/usr/lib/libtermux-exec.so",
             "/data/data/com.termuxx/file/usr/lib/libtermux-exec-ld-preload.so",
@@ -713,7 +764,8 @@ static void installBuiltInSudoWrapper() noexcept {
     }
 }
 
-static void runSecondStageBootstrapSilently(const char* preloadPath) noexcept {
+static void runSecondStageBootstrapSilently(const char* preloadPath, bool forceRun) noexcept {
+    if (!forceRun && access(SECOND_STAGE_MARKER, F_OK) == 0) return;
     const char* bashBin = "/data/data/com.termuxx/file/usr/bin/bash";
     if (access(bashBin, R_OK) != 0) return;
 
@@ -736,17 +788,28 @@ static void runSecondStageBootstrapSilently(const char* preloadPath) noexcept {
         }
         setenv("ANDROID__BUILD_VERSION_SDK", "37", 1);
         if (chdir(HOME_PATH) != 0) (void)chdir("/");
-        // Run bash -l (login shell) so /etc/profile executes termux-bootstrap-second-stage.sh silently
         execl(bashBin, "-bash", "-l", "-c", "true", nullptr);
         execl("/system/bin/linker64", "linker64", bashBin, "-l", "-c", "true", nullptr);
         _exit(0);
     } else if (pid > 0) {
         int status = 0;
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+        mkdirsForFile(SECOND_STAGE_MARKER, 0700);
+        int mfd = open(SECOND_STAGE_MARKER, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (mfd >= 0) close(mfd);
     }
 }
 
-static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool /*justExtracted*/) noexcept {
+static pthread_mutex_t gInitOnceMutex = PTHREAD_MUTEX_INITIALIZER;
+static bool gEnvInitialized = false;
+
+static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool justExtracted) noexcept {
+    pthread_mutex_lock(&gInitOnceMutex);
+    if (gEnvInitialized && !justExtracted) {
+        pthread_mutex_unlock(&gInitOnceMutex);
+        return;
+    }
+
     mkdirsRecursive(APP_ROOT_PATH, 0700);
     mkdirsRecursive(FILES_REAL_PATH, 0700);
     mkdirsRecursive(FILES_LINK_PATH, 0700);
@@ -791,33 +854,35 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool /
         close(pfd);
     }
 
-    // Run second stage silently if its .lock symlink does not exist yet
-    runSecondStageBootstrapSilently(dstSo.c_str());
-    // Re-assert unified preload symlink after termux-exec.postinst
+    runSecondStageBootstrapSilently(dstSo.c_str(), justExtracted);
     installUnifiedRedirectLibrary(nativeLibDir);
 
     std::string bashrcPath = std::string(HOME_PATH) + "/.bashrc";
-    const char* rcText =
-        "export TERM=xterm-256color\n"
-        "export COLORTERM=truecolor\n"
-        "export PREFIX=/data/data/com.termuxx/file/usr\n"
-        "export HOME=/data/data/com.termuxx/file/home\n"
-        "export TMPDIR=/data/data/com.termuxx/file/usr/tmp\n"
-        "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
-        "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
-        "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
-        "  export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so\"\n"
-        "fi\n"
-        "alias ll='ls -lah --color=auto'\n"
-        "alias update='pkg update -y && pkg upgrade -y'\n"
-        "PS1='\\[\\e[1;38;2;168;199;250m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
-    int fd = open(bashrcPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd >= 0) {
-        writeAllFd(fd, rcText, strlen(rcText));
-        close(fd);
+    if (access(bashrcPath.c_str(), F_OK) != 0) {
+        const char* rcText =
+            "export TERM=xterm-256color\n"
+            "export COLORTERM=truecolor\n"
+            "export PREFIX=/data/data/com.termuxx/file/usr\n"
+            "export HOME=/data/data/com.termuxx/file/home\n"
+            "export TMPDIR=/data/data/com.termuxx/file/usr/tmp\n"
+            "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
+            "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
+            "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
+            "  export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so\"\n"
+            "fi\n"
+            "alias ll='ls -lah --color=auto'\n"
+            "alias update='pkg update -y && pkg upgrade -y'\n"
+            "PS1='\\[\\e[1;38;2;168;199;250m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
+        int fd = open(bashrcPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            writeAllFd(fd, rcText, strlen(rcText));
+            close(fd);
+        }
     }
 
     unlink("/data/data/com.termuxx/file/usr/etc/motd");
+    gEnvInitialized = true;
+    pthread_mutex_unlock(&gInitOnceMutex);
 }
 
 static bool isWordChar(uint32_t cp) noexcept {
@@ -825,7 +890,8 @@ static bool isWordChar(uint32_t cp) noexcept {
     if (cp < 0x7F) {
         const char ch = static_cast<char>(cp);
         return isalnum(static_cast<unsigned char>(ch)) ||
-               ch == '_' || ch == '-' || ch == '.' || ch == '/' || ch == ':' || ch == '~' || ch == '+' || ch == '@' || ch == '?' || ch == '=' || ch == '&';
+               ch == '_' || ch == '-' || ch == '.' || ch == '/' || ch == ':' ||
+               ch == '~' || ch == '+' || ch == '@' || ch == '?' || ch == '=' || ch == '&';
     }
     return true;
 }
@@ -844,6 +910,7 @@ public:
     std::vector<Row> mScrollback;
     int mScrollbackHead = 0;
     int mScrollbackCount = 0;
+    int mViewportScrollOffset = 0;
 
     int mCursorRow = 0;
     int mCursorCol = 0;
@@ -852,6 +919,7 @@ public:
     bool mPendingWrap = false;
 
     int mSavedRowPrimary = 0, mSavedColPrimary = 0;
+    int mSavedRowAlt = 0, mSavedColAlt = 0;
     uint32_t mSavedFg = DEFAULT_FG, mSavedBg = DEFAULT_BG;
     uint16_t mSavedFlags = 0;
 
@@ -862,7 +930,7 @@ public:
     uint32_t mCurBg = DEFAULT_BG;
     uint16_t mCurFlags = 0;
 
-    int mModes = MODE_AUTOWRAP;
+    std::atomic<int> mModes{MODE_AUTOWRAP};
     uint32_t mPalette[256];
 
     // ColorOS 17 Logical-Row Text Selection & Handle Drag State:
@@ -916,7 +984,6 @@ public:
             mPrimaryGrid.emplace_back(mCols);
             mAltGrid.emplace_back(mCols);
         }
-        // Lazy scrollback allocation for minimal initial RAM footprint
         mScrollback.reserve(256);
     }
 
@@ -950,18 +1017,25 @@ public:
     }
 
     std::vector<Row>& activeGrid() noexcept {
-        return (mModes & MODE_ALT_SCREEN) ? mAltGrid : mPrimaryGrid;
+        return (mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) ? mAltGrid : mPrimaryGrid;
     }
 
-    void markAllDirty() noexcept {
+    void markAllDirtyLocked() noexcept {
         for (auto& r : mPrimaryGrid) r.dirty = true;
         for (auto& r : mAltGrid) r.dirty = true;
         mFrameDirty.store(true, std::memory_order_release);
     }
 
+    void markAllDirty() noexcept {
+        lock();
+        markAllDirtyLocked();
+        unlock();
+    }
+
     const Row& getRowByLogicalY(int logicalY) const noexcept {
-        const auto& grid = (mModes & MODE_ALT_SCREEN) ? mAltGrid : mPrimaryGrid;
-        if ((mModes & MODE_ALT_SCREEN) || logicalY >= 0 || mScrollbackCount == 0) {
+        int modes = mModes.load(std::memory_order_relaxed);
+        const auto& grid = (modes & MODE_ALT_SCREEN) ? mAltGrid : mPrimaryGrid;
+        if ((modes & MODE_ALT_SCREEN) || logicalY >= 0 || mScrollbackCount == 0) {
             int r = std::clamp(logicalY, 0, mRows - 1);
             return grid[static_cast<size_t>(r)];
         }
@@ -971,7 +1045,8 @@ public:
     }
 
     const Row& getVisualRow(int scrollOffset, int screenRow) const noexcept {
-        int clampedOffset = (mModes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
+        int modes = mModes.load(std::memory_order_relaxed);
+        int clampedOffset = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
         return getRowByLogicalY(screenRow - clampedOffset);
     }
 
@@ -986,7 +1061,8 @@ public:
 
     void startSelectionAt(int scrollOffset, int screenCol, int screenRow) noexcept {
         lock();
-        int clampedOffset = (mModes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
+        int modes = mModes.load(std::memory_order_relaxed);
+        int clampedOffset = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
         int logicalY = std::clamp(screenRow, 0, mRows - 1) - clampedOffset;
         int col = std::clamp(screenCol, 0, mCols - 1);
 
@@ -1004,7 +1080,7 @@ public:
         mSelY2 = logicalY;
         mSelActive = true;
         mDragHandle = 0;
-        markAllDirty();
+        markAllDirtyLocked();
         unlock();
     }
 
@@ -1016,7 +1092,8 @@ public:
 
     void updateSelectionHandleLocked(bool isStartHandle, int col, int logicalY) noexcept {
         if (!mSelActive) return;
-        int maxSb = (mModes & MODE_ALT_SCREEN) ? 0 : mScrollbackCount;
+        int modes = mModes.load(std::memory_order_relaxed);
+        int maxSb = (modes & MODE_ALT_SCREEN) ? 0 : mScrollbackCount;
         col = std::clamp(col, 0, mCols - 1);
         logicalY = std::clamp(logicalY, -maxSb, mRows - 1);
 
@@ -1046,12 +1123,9 @@ public:
                 mSelX2++;
             }
         }
-        markAllDirty();
+        markAllDirtyLocked();
     }
 
-    // ColorOS 17 Lollipop Selection Geometry & Touch State Machine in C++23:
-    // Start Handle: vertical stem on left edge of mSelX1, circle on TOP of stem (or bottom if rowTop1 < 2*radius)
-    // End Handle:   vertical stem on right edge of mSelX2, circle on BOTTOM of stem
     bool computeSelectionGeometryLocked(
         int scrollOffset,
         float cellW,
@@ -1062,7 +1136,13 @@ public:
         float outGeom[14]) const noexcept {
 
         if (!mSelActive) return false;
-        int clampedOffset = (mModes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
+        cellW = std::max(1.0f, cellW);
+        cellH = std::max(1.0f, cellH);
+        viewW = std::max(2.0f, viewW);
+        viewH = std::max(2.0f, viewH);
+
+        int modes = mModes.load(std::memory_order_relaxed);
+        int clampedOffset = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
 
         float x1 = static_cast<float>(mSelX1) * cellW;
         float top1 = static_cast<float>(mSelY1 + clampedOffset) * cellH;
@@ -1109,7 +1189,9 @@ public:
         float viewH,
         float radiusPx) noexcept {
 
-        if (!mSelActive) return 0;
+        if (!mSelActive || !std::isfinite(touchX) || !std::isfinite(touchY)) return 0;
+        cellW = std::max(1.0f, cellW);
+        cellH = std::max(1.0f, cellH);
 
         float geom[14];
         computeSelectionGeometryLocked(scrollOffset, cellW, cellH, viewW, viewH, radiusPx, geom);
@@ -1119,7 +1201,6 @@ public:
             float dy1 = touchY - geom[4];
             float d1Sq = dx1 * dx1 + dy1 * dy1;
 
-            // Also check distance to stem midpoint for easy grabbing
             float stemMid1Y = 0.5f * (geom[1] + geom[2]);
             float d1StemSq = (touchX - geom[0]) * (touchX - geom[0]) + (touchY - stemMid1Y) * (touchY - stemMid1Y);
             d1Sq = std::min(d1Sq, d1StemSq);
@@ -1150,7 +1231,8 @@ public:
             return 0;
         } else if (action == 2) { // ACTION_MOVE
             if (mDragHandle == 0) return 0;
-            int clampedOffset = (mModes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
+            int modes = mModes.load(std::memory_order_relaxed);
+            int clampedOffset = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
             float targetX = touchX - mDragOffsetX;
             float targetY = touchY - mDragOffsetY;
 
@@ -1178,20 +1260,28 @@ public:
         mSelActive = false;
         mDragHandle = 0;
         mSelX1 = mSelY1 = mSelX2 = mSelY2 = -1;
-        markAllDirty();
+        markAllDirtyLocked();
         unlock();
         return true;
     }
 
-    std::string extractSelectedText() const {
+    std::string extractSelectedTextLocked() const {
         if (!mSelActive) return "";
+        return extractRangeTextLocked(mSelY1, mSelX1, mSelY2, mSelX2);
+    }
+
+    std::string extractRangeTextLocked(int y1, int x1, int y2, int x2) const {
+        if (y1 > y2 || (y1 == y2 && x1 > x2)) {
+            std::swap(y1, y2);
+            std::swap(x1, x2);
+        }
         std::string out;
         out.reserve(4096);
 
-        for (int y = mSelY1; y <= mSelY2; ++y) {
+        for (int y = y1; y <= y2; ++y) {
             const Row& row = getRowByLogicalY(y);
-            int xStart = (y == mSelY1) ? std::max(0, mSelX1) : 0;
-            int xEnd   = (y == mSelY2) ? std::min<int>(mCols - 1, mSelX2) : (mCols - 1);
+            int xStart = (y == y1) ? std::max(0, x1) : 0;
+            int xEnd   = (y == y2) ? std::min<int>(mCols - 1, x2) : (mCols - 1);
 
             int lastNonSpace = xStart - 1;
             for (int c = xEnd; c >= xStart; --c) {
@@ -1202,22 +1292,22 @@ public:
                     break;
                 }
             }
-            if (y == mSelY2 && lastNonSpace < xEnd && xEnd < static_cast<int>(row.cells.size())) {
-                if (mSelY1 == mSelY2 && lastNonSpace < xStart) lastNonSpace = xEnd;
+            if (y == y2 && lastNonSpace < xEnd && xEnd < static_cast<int>(row.cells.size())) {
+                if (y1 == y2 && lastNonSpace < xStart) lastNonSpace = xEnd;
             }
             for (int c = xStart; c <= lastNonSpace; ++c) {
                 const Cell& cell = row.cells[static_cast<size_t>(c)];
                 if (cell.flags & FLAG_WIDE_TRAIL) continue;
                 appendUtf8(out, cell.codepoint);
             }
-            if (y < mSelY2 && !row.wrapped) {
+            if (y < y2 && !row.wrapped) {
                 out.push_back('\n');
             }
         }
         return out;
     }
 
-    void reset() noexcept {
+    void resetLocked() noexcept {
         mCurFg = DEFAULT_FG;
         mCurBg = DEFAULT_BG;
         mCurFlags = 0;
@@ -1228,7 +1318,8 @@ public:
         mPendingWrap = false;
         mScrollTop = 0;
         mScrollBottom = mRows - 1;
-        mModes = MODE_AUTOWRAP;
+        mViewportScrollOffset = 0;
+        mModes.store(MODE_AUTOWRAP, std::memory_order_relaxed);
         mState = State::NORMAL;
         mUtf8BytesNeeded = 0;
         mSelActive = false;
@@ -1378,12 +1469,14 @@ public:
     void resize(int newRows, int newCols, int cellW = 18, int cellH = 36) {
         newRows = std::max(2, newRows);
         newCols = std::max(4, newCols);
+
+        lock();
         mCellWidthPx = std::max(4, cellW);
         mCellHeightPx = std::max(8, cellH);
 
-        lock();
         if (newRows != mRows || newCols != mCols) {
-            if (!(mModes & MODE_ALT_SCREEN) && newCols != mCols) {
+            int modes = mModes.load(std::memory_order_relaxed);
+            if (!(modes & MODE_ALT_SCREEN) && newCols != mCols) {
                 reflowPrimaryAndScrollback(newRows, newCols);
             } else {
                 mPrimaryGrid.resize(static_cast<size_t>(newRows), Row(newCols));
@@ -1400,19 +1493,22 @@ public:
             mScrollBottom = mRows - 1;
             mCursorRow = std::clamp(mCursorRow, 0, mRows - 1);
             mCursorCol = std::clamp(mCursorCol, 0, mCols - 1);
+            mViewportScrollOffset = std::clamp(mViewportScrollOffset, 0, mScrollbackCount);
             mPendingWrap = false;
-            markAllDirty();
+            markAllDirtyLocked();
         }
         int fd = mPtyFd;
         int pid = mShellPid;
+        int cw = mCellWidthPx;
+        int ch = mCellHeightPx;
         unlock();
 
         if (fd >= 0) {
             struct winsize sz{};
             sz.ws_row = static_cast<unsigned short>(newRows);
             sz.ws_col = static_cast<unsigned short>(newCols);
-            sz.ws_xpixel = static_cast<unsigned short>(newCols * mCellWidthPx);
-            sz.ws_ypixel = static_cast<unsigned short>(newRows * mCellHeightPx);
+            sz.ws_xpixel = static_cast<unsigned short>(newCols * cw);
+            sz.ws_ypixel = static_cast<unsigned short>(newRows * ch);
             ioctl(fd, TIOCSWINSZ, &sz);
             if (pid > 0) {
                 kill(-pid, SIGWINCH);
@@ -1422,7 +1518,7 @@ public:
     }
 
     void pushScrollbackRow(const Row& row) noexcept {
-        if (mModes & MODE_ALT_SCREEN) return;
+        if (mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) return;
         int idx = (mScrollbackHead + mScrollbackCount) % mMaxScrollback;
         if (mScrollbackCount < mMaxScrollback) {
             if (static_cast<int>(mScrollback.size()) <= idx) {
@@ -1442,9 +1538,10 @@ public:
         top = std::clamp(top, 0, mRows - 1);
         bottom = std::clamp(bottom, top, mRows - 1);
         count = std::clamp(count, 1, bottom - top + 1);
+        int modes = mModes.load(std::memory_order_relaxed);
 
         for (int n = 0; n < count; ++n) {
-            if (top == 0 && !(mModes & MODE_ALT_SCREEN)) {
+            if (top == 0 && !(modes & MODE_ALT_SCREEN)) {
                 pushScrollbackRow(grid[0]);
                 if (mSelActive) {
                     mSelY1--;
@@ -1500,21 +1597,34 @@ public:
         activeGrid()[static_cast<size_t>(mCursorRow)].dirty = true;
     }
 
+    static void clearWidePairIfSplit(Row& row, int col) noexcept {
+        int nCols = static_cast<int>(row.cells.size());
+        if (col < 0 || col >= nCols) return;
+        uint16_t fl = row.cells[static_cast<size_t>(col)].flags;
+        if ((fl & FLAG_WIDE_TRAIL) && col > 0) {
+            row.cells[static_cast<size_t>(col - 1)].reset();
+        } else if ((fl & FLAG_WIDE_LEAD) && col + 1 < nCols) {
+            row.cells[static_cast<size_t>(col + 1)].reset();
+        }
+    }
+
     void emitCodepoint(uint32_t cp) noexcept {
         int w = unicodeCharWidth(cp);
         if (w <= 0) return;
 
         auto& grid = activeGrid();
-        if (mPendingWrap && (mModes & MODE_AUTOWRAP)) {
+        int modes = mModes.load(std::memory_order_relaxed);
+        if (mPendingWrap && (modes & MODE_AUTOWRAP)) {
             grid[static_cast<size_t>(mCursorRow)].wrapped = true;
             mCursorCol = 0;
             lineFeed();
         }
 
         if (w == 2 && mCursorCol == mCols - 1) {
+            clearWidePairIfSplit(grid[static_cast<size_t>(mCursorRow)], mCursorCol);
             grid[static_cast<size_t>(mCursorRow)].cells[static_cast<size_t>(mCursorCol)].reset(mCurFg, mCurBg, mCurFlags);
             grid[static_cast<size_t>(mCursorRow)].dirty = true;
-            if (mModes & MODE_AUTOWRAP) {
+            if (modes & MODE_AUTOWRAP) {
                 grid[static_cast<size_t>(mCursorRow)].wrapped = true;
                 mCursorCol = 0;
                 lineFeed();
@@ -1524,13 +1634,12 @@ public:
         Row& row = grid[static_cast<size_t>(mCursorRow)];
         row.dirty = true;
 
-        Cell& target = row.cells[static_cast<size_t>(mCursorCol)];
-        if ((target.flags & FLAG_WIDE_TRAIL) && mCursorCol > 0) {
-            row.cells[static_cast<size_t>(mCursorCol - 1)].reset(mCurFg, mCurBg, 0);
-        } else if ((target.flags & FLAG_WIDE_LEAD) && mCursorCol + 1 < mCols) {
-            row.cells[static_cast<size_t>(mCursorCol + 1)].reset(mCurFg, mCurBg, 0);
+        clearWidePairIfSplit(row, mCursorCol);
+        if (w == 2 && mCursorCol + 1 < mCols) {
+            clearWidePairIfSplit(row, mCursorCol + 1);
         }
 
+        Cell& target = row.cells[static_cast<size_t>(mCursorCol)];
         target.codepoint = cp;
         target.fg = mCurFg;
         target.bg = mCurBg;
@@ -1559,7 +1668,7 @@ public:
 
     void handleControlChar(uint8_t b) noexcept {
         switch (b) {
-            case 0x07: mModes |= MODE_BELL_TRIGGERED; break;
+            case 0x07: mModes.fetch_or(MODE_BELL_TRIGGERED, std::memory_order_relaxed); break;
             case 0x08: mPendingWrap = false; if (mCursorCol > 0) mCursorCol--; break;
             case 0x09: mPendingWrap = false; mCursorCol = std::min(mCols - 1, (mCursorCol & ~7) + 8); break;
             case 0x0A:
@@ -1648,7 +1757,13 @@ public:
                         i += 2;
                     } else if (mode == 2 && i + 4 < mCsiParams.size()) {
                         size_t rIdx = i + 2;
-                        if (i + 5 < mCsiParams.size() && i + 2 < mCsiColonSubparam.size() && mCsiColonSubparam[i + 2]) {
+                        // ITU T.416 colon form with color space ID: 38:2:CS:R:G:B has 4 colon subparams after mode=2
+                        if (i + 5 < mCsiParams.size() &&
+                            i + 5 < mCsiColonSubparam.size() &&
+                            mCsiColonSubparam[i + 2] &&
+                            mCsiColonSubparam[i + 3] &&
+                            mCsiColonSubparam[i + 4] &&
+                            mCsiColonSubparam[i + 5]) {
                             rIdx = i + 3;
                         }
                         if (rIdx + 2 < mCsiParams.size()) {
@@ -1667,42 +1782,47 @@ public:
     }
 
     void setDecPrivateMode(int mode, bool enabled) noexcept {
+        auto setBit = [&](int bit) {
+            if (enabled) mModes.fetch_or(bit, std::memory_order_relaxed);
+            else mModes.fetch_and(~bit, std::memory_order_relaxed);
+        };
         switch (mode) {
-            case 1: if (enabled) mModes |= MODE_APP_CURSOR_KEYS; else mModes &= ~MODE_APP_CURSOR_KEYS; break;
-            case 7: if (enabled) mModes |= MODE_AUTOWRAP; else mModes &= ~MODE_AUTOWRAP; break;
+            case 1: setBit(MODE_APP_CURSOR_KEYS); break;
+            case 7: setBit(MODE_AUTOWRAP); break;
             case 25: mCursorVisible = enabled; break;
             case 47:
             case 1047:
             case 1049: {
-                bool currentlyAlt = (mModes & MODE_ALT_SCREEN) != 0;
+                bool currentlyAlt = (mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) != 0;
                 if (enabled && !currentlyAlt) {
                     mSavedRowPrimary = mCursorRow;
                     mSavedColPrimary = mCursorCol;
-                    mModes |= MODE_ALT_SCREEN;
+                    mModes.fetch_or(MODE_ALT_SCREEN, std::memory_order_relaxed);
                     for (auto& r : mAltGrid) r.clear(DEFAULT_FG, DEFAULT_BG, 0);
                     mCursorRow = 0; mCursorCol = 0; mPendingWrap = false;
-                    markAllDirty();
+                    mViewportScrollOffset = 0;
+                    markAllDirtyLocked();
                 } else if (!enabled && currentlyAlt) {
-                    mModes &= ~MODE_ALT_SCREEN;
+                    mModes.fetch_and(~MODE_ALT_SCREEN, std::memory_order_relaxed);
                     mCursorRow = std::clamp(mSavedRowPrimary, 0, mRows - 1);
                     mCursorCol = std::clamp(mSavedColPrimary, 0, mCols - 1);
                     mPendingWrap = false;
-                    markAllDirty();
+                    markAllDirtyLocked();
                 }
                 break;
             }
             case 1000:
             case 1002:
-            case 1003: if (enabled) mModes |= MODE_MOUSE_TRACKING; else mModes &= ~MODE_MOUSE_TRACKING; break;
-            case 1004: if (enabled) mModes |= MODE_FOCUS_EVENTS; else mModes &= ~MODE_FOCUS_EVENTS; break;
+            case 1003: setBit(MODE_MOUSE_TRACKING); break;
+            case 1004: setBit(MODE_FOCUS_EVENTS); break;
             case 1006:
-            case 1016: if (enabled) mModes |= MODE_MOUSE_SGR; else mModes &= ~MODE_MOUSE_SGR; break;
-            case 2004: if (enabled) mModes |= MODE_BRACKETED_PASTE; else mModes &= ~MODE_BRACKETED_PASTE; break;
+            case 1016: setBit(MODE_MOUSE_SGR); break;
+            case 2004: setBit(MODE_BRACKETED_PASTE); break;
             case 2026:
                 if (enabled) {
-                    mModes |= MODE_SYNC_OUTPUT;
+                    mModes.fetch_or(MODE_SYNC_OUTPUT, std::memory_order_relaxed);
                 } else {
-                    mModes &= ~MODE_SYNC_OUTPUT;
+                    mModes.fetch_and(~MODE_SYNC_OUTPUT, std::memory_order_relaxed);
                     mFrameDirty.store(true, std::memory_order_release);
                 }
                 break;
@@ -1762,17 +1882,24 @@ public:
                 int mode = mCsiParams.empty() ? 0 : mCsiParams[0];
                 if (mode == 0) {
                     Row& cur = grid[static_cast<size_t>(mCursorRow)];
+                    clearWidePairIfSplit(cur, mCursorCol);
                     for (int c = mCursorCol; c < mCols; ++c) cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
                     cur.dirty = true;
                     for (int r = mCursorRow + 1; r < mRows; ++r) grid[static_cast<size_t>(r)].clear(mCurFg, mCurBg, 0);
                 } else if (mode == 1) {
                     for (int r = 0; r < mCursorRow; ++r) grid[static_cast<size_t>(r)].clear(mCurFg, mCurBg, 0);
                     Row& cur = grid[static_cast<size_t>(mCursorRow)];
+                    clearWidePairIfSplit(cur, mCursorCol);
                     for (int c = 0; c <= mCursorCol && c < mCols; ++c) cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
                     cur.dirty = true;
                 } else if (mode == 2 || mode == 3) {
                     for (int r = 0; r < mRows; ++r) grid[static_cast<size_t>(r)].clear(mCurFg, mCurBg, 0);
-                    if (mode == 3) { mScrollback.clear(); mScrollbackHead = 0; mScrollbackCount = 0; }
+                    if (mode == 3) {
+                        mScrollback.clear();
+                        mScrollbackHead = 0;
+                        mScrollbackCount = 0;
+                        mViewportScrollOffset = 0;
+                    }
                 }
                 break;
             }
@@ -1781,8 +1908,10 @@ public:
                 Row& cur = grid[static_cast<size_t>(mCursorRow)];
                 cur.dirty = true;
                 if (mode == 0) {
+                    clearWidePairIfSplit(cur, mCursorCol);
                     for (int c = mCursorCol; c < mCols; ++c) cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
                 } else if (mode == 1) {
+                    clearWidePairIfSplit(cur, mCursorCol);
                     for (int c = 0; c <= mCursorCol && c < mCols; ++c) cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
                 } else if (mode == 2) {
                     cur.clear(mCurFg, mCurBg, 0);
@@ -1795,6 +1924,7 @@ public:
                 int count = std::min(param(0, 1), mCols - mCursorCol);
                 Row& cur = grid[static_cast<size_t>(mCursorRow)];
                 cur.dirty = true;
+                clearWidePairIfSplit(cur, mCursorCol);
                 for (int c = mCols - 1; c >= mCursorCol + count; --c) cur.cells[static_cast<size_t>(c)] = cur.cells[static_cast<size_t>(c - count)];
                 for (int c = mCursorCol; c < mCursorCol + count; ++c) cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
                 break;
@@ -1803,6 +1933,8 @@ public:
                 int count = std::min(param(0, 1), mCols - mCursorCol);
                 Row& cur = grid[static_cast<size_t>(mCursorRow)];
                 cur.dirty = true;
+                clearWidePairIfSplit(cur, mCursorCol);
+                if (mCursorCol + count < mCols) clearWidePairIfSplit(cur, mCursorCol + count);
                 for (int c = mCursorCol; c < mCols - count; ++c) cur.cells[static_cast<size_t>(c)] = cur.cells[static_cast<size_t>(c + count)];
                 for (int c = mCols - count; c < mCols; ++c) cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
                 break;
@@ -1811,6 +1943,8 @@ public:
                 int count = std::min(param(0, 1), mCols - mCursorCol);
                 Row& cur = grid[static_cast<size_t>(mCursorRow)];
                 cur.dirty = true;
+                clearWidePairIfSplit(cur, mCursorCol);
+                if (mCursorCol + count - 1 < mCols) clearWidePairIfSplit(cur, mCursorCol + count - 1);
                 for (int c = mCursorCol; c < mCursorCol + count; ++c) cur.cells[static_cast<size_t>(c)].reset(mCurFg, mCurBg, 0);
                 break;
             }
@@ -1823,8 +1957,23 @@ public:
                 break;
             }
             case 'm': handleSgr(); break;
-            case 's': mSavedRowPrimary = mCursorRow; mSavedColPrimary = mCursorCol; break;
-            case 'u': mCursorRow = std::clamp(mSavedRowPrimary, 0, mRows - 1); mCursorCol = std::clamp(mSavedColPrimary, 0, mCols - 1); mPendingWrap = false; break;
+            case 's':
+                if (mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) {
+                    mSavedRowAlt = mCursorRow; mSavedColAlt = mCursorCol;
+                } else {
+                    mSavedRowPrimary = mCursorRow; mSavedColPrimary = mCursorCol;
+                }
+                break;
+            case 'u':
+                if (mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) {
+                    mCursorRow = std::clamp(mSavedRowAlt, 0, mRows - 1);
+                    mCursorCol = std::clamp(mSavedColAlt, 0, mCols - 1);
+                } else {
+                    mCursorRow = std::clamp(mSavedRowPrimary, 0, mRows - 1);
+                    mCursorCol = std::clamp(mSavedColPrimary, 0, mCols - 1);
+                }
+                mPendingWrap = false;
+                break;
             case 'n': {
                 int p = param(0, 0);
                 if (p == 5) reply += "\x1b[0n";
@@ -1888,6 +2037,8 @@ public:
 
                     Row& row = activeGrid()[static_cast<size_t>(mCursorRow)];
                     row.dirty = true;
+                    clearWidePairIfSplit(row, mCursorCol);
+                    clearWidePairIfSplit(row, mCursorCol + 15);
                     for (int k = 0; k < 16; ++k) {
                         Cell& c = row.cells[static_cast<size_t>(mCursorCol + k)];
                         c.codepoint = data[i + k];
@@ -1952,16 +2103,25 @@ public:
                         mState = State::CHARSET;
                     } else {
                         if (b == '7') {
-                            mSavedRowPrimary = mCursorRow; mSavedColPrimary = mCursorCol;
+                            if (mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) {
+                                mSavedRowAlt = mCursorRow; mSavedColAlt = mCursorCol;
+                            } else {
+                                mSavedRowPrimary = mCursorRow; mSavedColPrimary = mCursorCol;
+                            }
                             mSavedFg = mCurFg; mSavedBg = mCurBg; mSavedFlags = mCurFlags;
                         } else if (b == '8') {
-                            mCursorRow = std::clamp(mSavedRowPrimary, 0, mRows - 1);
-                            mCursorCol = std::clamp(mSavedColPrimary, 0, mCols - 1);
+                            if (mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) {
+                                mCursorRow = std::clamp(mSavedRowAlt, 0, mRows - 1);
+                                mCursorCol = std::clamp(mSavedColAlt, 0, mCols - 1);
+                            } else {
+                                mCursorRow = std::clamp(mSavedRowPrimary, 0, mRows - 1);
+                                mCursorCol = std::clamp(mSavedColPrimary, 0, mCols - 1);
+                            }
                             mCurFg = mSavedFg; mCurBg = mSavedBg; mCurFlags = mSavedFlags; mPendingWrap = false;
                         } else if (b == 'D') lineFeed();
                         else if (b == 'E') { mCursorCol = 0; lineFeed(); }
                         else if (b == 'M') reverseIndex();
-                        else if (b == 'c') reset();
+                        else if (b == 'c') resetLocked();
                         mState = State::NORMAL;
                     }
                     break;
@@ -1991,7 +2151,7 @@ public:
                 default: mState = State::NORMAL; break;
             }
         }
-        if (!(mModes & MODE_SYNC_OUTPUT)) {
+        if (!(mModes.load(std::memory_order_relaxed) & MODE_SYNC_OUTPUT)) {
             mFrameDirty.store(true, std::memory_order_release);
         }
     }
@@ -2019,15 +2179,14 @@ public:
             struct pollfd pfd{};
             pfd.fd = fd;
             pfd.events = POLLIN | POLLERR | POLLHUP;
-            // Zero idle wakeups: block indefinitely (-1) unless synchronized output timeout is active
-            int timeoutMs = (mModes & MODE_SYNC_OUTPUT) ? 16 : -1;
+            int timeoutMs = (mModes.load(std::memory_order_relaxed) & MODE_SYNC_OUTPUT) ? 16 : -1;
             int prc = poll(&pfd, 1, timeoutMs);
             if (prc < 0) {
                 if (errno == EINTR) continue;
                 break;
             }
             if (prc == 0) {
-                if (mModes & MODE_SYNC_OUTPUT) {
+                if (mModes.load(std::memory_order_relaxed) & MODE_SYNC_OUTPUT) {
                     mFrameDirty.store(true, std::memory_order_release);
                     notifySurfaceFromNative();
                 }
@@ -2043,7 +2202,7 @@ public:
                 reply.clear();
                 lock();
                 processStream(buf, static_cast<size_t>(n), reply);
-                bool shouldWake = !(mModes & MODE_SYNC_OUTPUT);
+                bool shouldWake = !(mModes.load(std::memory_order_relaxed) & MODE_SYNC_OUTPUT);
                 unlock();
                 if (!reply.empty()) writeAllFd(fd, reply.data(), reply.size());
                 if (shouldWake) notifySurfaceFromNative();
@@ -2071,7 +2230,7 @@ public:
                  mExitCode.load(std::memory_order_relaxed));
         std::string dummy;
         lock();
-        mModes &= ~MODE_SYNC_OUTPUT;
+        mModes.fetch_and(~MODE_SYNC_OUTPUT, std::memory_order_relaxed);
         processStream(reinterpret_cast<const uint8_t*>(exitMsg), strlen(exitMsg), dummy);
         unlock();
         notifySurfaceFromNative();
@@ -2083,9 +2242,18 @@ public:
 
     void stopSession() noexcept {
         mRunning.store(false, std::memory_order_release);
-        if (mShellPid > 0) kill(mShellPid, SIGHUP);
-        if (mPtyFd >= 0) { close(mPtyFd); mPtyFd = -1; }
-        if (mThreadStarted) { pthread_join(mReaderThread, nullptr); mThreadStarted = false; }
+        if (mShellPid > 0) {
+            kill(-mShellPid, SIGHUP);
+            kill(mShellPid, SIGHUP);
+        }
+        if (mPtyFd >= 0) {
+            close(mPtyFd);
+            mPtyFd = -1;
+        }
+        if (mThreadStarted) {
+            pthread_join(mReaderThread, nullptr);
+            mThreadStarted = false;
+        }
     }
 
     void writeToPty(const void* data, size_t len) noexcept {
@@ -2248,7 +2416,6 @@ static bool startSessionProcess(
         argv.push_back(nullptr);
 
         execve(execPath.c_str(), argv.data(), environ);
-        // Fallback for Android 17 (targetSdk 37) if direct execve returned EACCES
         if (!engine->mIsRoot) {
             char* linkerArgs[] = {
                 const_cast<char*>("/system/bin/linker64"),
@@ -2271,24 +2438,45 @@ static bool startSessionProcess(
     return true;
 }
 
+static void restartEngineIfExited(NeoTerminalEngine* engine, const char* nativeLibDir) noexcept {
+    if (!engine || engine->mRunning.load(std::memory_order_acquire)) return;
+    engine->stopSession();
+    engine->lock();
+    int r = engine->mRows;
+    int c = engine->mCols;
+    int cw = engine->mCellWidthPx;
+    int ch = engine->mCellHeightPx;
+    engine->mStarted = false;
+    engine->unlock();
+    startSessionProcess(engine, nativeLibDir, r, c, cw, ch);
+}
+
 static pthread_mutex_t gGlobalMutex = PTHREAD_MUTEX_INITIALIZER;
-static std::vector<NeoTerminalEngine*> gSessions;
+static std::vector<std::shared_ptr<NeoTerminalEngine>> gSessions;
 static int gActiveIdx = -1;
 static std::string gNativeLibDir;
+static std::string gBootstrapError;
 static std::atomic<int> gBootstrapState{0};
 static bool gCtrlArmed = false;
 static bool gAltArmed  = false;
 
-static NeoTerminalEngine* activeEngineLocked() noexcept {
+static std::shared_ptr<NeoTerminalEngine> activeEngineLocked() noexcept {
     if (gActiveIdx >= 0 && gActiveIdx < static_cast<int>(gSessions.size())) {
         return gSessions[static_cast<size_t>(gActiveIdx)];
     }
     return nullptr;
 }
 
+static std::shared_ptr<NeoTerminalEngine> getActiveEngineSafe() noexcept {
+    pthread_mutex_lock(&gGlobalMutex);
+    auto eng = activeEngineLocked();
+    pthread_mutex_unlock(&gGlobalMutex);
+    return eng;
+}
+
 static bool sendKeyCodeInternal(NeoTerminalEngine* engine, int keyCode, int metaState) noexcept {
     if (!engine) return false;
-    bool appCursor = (engine->mModes & MODE_APP_CURSOR_KEYS) != 0;
+    bool appCursor = (engine->mModes.load(std::memory_order_relaxed) & MODE_APP_CURSOR_KEYS) != 0;
     bool shift = (metaState & AMETA_SHIFT_ON) != 0;
     bool alt   = (metaState & AMETA_ALT_ON) != 0;
     bool ctrl  = (metaState & AMETA_CTRL_ON) != 0;
@@ -2386,19 +2574,57 @@ static void sendCodepointInternal(NeoTerminalEngine* engine, int codepoint, bool
 
 static void* bootstrapWorkerThread(void* /*arg*/) {
     bool extracted = false;
+    std::string err;
     if (access("/data/data/com.termuxx/file/usr/bin/bash", R_OK) != 0 &&
         access("/data/data/com.termuxx/file/usr/bin/apt", R_OK) != 0 &&
         blob_size > 0) {
-        extracted = extractBootstrapInCpp23(reinterpret_cast<const uint8_t*>(blob), static_cast<size_t>(blob_size));
+        extracted = extractBootstrapInCpp23(
+            reinterpret_cast<const uint8_t*>(blob),
+            static_cast<size_t>(blob_size),
+            err
+        );
     }
+
     pthread_mutex_lock(&gGlobalMutex);
     std::string libDir = gNativeLibDir;
+    if (!err.empty()) gBootstrapError = err;
     pthread_mutex_unlock(&gGlobalMutex);
 
     initializeEnvironmentAndAutoUpdater(libDir.c_str(), extracted);
-    gBootstrapState.store(2, std::memory_order_release);
+
+    if (access("/data/data/com.termuxx/file/usr/bin/bash", R_OK) == 0 ||
+        access("/system/bin/sh", R_OK) == 0) {
+        gBootstrapState.store(2, std::memory_order_release);
+    } else {
+        gBootstrapState.store(3, std::memory_order_release);
+    }
     notifySurfaceFromNative();
     return nullptr;
+}
+
+static void launchBootstrapIfNeeded(JNIEnv* env, jstring nativeLibDir) {
+    int state = gBootstrapState.load(std::memory_order_acquire);
+    if (state != 0) return;
+
+    pthread_mutex_lock(&gGlobalMutex);
+    if (gBootstrapState.load(std::memory_order_relaxed) == 0) {
+        if (nativeLibDir) {
+            const char* utf = env->GetStringUTFChars(nativeLibDir, nullptr);
+            if (utf) {
+                gNativeLibDir = utf;
+                env->ReleaseStringUTFChars(nativeLibDir, utf);
+            }
+        }
+        gBootstrapState.store(1, std::memory_order_release);
+        pthread_t th{};
+        if (pthread_create(&th, nullptr, &bootstrapWorkerThread, nullptr) == 0) {
+            pthread_detach(th);
+        } else {
+            gBootstrapError = "Не удалось создать поток инициализации bootstrap";
+            gBootstrapState.store(3, std::memory_order_release);
+        }
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
 }
 
 } // namespace
@@ -2430,32 +2656,7 @@ Java_com_termuxx_app_TermuxActivity_nativeRegisterSurface(JNIEnv* env, jclass /*
 
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeInitAndPollBootstrap(JNIEnv* env, jclass /*clazz*/, jstring nativeLibDir) {
-    int state = gBootstrapState.load(std::memory_order_acquire);
-    if (state == 2) return 2;
-
-    if (state == 0) {
-        pthread_mutex_lock(&gGlobalMutex);
-        if (gBootstrapState.load(std::memory_order_relaxed) == 0) {
-            if (nativeLibDir) {
-                const char* utf = env->GetStringUTFChars(nativeLibDir, nullptr);
-                if (utf) {
-                    gNativeLibDir = utf;
-                    env->ReleaseStringUTFChars(nativeLibDir, utf);
-                }
-            }
-            if (access("/data/data/com.termuxx/file/usr/bin/bash", R_OK) == 0) {
-                initializeEnvironmentAndAutoUpdater(gNativeLibDir.c_str(), false);
-                gBootstrapState.store(2, std::memory_order_release);
-                pthread_mutex_unlock(&gGlobalMutex);
-                return 2;
-            }
-            gBootstrapState.store(1, std::memory_order_release);
-            pthread_t th{};
-            pthread_create(&th, nullptr, &bootstrapWorkerThread, nullptr);
-            pthread_detach(th);
-        }
-        pthread_mutex_unlock(&gGlobalMutex);
-    }
+    launchBootstrapIfNeeded(env, nativeLibDir);
     return gBootstrapState.load(std::memory_order_acquire);
 }
 
@@ -2463,14 +2664,16 @@ JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeNewSession(
     JNIEnv* /*env*/, jclass /*clazz*/, jboolean asRoot, jint rows, jint cols, jint cellW, jint cellH) {
     pthread_mutex_lock(&gGlobalMutex);
-    auto* engine = new NeoTerminalEngine(rows, cols, 2000, asRoot == JNI_TRUE);
-    if (rows > 0 && cols > 0) {
-        startSessionProcess(engine, gNativeLibDir.c_str(), rows, cols, cellW, cellH);
-    }
+    auto engine = std::make_shared<NeoTerminalEngine>(rows, cols, 2000, asRoot == JNI_TRUE);
+    std::string libDir = gNativeLibDir;
     gSessions.push_back(engine);
     gActiveIdx = static_cast<int>(gSessions.size()) - 1;
     int idx = gActiveIdx;
     pthread_mutex_unlock(&gGlobalMutex);
+
+    if (rows > 0 && cols > 0) {
+        startSessionProcess(engine.get(), libDir.c_str(), rows, cols, cellW, cellH);
+    }
     return idx;
 }
 
@@ -2486,11 +2689,11 @@ Java_com_termuxx_app_TermuxActivity_nativeSwitchSession(JNIEnv* /*env*/, jclass 
 
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeCloseSession(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
+    std::shared_ptr<NeoTerminalEngine> toClose;
     pthread_mutex_lock(&gGlobalMutex);
     if (index >= 0 && index < static_cast<int>(gSessions.size())) {
-        NeoTerminalEngine* eng = gSessions[static_cast<size_t>(index)];
+        toClose = gSessions[static_cast<size_t>(index)];
         gSessions.erase(gSessions.begin() + index);
-        delete eng;
         if (gSessions.empty()) {
             gActiveIdx = -1;
         } else if (gActiveIdx >= static_cast<int>(gSessions.size())) {
@@ -2502,16 +2705,24 @@ Java_com_termuxx_app_TermuxActivity_nativeCloseSession(JNIEnv* /*env*/, jclass /
     }
     int rem = static_cast<int>(gSessions.size());
     pthread_mutex_unlock(&gGlobalMutex);
+
+    if (toClose) {
+        toClose->stopSession();
+    }
     return rem;
 }
 
 JNIEXPORT void JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeDestroyAll(JNIEnv* /*env*/, jclass /*clazz*/) {
+    std::vector<std::shared_ptr<NeoTerminalEngine>> oldSessions;
     pthread_mutex_lock(&gGlobalMutex);
-    for (auto* eng : gSessions) delete eng;
-    gSessions.clear();
+    oldSessions.swap(gSessions);
     gActiveIdx = -1;
     pthread_mutex_unlock(&gGlobalMutex);
+
+    for (auto& eng : oldSessions) {
+        if (eng) eng->stopSession();
+    }
 }
 
 JNIEXPORT jint JNICALL
@@ -2542,33 +2753,41 @@ JNIEXPORT void JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeResizeActive(
     JNIEnv* /*env*/, jclass /*clazz*/, jint rows, jint cols, jint cellW, jint cellH) {
     pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
-    if (eng) {
-        startSessionProcess(eng, gNativeLibDir.c_str(), rows, cols, cellW, cellH);
-    }
+    auto eng = activeEngineLocked();
+    std::string libDir = gNativeLibDir;
     pthread_mutex_unlock(&gGlobalMutex);
+    if (eng) {
+        startSessionProcess(eng.get(), libDir.c_str(), rows, cols, cellW, cellH);
+    }
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeConsumeFrameDirty(JNIEnv* /*env*/, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     bool d = eng && eng->mFrameDirty.exchange(false, std::memory_order_acq_rel);
-    pthread_mutex_unlock(&gGlobalMutex);
     return d ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeConsumeBell(JNIEnv* /*env*/, jclass /*clazz*/) {
+    auto eng = getActiveEngineSafe();
+    if (!eng) return JNI_FALSE;
+    int prev = eng->mModes.fetch_and(~MODE_BELL_TRIGGERED, std::memory_order_acq_rel);
+    return (prev & MODE_BELL_TRIGGERED) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeConsumeOsc52Clipboard(JNIEnv* env, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
-    if (!eng || !eng->mOsc52Changed) {
-        pthread_mutex_unlock(&gGlobalMutex);
+    auto eng = getActiveEngineSafe();
+    if (!eng) return nullptr;
+    eng->lock();
+    if (!eng->mOsc52Changed) {
+        eng->unlock();
         return nullptr;
     }
     eng->mOsc52Changed = false;
     std::string clip = eng->mOsc52Clipboard;
-    pthread_mutex_unlock(&gGlobalMutex);
+    eng->unlock();
     return env->NewStringUTF(clip.c_str());
 }
 
@@ -2578,23 +2797,19 @@ Java_com_termuxx_app_TermuxActivity_nativeConsumeOsc52Clipboard(JNIEnv* env, jcl
 JNIEXPORT void JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeStartTextSelection(
     JNIEnv* /*env*/, jclass /*clazz*/, jint scrollOffset, jint screenCol, jint screenRow) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     if (eng) {
         eng->startSelectionAt(scrollOffset, screenCol, screenRow);
     }
-    pthread_mutex_unlock(&gGlobalMutex);
 }
 
 JNIEXPORT void JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeUpdateSelectionHandle(
     JNIEnv* /*env*/, jclass /*clazz*/, jboolean isStartHandle, jint col, jint logicalY) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     if (eng) {
         eng->updateSelectionHandle(isStartHandle == JNI_TRUE, col, logicalY);
     }
-    pthread_mutex_unlock(&gGlobalMutex);
 }
 
 JNIEXPORT jint JNICALL
@@ -2610,15 +2825,13 @@ Java_com_termuxx_app_TermuxActivity_nativeOnSelectionTouchPx(
     jfloat viewW,
     jfloat viewH,
     jfloat radiusPx) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     int res = 0;
     if (eng) {
         eng->lock();
         res = eng->onSelectionTouchLocked(action, scrollOffset, touchX, touchY, cellW, cellH, viewW, viewH, radiusPx);
         eng->unlock();
     }
-    pthread_mutex_unlock(&gGlobalMutex);
     return res;
 }
 
@@ -2633,8 +2846,7 @@ Java_com_termuxx_app_TermuxActivity_nativeGetSelectionGeometryPx(
     jfloat viewH,
     jfloat radiusPx,
     jfloatArray outGeom) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     float geom[14] = {0};
     bool ok = false;
     if (eng) {
@@ -2642,8 +2854,7 @@ Java_com_termuxx_app_TermuxActivity_nativeGetSelectionGeometryPx(
         ok = eng->computeSelectionGeometryLocked(scrollOffset, cellW, cellH, viewW, viewH, radiusPx, geom);
         eng->unlock();
     }
-    pthread_mutex_unlock(&gGlobalMutex);
-    if (ok && outGeom) {
+    if (ok && outGeom && env->GetArrayLength(outGeom) >= 14) {
         env->SetFloatArrayRegion(outGeom, 0, 14, geom);
     }
     return ok ? JNI_TRUE : JNI_FALSE;
@@ -2651,66 +2862,64 @@ Java_com_termuxx_app_TermuxActivity_nativeGetSelectionGeometryPx(
 
 JNIEXPORT jboolean JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeStopTextSelection(JNIEnv* /*env*/, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     bool stopped = eng && eng->stopSelection();
-    pthread_mutex_unlock(&gGlobalMutex);
     return stopped ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeIsSelectingText(JNIEnv* /*env*/, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
-    bool active = eng && eng->mSelActive;
-    pthread_mutex_unlock(&gGlobalMutex);
+    auto eng = getActiveEngineSafe();
+    if (!eng) return JNI_FALSE;
+    eng->lock();
+    bool active = eng->mSelActive;
+    eng->unlock();
     return active ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeSelectAll(JNIEnv* /*env*/, jclass /*clazz*/, jint scrollOffset) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     if (eng) {
         eng->lock();
-        int clampedOffset = (eng->mModes & MODE_ALT_SCREEN) ? 0 : std::clamp<int>(scrollOffset, 0, eng->mScrollbackCount);
+        int modes = eng->mModes.load(std::memory_order_relaxed);
+        int clampedOffset = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp<int>(scrollOffset, 0, eng->mScrollbackCount);
         eng->mSelActive = true;
         eng->mSelY1 = -clampedOffset;
         eng->mSelX1 = 0;
         eng->mSelY2 = eng->mRows - 1 - clampedOffset;
         eng->mSelX2 = eng->mCols - 1;
-        eng->markAllDirty();
+        eng->markAllDirtyLocked();
         eng->unlock();
     }
-    pthread_mutex_unlock(&gGlobalMutex);
 }
 
 JNIEXPORT void JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeGetSelectionSelectors(JNIEnv* env, jclass /*clazz*/, jintArray outSelectors) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     jint vals[4] = {-1, -1, -1, -1};
-    if (eng && eng->mSelActive) {
-        vals[0] = eng->mSelY1;
-        vals[1] = eng->mSelY2;
-        vals[2] = eng->mSelX1;
-        vals[3] = eng->mSelX2;
+    if (eng) {
+        eng->lock();
+        if (eng->mSelActive) {
+            vals[0] = eng->mSelY1;
+            vals[1] = eng->mSelY2;
+            vals[2] = eng->mSelX1;
+            vals[3] = eng->mSelX2;
+        }
+        eng->unlock();
     }
-    pthread_mutex_unlock(&gGlobalMutex);
-    if (outSelectors) {
+    if (outSelectors && env->GetArrayLength(outSelectors) >= 4) {
         env->SetIntArrayRegion(outSelectors, 0, 4, vals);
     }
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeGetSelectedText(JNIEnv* env, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* engine = activeEngineLocked();
-    pthread_mutex_unlock(&gGlobalMutex);
+    auto engine = getActiveEngineSafe();
     if (!engine) return env->NewStringUTF("");
 
     engine->lock();
-    std::string out = engine->extractSelectedText();
+    std::string out = engine->extractSelectedTextLocked();
     engine->unlock();
     return env->NewStringUTF(out.c_str());
 }
@@ -2726,52 +2935,79 @@ Java_com_termuxx_app_TermuxActivity_nativeDispatchCustomKey(JNIEnv* env, jclass 
     std::string label(utf);
     env->ReleaseStringUTFChars(keyLabel, utf);
 
+    std::shared_ptr<NeoTerminalEngine> eng;
+    std::string libDir;
+    int meta = 0;
+    bool ctrl = false;
+    bool alt = false;
+    int mask = 0;
+
     pthread_mutex_lock(&gGlobalMutex);
     if (label == "CTRL") {
         gCtrlArmed = !gCtrlArmed;
+        mask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0);
+        pthread_mutex_unlock(&gGlobalMutex);
+        return mask;
     } else if (label == "ALT") {
         gAltArmed = !gAltArmed;
+        mask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0);
+        pthread_mutex_unlock(&gGlobalMutex);
+        return mask;
     } else {
-        NeoTerminalEngine* eng = activeEngineLocked();
-        if (eng && !label.empty()) {
-            int meta = (gCtrlArmed ? AMETA_CTRL_ON : 0) | (gAltArmed ? AMETA_ALT_ON : 0);
-            if (label == "ESC") sendKeyCodeInternal(eng, AKEYCODE_ESCAPE, meta);
-            else if (label == "TAB") sendKeyCodeInternal(eng, AKEYCODE_TAB, meta);
-            else if (label == "ENTER" || label == "RET") sendKeyCodeInternal(eng, AKEYCODE_ENTER, meta);
-            else if (label == "BKSP") sendKeyCodeInternal(eng, AKEYCODE_DEL, meta);
-            else if (label == "DEL") sendKeyCodeInternal(eng, AKEYCODE_FORWARD_DEL, meta);
-            else if (label == "INS") sendKeyCodeInternal(eng, AKEYCODE_INSERT, meta);
-            else if (label == "▲" || label == "UP") sendKeyCodeInternal(eng, AKEYCODE_DPAD_UP, meta);
-            else if (label == "▼" || label == "DOWN") sendKeyCodeInternal(eng, AKEYCODE_DPAD_DOWN, meta);
-            else if (label == "◀" || label == "LEFT") sendKeyCodeInternal(eng, AKEYCODE_DPAD_LEFT, meta);
-            else if (label == "▶" || label == "RIGHT") sendKeyCodeInternal(eng, AKEYCODE_DPAD_RIGHT, meta);
-            else if (label == "HOME") sendKeyCodeInternal(eng, AKEYCODE_MOVE_HOME, meta);
-            else if (label == "END") sendKeyCodeInternal(eng, AKEYCODE_MOVE_END, meta);
-            else if (label == "PGUP") sendKeyCodeInternal(eng, AKEYCODE_PAGE_UP, meta);
-            else if (label == "PGDN") sendKeyCodeInternal(eng, AKEYCODE_PAGE_DOWN, meta);
-            else if (label == "F1") sendKeyCodeInternal(eng, AKEYCODE_F1, meta);
-            else if (label == "F2") sendKeyCodeInternal(eng, AKEYCODE_F2, meta);
-            else if (label == "F3") sendKeyCodeInternal(eng, AKEYCODE_F3, meta);
-            else if (label == "F4") sendKeyCodeInternal(eng, AKEYCODE_F4, meta);
-            else if (label == "F5") sendKeyCodeInternal(eng, AKEYCODE_F5, meta);
-            else if (label == "F6") sendKeyCodeInternal(eng, AKEYCODE_F6, meta);
-            else if (label == "F7") sendKeyCodeInternal(eng, AKEYCODE_F7, meta);
-            else if (label == "F8") sendKeyCodeInternal(eng, AKEYCODE_F8, meta);
-            else if (label == "F9") sendKeyCodeInternal(eng, AKEYCODE_F9, meta);
-            else if (label == "F10") sendKeyCodeInternal(eng, AKEYCODE_F10, meta);
-            else if (label == "F11") sendKeyCodeInternal(eng, AKEYCODE_F11, meta);
-            else if (label == "F12") sendKeyCodeInternal(eng, AKEYCODE_F12, meta);
-            else if (label.rfind("CTRL+", 0) == 0 && label.size() == 6) {
-                sendCodepointInternal(eng, static_cast<unsigned char>(label[5]), true, gAltArmed);
-            } else {
-                sendCodepointInternal(eng, static_cast<unsigned char>(label[0]), gCtrlArmed, gAltArmed);
-            }
-        }
+        eng = activeEngineLocked();
+        libDir = gNativeLibDir;
+        ctrl = gCtrlArmed;
+        alt = gAltArmed;
+        meta = (ctrl ? AMETA_CTRL_ON : 0) | (alt ? AMETA_ALT_ON : 0);
         gCtrlArmed = false;
         gAltArmed = false;
+        mask = 0;
     }
-    int mask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0);
     pthread_mutex_unlock(&gGlobalMutex);
+
+    if (eng && !label.empty()) {
+        if (!eng->mRunning.load(std::memory_order_acquire) &&
+            (label == "ENTER" || label == "RET")) {
+            restartEngineIfExited(eng.get(), libDir.c_str());
+            return mask;
+        }
+        if (label == "ESC") sendKeyCodeInternal(eng.get(), AKEYCODE_ESCAPE, meta);
+        else if (label == "TAB") sendKeyCodeInternal(eng.get(), AKEYCODE_TAB, meta);
+        else if (label == "ENTER" || label == "RET") sendKeyCodeInternal(eng.get(), AKEYCODE_ENTER, meta);
+        else if (label == "BKSP") sendKeyCodeInternal(eng.get(), AKEYCODE_DEL, meta);
+        else if (label == "DEL") sendKeyCodeInternal(eng.get(), AKEYCODE_FORWARD_DEL, meta);
+        else if (label == "INS") sendKeyCodeInternal(eng.get(), AKEYCODE_INSERT, meta);
+        else if (label == "▲" || label == "UP") sendKeyCodeInternal(eng.get(), AKEYCODE_DPAD_UP, meta);
+        else if (label == "▼" || label == "DOWN") sendKeyCodeInternal(eng.get(), AKEYCODE_DPAD_DOWN, meta);
+        else if (label == "◀" || label == "LEFT") sendKeyCodeInternal(eng.get(), AKEYCODE_DPAD_LEFT, meta);
+        else if (label == "▶" || label == "RIGHT") sendKeyCodeInternal(eng.get(), AKEYCODE_DPAD_RIGHT, meta);
+        else if (label == "HOME") sendKeyCodeInternal(eng.get(), AKEYCODE_MOVE_HOME, meta);
+        else if (label == "END") sendKeyCodeInternal(eng.get(), AKEYCODE_MOVE_END, meta);
+        else if (label == "PGUP") sendKeyCodeInternal(eng.get(), AKEYCODE_PAGE_UP, meta);
+        else if (label == "PGDN") sendKeyCodeInternal(eng.get(), AKEYCODE_PAGE_DOWN, meta);
+        else if (label == "F1") sendKeyCodeInternal(eng.get(), AKEYCODE_F1, meta);
+        else if (label == "F2") sendKeyCodeInternal(eng.get(), AKEYCODE_F2, meta);
+        else if (label == "F3") sendKeyCodeInternal(eng.get(), AKEYCODE_F3, meta);
+        else if (label == "F4") sendKeyCodeInternal(eng.get(), AKEYCODE_F4, meta);
+        else if (label == "F5") sendKeyCodeInternal(eng.get(), AKEYCODE_F5, meta);
+        else if (label == "F6") sendKeyCodeInternal(eng.get(), AKEYCODE_F6, meta);
+        else if (label == "F7") sendKeyCodeInternal(eng.get(), AKEYCODE_F7, meta);
+        else if (label == "F8") sendKeyCodeInternal(eng.get(), AKEYCODE_F8, meta);
+        else if (label == "F9") sendKeyCodeInternal(eng.get(), AKEYCODE_F9, meta);
+        else if (label == "F10") sendKeyCodeInternal(eng.get(), AKEYCODE_F10, meta);
+        else if (label == "F11") sendKeyCodeInternal(eng.get(), AKEYCODE_F11, meta);
+        else if (label == "F12") sendKeyCodeInternal(eng.get(), AKEYCODE_F12, meta);
+        else if (label.rfind("CTRL+", 0) == 0 && label.size() == 6) {
+            sendCodepointInternal(eng.get(), static_cast<unsigned char>(label[5]), true, alt);
+        } else {
+            size_t consumed = 0;
+            uint32_t cp = decodeFirstUtf8Codepoint(label, consumed);
+            sendCodepointInternal(eng.get(), static_cast<int>(cp), ctrl, alt);
+            if (consumed < label.size()) {
+                eng->writeToPty(label.data() + consumed, label.size() - consumed);
+            }
+        }
+    }
     return mask;
 }
 
@@ -2783,12 +3019,11 @@ Java_com_termuxx_app_TermuxActivity_nativeGetModifierMask(JNIEnv* /*env*/, jclas
     return mask;
 }
 
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeSendText(
-    JNIEnv* env, jclass /*clazz*/, jstring text, jboolean isPaste) {
+static void sendTextToActiveInternal(JNIEnv* env, jstring text, bool isPaste) {
     if (!text) return;
     pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* engine = activeEngineLocked();
+    auto engine = activeEngineLocked();
+    std::string libDir = gNativeLibDir;
     bool ctrl = gCtrlArmed;
     bool alt  = gAltArmed;
     gCtrlArmed = false;
@@ -2800,6 +3035,12 @@ Java_com_termuxx_app_TermuxActivity_nativeSendText(
     if (!utf) return;
     std::string payload(utf);
     env->ReleaseStringUTFChars(text, utf);
+
+    if (!engine->mRunning.load(std::memory_order_acquire) &&
+        (payload == "\n" || payload == "\r" || payload == "\r\n")) {
+        restartEngineIfExited(engine.get(), libDir.c_str());
+        return;
+    }
 
     if (isPaste) {
         std::string sanitized;
@@ -2814,36 +3055,51 @@ Java_com_termuxx_app_TermuxActivity_nativeSendText(
                 sanitized.push_back(payload[i]);
             }
         }
-        if ((engine->mModes & MODE_BRACKETED_PASTE) != 0) {
+        if ((engine->mModes.load(std::memory_order_relaxed) & MODE_BRACKETED_PASTE) != 0) {
             std::string wrapped = "\x1b[200~" + sanitized + "\x1b[201~";
             engine->writeToPty(wrapped.data(), wrapped.size());
         } else {
             engine->writeToPty(sanitized.data(), sanitized.size());
         }
     } else if ((ctrl || alt) && !payload.empty()) {
-        sendCodepointInternal(engine, static_cast<unsigned char>(payload[0]), ctrl, alt);
-        if (payload.size() > 1) {
-            engine->writeToPty(payload.data() + 1, payload.size() - 1);
+        size_t consumed = 0;
+        uint32_t cp = decodeFirstUtf8Codepoint(payload, consumed);
+        sendCodepointInternal(engine.get(), static_cast<int>(cp), ctrl, alt);
+        if (consumed < payload.size()) {
+            engine->writeToPty(payload.data() + consumed, payload.size() - consumed);
         }
     } else {
         engine->writeToPty(payload.data(), payload.size());
     }
 }
 
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSendText(
+    JNIEnv* env, jclass /*clazz*/, jstring text, jboolean isPaste) {
+    sendTextToActiveInternal(env, text, isPaste == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSendText__Ljava_lang_String_2Z(
+    JNIEnv* env, jclass /*clazz*/, jstring text, jboolean isPaste) {
+    sendTextToActiveInternal(env, text, isPaste == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSendText__Ljava_lang_String_2(
+    JNIEnv* env, jclass /*clazz*/, jstring text) {
+    sendTextToActiveInternal(env, text, false);
+}
+
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeSendKeyEvent(
     JNIEnv* /*env*/, jclass /*clazz*/, jint keyCode, jint unicodeChar, jint metaState) {
     pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* engine = activeEngineLocked();
+    auto engine = activeEngineLocked();
+    std::string libDir = gNativeLibDir;
     if (!engine) {
         pthread_mutex_unlock(&gGlobalMutex);
         return 0;
-    }
-
-    if (!engine->mRunning.load(std::memory_order_acquire) &&
-        (keyCode == AKEYCODE_ENTER || keyCode == AKEYCODE_NUMPAD_ENTER)) {
-        pthread_mutex_unlock(&gGlobalMutex);
-        return 2;
     }
 
     int meta = metaState | (gCtrlArmed ? AMETA_CTRL_ON : 0) | (gAltArmed ? AMETA_ALT_ON : 0);
@@ -2851,9 +3107,15 @@ Java_com_termuxx_app_TermuxActivity_nativeSendKeyEvent(
     gAltArmed  = false;
     pthread_mutex_unlock(&gGlobalMutex);
 
-    if (sendKeyCodeInternal(engine, keyCode, meta)) return 1;
+    if (!engine->mRunning.load(std::memory_order_acquire) &&
+        (keyCode == AKEYCODE_ENTER || keyCode == AKEYCODE_NUMPAD_ENTER)) {
+        restartEngineIfExited(engine.get(), libDir.c_str());
+        return 2;
+    }
+
+    if (sendKeyCodeInternal(engine.get(), keyCode, meta)) return 1;
     if (unicodeChar > 0) {
-        sendCodepointInternal(engine, unicodeChar, (meta & AMETA_CTRL_ON) != 0, (meta & AMETA_ALT_ON) != 0);
+        sendCodepointInternal(engine.get(), unicodeChar, (meta & AMETA_CTRL_ON) != 0, (meta & AMETA_ALT_ON) != 0);
         return 1;
     }
     return 0;
@@ -2862,14 +3124,17 @@ Java_com_termuxx_app_TermuxActivity_nativeSendKeyEvent(
 JNIEXPORT void JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeSendMouse(
     JNIEnv* /*env*/, jclass /*clazz*/, jint button, jint col, jint row, jboolean pressed) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* engine = activeEngineLocked();
-    pthread_mutex_unlock(&gGlobalMutex);
+    auto engine = getActiveEngineSafe();
     if (!engine) return;
-    if ((engine->mModes & MODE_MOUSE_TRACKING) == 0) return;
-    if ((engine->mModes & MODE_MOUSE_SGR) != 0) {
-        int c = std::clamp<int>(col, 1, engine->mCols);
-        int r = std::clamp<int>(row, 1, engine->mRows);
+    int modes = engine->mModes.load(std::memory_order_relaxed);
+    if ((modes & MODE_MOUSE_TRACKING) == 0) return;
+    if ((modes & MODE_MOUSE_SGR) != 0) {
+        engine->lock();
+        int maxC = engine->mCols;
+        int maxR = engine->mRows;
+        engine->unlock();
+        int c = std::clamp<int>(col, 1, maxC);
+        int r = std::clamp<int>(row, 1, maxR);
         char buf[48];
         snprintf(buf, sizeof(buf), "\x1b[<%d;%d;%d%c", button, c, r, pressed ? 'M' : 'm');
         engine->writeToPty(buf, strlen(buf));
@@ -2878,35 +3143,36 @@ Java_com_termuxx_app_TermuxActivity_nativeSendMouse(
 
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeGetActiveScrollback(JNIEnv* /*env*/, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
-    int sb = (eng && !(eng->mModes & MODE_ALT_SCREEN)) ? eng->mScrollbackCount : 0;
-    pthread_mutex_unlock(&gGlobalMutex);
+    auto eng = getActiveEngineSafe();
+    if (!eng) return 0;
+    eng->lock();
+    int sb = (eng->mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) ? 0 : eng->mScrollbackCount;
+    eng->unlock();
     return sb;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeIsRowDirty(JNIEnv* /*env*/, jclass /*clazz*/, jint screenRow) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     bool dirty = false;
-    if (eng && screenRow >= 0 && screenRow < eng->mRows) {
-        dirty = eng->activeGrid()[static_cast<size_t>(screenRow)].dirty;
+    if (eng) {
+        eng->lock();
+        if (screenRow >= 0 && screenRow < eng->mRows) {
+            dirty = eng->activeGrid()[static_cast<size_t>(screenRow)].dirty;
+        }
+        eng->unlock();
     }
-    pthread_mutex_unlock(&gGlobalMutex);
     return dirty ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeClearDirtyFlags(JNIEnv* /*env*/, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     if (eng) {
         eng->lock();
         for (auto& r : eng->activeGrid()) r.dirty = false;
         eng->unlock();
     }
-    pthread_mutex_unlock(&gGlobalMutex);
 }
 
 JNIEXPORT jint JNICALL
@@ -2918,13 +3184,17 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     jintArray outBgRuns,
     jintArray outGlyphs) {
 
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* engine = activeEngineLocked();
-    pthread_mutex_unlock(&gGlobalMutex);
+    if (!outBgRuns || !outGlyphs) return 0;
+    auto engine = getActiveEngineSafe();
     if (!engine) return 0;
 
+    int maxBgRuns = static_cast<int>(env->GetArrayLength(outBgRuns)) / 3;
+    int maxGlyphs = static_cast<int>(env->GetArrayLength(outGlyphs)) / 4;
+    if (maxBgRuns <= 0 || maxGlyphs <= 0) return 0;
+
     engine->lock();
-    int clampedOffset = (engine->mModes & MODE_ALT_SCREEN) ? 0 : std::clamp<int>(scrollOffset, 0, engine->mScrollbackCount);
+    int modes = engine->mModes.load(std::memory_order_relaxed);
+    int clampedOffset = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp<int>(scrollOffset, 0, engine->mScrollbackCount);
     int logicalY = screenRow - clampedOffset;
     const Row& row = engine->getRowByLogicalY(logicalY);
     int cols = std::min<int>(engine->mCols, static_cast<int>(row.cells.size()));
@@ -2943,7 +3213,7 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
         };
 
         int runStart = 0;
-        while (runStart < cols) {
+        while (runStart < cols && bgCount < maxBgRuns) {
             uint32_t bg = cellBgAt(runStart);
             int runEnd = runStart + 1;
             while (runEnd < cols && cellBgAt(runEnd) == bg) {
@@ -2959,7 +3229,7 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
             runStart = runEnd;
         }
 
-        for (int c = 0; c < cols; ++c) {
+        for (int c = 0; c < cols && glCount < maxGlyphs; ++c) {
             const Cell& cell = row.cells[static_cast<size_t>(c)];
             if (cell.codepoint <= ' ' || (cell.flags & (FLAG_INVISIBLE | FLAG_WIDE_TRAIL)) != 0) {
                 continue;
@@ -2968,14 +3238,15 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
                 ? SELECTION_FG
                 : resolveFgColor(cell.fg, cell.bg, cell.flags);
 
-            // Emit procedural Box-Drawing / Block Elements directly from C++23
-            if (!emitProceduralBoxOrBlockInCpp23(cell.codepoint, c, fg, glPtr, glCount)) {
-                int base = glCount * 4;
-                glPtr[base]     = static_cast<jint>(cell.codepoint);
-                glPtr[base + 1] = c;
-                glPtr[base + 2] = static_cast<jint>(fg);
-                glPtr[base + 3] = static_cast<jint>(cell.flags);
-                glCount++;
+            if (!emitProceduralBoxOrBlockInCpp23(cell.codepoint, c, fg, glPtr, glCount, maxGlyphs)) {
+                if (glCount < maxGlyphs) {
+                    int base = glCount * 4;
+                    glPtr[base]     = static_cast<jint>(cell.codepoint);
+                    glPtr[base + 1] = c;
+                    glPtr[base + 2] = static_cast<jint>(fg);
+                    glPtr[base + 3] = static_cast<jint>(cell.flags);
+                    glCount++;
+                }
             }
         }
     }
@@ -2991,50 +3262,51 @@ JNIEXPORT void JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeSetDefaultCursorShape(JNIEnv* /*env*/, jclass /*clazz*/, jint shape) {
     pthread_mutex_lock(&gGlobalMutex);
     gDefaultCursorShape = std::clamp<int>(shape, 0, 2);
-    for (auto* eng : gSessions) {
-        eng->mCursorShape = gDefaultCursorShape;
-        eng->markAllDirty();
+    for (auto& eng : gSessions) {
+        if (eng) {
+            eng->lock();
+            eng->mCursorShape = gDefaultCursorShape;
+            eng->markAllDirtyLocked();
+            eng->unlock();
+        }
     }
     pthread_mutex_unlock(&gGlobalMutex);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeGetCursorState(JNIEnv* /*env*/, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
+    auto eng = getActiveEngineSafe();
     int state = -1;
-    if (eng && eng->mCursorVisible) {
-        state = ((eng->mCursorShape & 3) << 29) |
-                ((eng->mCursorRow & 0x1FFF) << 16) |
-                (eng->mCursorCol & 0xFFFF);
+    if (eng) {
+        eng->lock();
+        if (eng->mCursorVisible) {
+            state = ((eng->mCursorShape & 3) << 29) |
+                    ((eng->mCursorRow & 0x1FFF) << 16) |
+                    (eng->mCursorCol & 0xFFFF);
+        }
+        eng->unlock();
     }
-    pthread_mutex_unlock(&gGlobalMutex);
     return state;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeGetModesMask(JNIEnv* /*env*/, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
-    int m = eng ? eng->mModes : 0;
-    pthread_mutex_unlock(&gGlobalMutex);
-    return m;
+    auto eng = getActiveEngineSafe();
+    return eng ? eng->mModes.load(std::memory_order_relaxed) : 0;
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeGetTranscriptText(JNIEnv* env, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* engine = activeEngineLocked();
-    pthread_mutex_unlock(&gGlobalMutex);
+    auto engine = getActiveEngineSafe();
     if (!engine) return env->NewStringUTF("");
 
     std::string out;
     out.reserve(16384);
 
     engine->lock();
-    int sbCount = (engine->mModes & MODE_ALT_SCREEN) ? 0 : engine->mScrollbackCount;
+    int sbCount = (engine->mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) ? 0 : engine->mScrollbackCount;
     for (int i = -sbCount; i < engine->mRows; ++i) {
-        const Row& row = engine->getVisualRow(0, i);
+        const Row& row = engine->getRowByLogicalY(i);
         int lastNonSpace = -1;
         for (int c = static_cast<int>(row.cells.size()) - 1; c >= 0; --c) {
             if (row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
@@ -3052,6 +3324,156 @@ Java_com_termuxx_app_TermuxActivity_nativeGetTranscriptText(JNIEnv* env, jclass 
     }
     engine->unlock();
     return env->NewStringUTF(out.c_str());
+}
+
+// ============================================================================
+// Backwards-Compatible JNI Bridge Aliases
+// ============================================================================
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeInitEngine(JNIEnv* env, jclass /*clazz*/, jstring /*dataDir*/, jstring nativeLibDir) {
+    launchBootstrapIfNeeded(env, nativeLibDir);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeBindSurface(JNIEnv* env, jclass clazz, jobject surface) {
+    Java_com_termuxx_app_TermuxActivity_nativeRegisterSurface(env, clazz, surface);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetBootstrapState(JNIEnv* /*env*/, jclass /*clazz*/) {
+    return gBootstrapState.load(std::memory_order_acquire);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetBootstrapError(JNIEnv* env, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    std::string err = gBootstrapError;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return env->NewStringUTF(err.c_str());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeCreateSession(JNIEnv* env, jclass clazz, jint rows, jint cols) {
+    return Java_com_termuxx_app_TermuxActivity_nativeNewSession(env, clazz, JNI_FALSE, rows, cols, 18, 36);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetActiveSession(JNIEnv* env, jclass clazz) {
+    return Java_com_termuxx_app_TermuxActivity_nativeGetActiveIndex(env, clazz);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeResizePty(JNIEnv* env, jclass clazz, jint rows, jint cols) {
+    Java_com_termuxx_app_TermuxActivity_nativeResizeActive(env, clazz, rows, cols, 18, 36);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSendKey(JNIEnv* env, jclass clazz, jint keyCode, jboolean ctrl, jboolean alt) {
+    int meta = (ctrl == JNI_TRUE ? AMETA_CTRL_ON : 0) | (alt == JNI_TRUE ? AMETA_ALT_ON : 0);
+    Java_com_termuxx_app_TermuxActivity_nativeSendKeyEvent(env, clazz, keyCode, 0, meta);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_termuxx_app_TermuxActivity_nativePollOutput(JNIEnv* env, jclass clazz) {
+    return Java_com_termuxx_app_TermuxActivity_nativeConsumeFrameDirty(env, clazz);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetRowText(JNIEnv* env, jclass /*clazz*/, jint rowIdx) {
+    auto eng = getActiveEngineSafe();
+    if (!eng) return env->NewStringUTF("");
+    eng->lock();
+    const Row& row = eng->getVisualRow(eng->mViewportScrollOffset, rowIdx);
+    std::string out;
+    int lastNonSpace = -1;
+    for (int c = static_cast<int>(row.cells.size()) - 1; c >= 0; --c) {
+        if (row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
+            !(row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL)) {
+            lastNonSpace = c;
+            break;
+        }
+    }
+    for (int c = 0; c <= lastNonSpace; ++c) {
+        if (row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL) continue;
+        appendUtf8(out, row.cells[static_cast<size_t>(c)].codepoint);
+    }
+    eng->unlock();
+    return env->NewStringUTF(out.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetSelectedText__IIII(
+    JNIEnv* env, jclass /*clazz*/, jint r1, jint c1, jint r2, jint c2) {
+    auto eng = getActiveEngineSafe();
+    if (!eng) return env->NewStringUTF("");
+    eng->lock();
+    int modes = eng->mModes.load(std::memory_order_relaxed);
+    int off = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp(eng->mViewportScrollOffset, 0, eng->mScrollbackCount);
+    std::string out = eng->extractRangeTextLocked(r1 - off, c1, r2 - off, c2);
+    eng->unlock();
+    return env->NewStringUTF(out.c_str());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeScrollViewport(JNIEnv* /*env*/, jclass /*clazz*/, jint deltaLines) {
+    auto eng = getActiveEngineSafe();
+    if (!eng) return 0;
+    eng->lock();
+    int maxSb = (eng->mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) ? 0 : eng->mScrollbackCount;
+    eng->mViewportScrollOffset = std::clamp(eng->mViewportScrollOffset + deltaLines, 0, maxSb);
+    int cur = eng->mViewportScrollOffset;
+    eng->markAllDirtyLocked();
+    eng->unlock();
+    return cur;
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeResetScroll(JNIEnv* /*env*/, jclass /*clazz*/) {
+    auto eng = getActiveEngineSafe();
+    if (!eng) return;
+    eng->lock();
+    if (eng->mViewportScrollOffset != 0) {
+        eng->mViewportScrollOffset = 0;
+        eng->markAllDirtyLocked();
+    }
+    eng->unlock();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetAlternateScreen(JNIEnv* /*env*/, jclass /*clazz*/) {
+    auto eng = getActiveEngineSafe();
+    bool alt = eng && ((eng->mModes.load(std::memory_order_relaxed) & MODE_ALT_SCREEN) != 0);
+    return alt ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSetCtrlMod(JNIEnv* /*env*/, jclass /*clazz*/, jboolean active) {
+    pthread_mutex_lock(&gGlobalMutex);
+    gCtrlArmed = (active == JNI_TRUE);
+    pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSetAltMod(JNIEnv* /*env*/, jclass /*clazz*/, jboolean active) {
+    pthread_mutex_lock(&gGlobalMutex);
+    gAltArmed = (active == JNI_TRUE);
+    pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetCtrlMod(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    bool v = gCtrlArmed;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return v ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetAltMod(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    bool v = gAltArmed;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return v ? JNI_TRUE : JNI_FALSE;
 }
 
 } // extern "C"

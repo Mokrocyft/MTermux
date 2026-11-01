@@ -13,8 +13,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -87,7 +89,11 @@ class KeepAliveService : Service() {
             .setOngoing(true)
             .build()
         try {
-            startForeground(NOTIFICATION_ID, notification)
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
         } catch (_: Throwable) {
         }
         return START_NOT_STICKY
@@ -111,7 +117,7 @@ class KeepAliveService : Service() {
 
 /**
  * TermuxX Modern Edition — Pure Kotlin + C++23 Single-Activity Architecture
- * Targeted exclusively for Android 17 "CinnamonBun" (API 37) / ColorOS 17 (aarch64-v8a).
+ * Targeted for Android 17 "CinnamonBun" (API 37) / ColorOS 17 (aarch64-v8a).
  */
 class TermuxActivity : Activity() {
 
@@ -123,48 +129,92 @@ class TermuxActivity : Activity() {
         private const val PREFS_NAME = "termuxx_modern_prefs"
         private const val PREF_EXTRA_KEYS = "extra_keys_csv"
         private const val PREF_FONT_SIZE = "font_size_sp"
-        private const val DEFAULT_EXTRA_KEYS = "ESC,TAB,CTRL,ALT,-,/,|,UP,DOWN,LEFT,RIGHT"
+        private const val PREF_CURSOR_SHAPE = "cursor_shape"
+        private const val DEFAULT_EXTRA_KEYS = "ESC,TAB,CTRL,ALT,-,/,|,~,UP,DOWN,LEFT,RIGHT"
         private const val REQ_POST_NOTIFICATIONS = 1001
 
-        // Material 3 Expressive Dark AMOLED Palette
+        // Pure Dark AMOLED Palette + ColorOS 17 Accents
         private const val COLOR_AMOLED_BG = 0xFF000000.toInt()
         private const val COLOR_HEADER_BG = 0xFF0E131F.toInt()
         private const val COLOR_SURFACE_PILL = 0xFF1A2234.toInt()
         private const val COLOR_ACCENT_PRIMARY = 0xFF6366F1.toInt()
         private const val COLOR_ACCENT_ACTIVE = 0xFF38BDF8.toInt()
-        private const val COLOR_TEXT_PRIMARY = 0xFFE2E8F0.toInt()
+        private const val COLOR_ACCENT_ROOT = 0xFFE06C75.toInt()
+        private const val COLOR_TEXT_PRIMARY = 0xFFE5E9F0.toInt()
         private const val COLOR_TEXT_MUTED = 0xFF94A3B8.toInt()
-        private const val COLOR_SELECTION_BG = 0x6638BDF8
 
-        // JNI Bridge to C++23 Core Engine (libtermuxx-core.so)
-        @JvmStatic external fun nativeInitEngine(dataDir: String, nativeLibDir: String)
-        @JvmStatic external fun nativeBindSurface(surface: Any?)
-        @JvmStatic external fun nativeGetBootstrapState(): Int
+        // Cell style bit flags (synced with termux_core.cpp)
+        private const val FLAG_BOLD = 1 shl 0
+        private const val FLAG_ITALIC = 1 shl 2
+        private const val FLAG_UNDERLINE = 1 shl 3
+        private const val FLAG_STRIKETHROUGH = 1 shl 7
+        private const val FLAG_UNDERCURL = 1 shl 10
+        private const val FLAG_DOUBLE_UNDERLINE = 1 shl 11
+
+        // Mode mask bits (synced with termux_core.cpp)
+        private const val MODE_ALT_SCREEN = 1 shl 2
+        private const val MODE_MOUSE_TRACKING = 1 shl 3
+
+        // Primary JNI Bridge to C++23 Core Engine (libtermuxx-core.so)
+        @JvmStatic external fun nativeRegisterSurface(surface: Any?)
+        @JvmStatic external fun nativeInitAndPollBootstrap(nativeLibDir: String): Int
         @JvmStatic external fun nativeGetBootstrapError(): String
-        @JvmStatic external fun nativeCreateSession(rows: Int, cols: Int): Int
+        @JvmStatic external fun nativeNewSession(asRoot: Boolean, rows: Int, cols: Int, cellW: Int, cellH: Int): Int
         @JvmStatic external fun nativeSwitchSession(index: Int)
         @JvmStatic external fun nativeCloseSession(index: Int): Int
+        @JvmStatic external fun nativeDestroyAll()
         @JvmStatic external fun nativeGetSessionCount(): Int
-        @JvmStatic external fun nativeGetActiveSession(): Int
-        @JvmStatic external fun nativeResizePty(rows: Int, cols: Int)
-        @JvmStatic external fun nativeSendText(text: String)
-        @JvmStatic external fun nativeSendKey(keyCode: Int, ctrl: Boolean, alt: Boolean)
-        @JvmStatic external fun nativePollOutput(): Boolean
-        @JvmStatic external fun nativeFetchDirtyRows(
-            packedAttrs: LongArray,
-            rowTextOut: Array<String>,
-            metaOut: IntArray
+        @JvmStatic external fun nativeGetActiveIndex(): Int
+        @JvmStatic external fun nativeIsSessionRoot(index: Int): Boolean
+        @JvmStatic external fun nativeResizeActive(rows: Int, cols: Int, cellW: Int, cellH: Int)
+        @JvmStatic external fun nativeConsumeFrameDirty(): Boolean
+        @JvmStatic external fun nativeConsumeBell(): Boolean
+        @JvmStatic external fun nativeConsumeOsc52Clipboard(): String?
+        @JvmStatic external fun nativeStartTextSelection(scrollOffset: Int, screenCol: Int, screenRow: Int)
+        @JvmStatic external fun nativeUpdateSelectionHandle(isStartHandle: Boolean, col: Int, logicalY: Int)
+        @JvmStatic external fun nativeOnSelectionTouchPx(
+            action: Int,
+            scrollOffset: Int,
+            touchX: Float,
+            touchY: Float,
+            cellW: Float,
+            cellH: Float,
+            viewW: Float,
+            viewH: Float,
+            radiusPx: Float
         ): Int
-        @JvmStatic external fun nativeGetRowText(row: Int): String
+        @JvmStatic external fun nativeGetSelectionGeometryPx(
+            scrollOffset: Int,
+            cellW: Float,
+            cellH: Float,
+            viewW: Float,
+            viewH: Float,
+            radiusPx: Float,
+            outGeom: FloatArray
+        ): Boolean
+        @JvmStatic external fun nativeStopTextSelection(): Boolean
+        @JvmStatic external fun nativeIsSelectingText(): Boolean
+        @JvmStatic external fun nativeSelectAll(scrollOffset: Int)
+        @JvmStatic external fun nativeGetSelectionSelectors(outSelectors: IntArray)
+        @JvmStatic external fun nativeGetSelectedText(): String
+        @JvmStatic external fun nativeDispatchCustomKey(keyLabel: String): Int
+        @JvmStatic external fun nativeGetModifierMask(): Int
+        @JvmStatic external fun nativeSendText(text: String, isPaste: Boolean)
+        @JvmStatic external fun nativeSendKeyEvent(keyCode: Int, unicodeChar: Int, metaState: Int): Int
+        @JvmStatic external fun nativeSendMouse(button: Int, col: Int, row: Int, pressed: Boolean)
+        @JvmStatic external fun nativeGetActiveScrollback(): Int
+        @JvmStatic external fun nativeIsRowDirty(screenRow: Int): Boolean
+        @JvmStatic external fun nativeClearDirtyFlags()
+        @JvmStatic external fun nativePackRowRender(
+            scrollOffset: Int,
+            screenRow: Int,
+            outBgRuns: IntArray,
+            outGlyphs: IntArray
+        ): Int
+        @JvmStatic external fun nativeSetDefaultCursorShape(shape: Int)
+        @JvmStatic external fun nativeGetCursorState(): Int
+        @JvmStatic external fun nativeGetModesMask(): Int
         @JvmStatic external fun nativeGetTranscriptText(): String
-        @JvmStatic external fun nativeGetSelectedText(r1: Int, c1: Int, r2: Int, c2: Int): String
-        @JvmStatic external fun nativeScrollViewport(deltaLines: Int): Int
-        @JvmStatic external fun nativeResetScroll()
-        @JvmStatic external fun nativeGetAlternateScreen(): Boolean
-        @JvmStatic external fun nativeSetCtrlMod(active: Boolean)
-        @JvmStatic external fun nativeSetAltMod(active: Boolean)
-        @JvmStatic external fun nativeGetCtrlMod(): Boolean
-        @JvmStatic external fun nativeGetAltMod(): Boolean
     }
 
     private lateinit var rootLayout: LinearLayout
@@ -173,8 +223,6 @@ class TermuxActivity : Activity() {
     private lateinit var terminalSurface: TerminalSurface
     private lateinit var extraKeysBar: LinearLayout
 
-    private var ctrlLatched = false
-    private var altLatched = false
     private var ctrlBtnRef: TextView? = null
     private var altBtnRef: TextView? = null
 
@@ -182,12 +230,14 @@ class TermuxActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         // Launch non-blocking C++23 background bootstrap check/extraction immediately
-        nativeInitEngine(applicationInfo.dataDir, applicationInfo.nativeLibraryDir)
+        nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
 
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val initialSp = prefs.getFloat(PREF_FONT_SIZE, 13.5f).coerceIn(7.0f, 30.0f)
+        val initialCursorShape = prefs.getInt(PREF_CURSOR_SHAPE, 0).coerceIn(0, 2)
+        nativeSetDefaultCursorShape(initialCursorShape)
 
-        // Root vertical layout (strictly clipped so children never overdraw the top tab bar)
+        // Root vertical layout
         rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_AMOLED_BG)
@@ -204,7 +254,7 @@ class TermuxActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44))
         )
 
-        // 1px subtle separator below the header bar so the top bar stands out cleanly
+        // 1px subtle separator below the header bar
         val divider = View(this).apply {
             setBackgroundColor(0xFF263147.toInt())
         }
@@ -253,7 +303,7 @@ class TermuxActivity : Activity() {
         setContentView(rootLayout)
 
         // Apply system bars & IME insets cleanly so headerBar sits right below status bar
-        window.decorView.setOnApplyWindowInsetsListener { v, insets ->
+        window.decorView.setOnApplyWindowInsetsListener { _, insets ->
             val sysBars = insets.getInsets(WindowInsets.Type.systemBars())
             val ime = insets.getInsets(WindowInsets.Type.ime())
             val bottomInset = max(sysBars.bottom, ime.bottom)
@@ -263,7 +313,7 @@ class TermuxActivity : Activity() {
 
         rebuildExtraKeys()
         rebuildTabs()
-        nativeBindSurface(terminalSurface)
+        nativeRegisterSurface(terminalSurface)
         terminalSurface.requestFocus()
 
         // Request notification permission non-blockingly after UI is attached
@@ -304,16 +354,18 @@ class TermuxActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        nativeBindSurface(terminalSurface)
+        nativeRegisterSurface(terminalSurface)
         terminalSurface.requestFocus()
         terminalSurface.postInvalidateOnAnimation()
     }
 
     override fun onDestroy() {
-        nativeBindSurface(null)
-        try {
-            stopService(Intent(this, KeepAliveService::class.java))
-        } catch (_: Throwable) {
+        nativeRegisterSurface(null)
+        if (isFinishing) {
+            try {
+                stopService(Intent(this, KeepAliveService::class.java))
+            } catch (_: Throwable) {
+            }
         }
         super.onDestroy()
     }
@@ -337,39 +389,61 @@ class TermuxActivity : Activity() {
             }
             addView(tabScroll)
 
-            // [+] New PTY Session Button
-            addView(makeHeaderButton("+") {
-                if (nativeGetBootstrapState() == 2 && nativeGetSessionCount() < 8) {
-                    nativeCreateSession(terminalSurface.gridRows, terminalSurface.gridCols)
-                    rebuildTabs()
-                    terminalSurface.invalidateFullGrid()
-                }
-            })
+            // [+] New PTY Session Button (Tap = User shell, Long-Press = Root su session)
+            addView(makeHeaderButton(
+                symbol = "+",
+                onClick = { spawnNewSession(asRoot = false) },
+                onLongClick = { spawnNewSession(asRoot = true) }
+            ))
 
             // [#] Copy All / Select Transcript Button
-            addView(makeHeaderButton("#") {
+            addView(makeHeaderButton("#", onClick = {
                 terminalSurface.showTranscriptCopyDialog()
-            })
+            }))
 
-            // [⚙] Customize Extra Keys Button
-            addView(makeHeaderButton("⚙") {
+            // [⚙] Customize Extra Keys & Cursor Shape Button
+            addView(makeHeaderButton("⚙", onClick = {
                 showCustomizeExtraKeysDialog()
-            })
+            }))
 
             // [✕] Close Current Session Button
-            addView(makeHeaderButton("✕") {
+            addView(makeHeaderButton("✕", onClick = {
                 if (nativeGetSessionCount() > 1) {
-                    nativeCloseSession(nativeGetActiveSession())
+                    terminalSurface.stopNativeSelection()
+                    nativeCloseSession(nativeGetActiveIndex())
+                    terminalSurface.resetScrollOffset()
                     rebuildTabs()
                     terminalSurface.invalidateFullGrid()
                 } else {
+                    nativeDestroyAll()
                     finish()
                 }
-            })
+            }))
         }
     }
 
-    private fun makeHeaderButton(symbol: String, onClick: () -> Unit): TextView {
+    private fun spawnNewSession(asRoot: Boolean) {
+        val bootState = nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
+        if (bootState == 2 && nativeGetSessionCount() < 8) {
+            terminalSurface.stopNativeSelection()
+            nativeNewSession(
+                asRoot,
+                terminalSurface.gridRows,
+                terminalSurface.gridCols,
+                terminalSurface.charWidthPx.roundToInt(),
+                terminalSurface.charHeightPx
+            )
+            terminalSurface.resetScrollOffset()
+            rebuildTabs()
+            terminalSurface.invalidateFullGrid()
+        }
+    }
+
+    private fun makeHeaderButton(
+        symbol: String,
+        onClick: () -> Unit,
+        onLongClick: (() -> Unit)? = null
+    ): TextView {
         return TextView(this).apply {
             text = symbol
             setTextColor(COLOR_TEXT_PRIMARY)
@@ -385,24 +459,34 @@ class TermuxActivity : Activity() {
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 onClick()
             }
+            if (onLongClick != null) {
+                setOnLongClickListener {
+                    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    onLongClick()
+                    true
+                }
+            }
         }
     }
 
     fun rebuildTabs() {
         tabContainer.removeAllViews()
         val count = max(1, nativeGetSessionCount())
-        val active = nativeGetActiveSession()
+        val active = nativeGetActiveIndex().coerceAtLeast(0)
         for (i in 0 until count) {
             val isSelected = (i == active)
+            val isRoot = nativeGetSessionCount() > i && nativeIsSessionRoot(i)
+            val suffix = if (isRoot) "su" else "sh"
+            val activeBg = if (isRoot) COLOR_ACCENT_ROOT else COLOR_ACCENT_PRIMARY
             val chip = TextView(this).apply {
-                text = "$ ${i + 1}"
+                text = "${i + 1}·$suffix"
                 setTextColor(if (isSelected) 0xFFFFFFFF.toInt() else COLOR_TEXT_MUTED)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                 typeface = Typeface.MONOSPACE
                 gravity = Gravity.CENTER
                 setPadding(dp(12), dp(4), dp(12), dp(4))
                 background = pillDrawable(
-                    if (isSelected) COLOR_ACCENT_PRIMARY else COLOR_SURFACE_PILL,
+                    if (isSelected) activeBg else COLOR_SURFACE_PILL,
                     dp(8).toFloat()
                 )
                 layoutParams = LinearLayout.LayoutParams(
@@ -414,7 +498,9 @@ class TermuxActivity : Activity() {
                 setOnClickListener {
                     if (nativeGetSessionCount() > i) {
                         performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        terminalSurface.stopNativeSelection()
                         nativeSwitchSession(i)
+                        terminalSurface.resetScrollOffset()
                         rebuildTabs()
                         terminalSurface.invalidateFullGrid()
                     }
@@ -460,7 +546,10 @@ class TermuxActivity : Activity() {
                 }
                 setOnClickListener {
                     performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    handleExtraKeyTap(token)
+                    terminalSurface.resetScrollOffset()
+                    nativeDispatchCustomKey(token)
+                    syncModifierPillsFromNative()
+                    terminalSurface.postInvalidateOnAnimation()
                 }
             }
 
@@ -468,91 +557,25 @@ class TermuxActivity : Activity() {
             if (token == "ALT") altBtnRef = btn
             extraKeysBar.addView(btn)
         }
-        updateModifierPills()
+        syncModifierPillsFromNative()
     }
 
-    private fun updateModifierPills() {
+    fun syncModifierPillsFromNative() {
+        val mask = nativeGetModifierMask()
+        val ctrlArmed = (mask and 1) != 0
+        val altArmed = (mask and 2) != 0
+
         ctrlBtnRef?.background = pillDrawable(
-            if (ctrlLatched) COLOR_ACCENT_ACTIVE else COLOR_SURFACE_PILL,
+            if (ctrlArmed) COLOR_ACCENT_ACTIVE else COLOR_SURFACE_PILL,
             dp(7).toFloat()
         )
-        ctrlBtnRef?.setTextColor(if (ctrlLatched) 0xFF000000.toInt() else COLOR_TEXT_PRIMARY)
+        ctrlBtnRef?.setTextColor(if (ctrlArmed) 0xFF000000.toInt() else COLOR_TEXT_PRIMARY)
 
         altBtnRef?.background = pillDrawable(
-            if (altLatched) COLOR_ACCENT_ACTIVE else COLOR_SURFACE_PILL,
+            if (altArmed) COLOR_ACCENT_ACTIVE else COLOR_SURFACE_PILL,
             dp(7).toFloat()
         )
-        altBtnRef?.setTextColor(if (altLatched) 0xFF000000.toInt() else COLOR_TEXT_PRIMARY)
-    }
-
-    fun consumeModifiers() {
-        if (ctrlLatched || altLatched) {
-            ctrlLatched = false
-            altLatched = false
-            nativeSetCtrlMod(false)
-            nativeSetAltMod(false)
-            updateModifierPills()
-        }
-    }
-
-    private fun handleExtraKeyTap(token: String) {
-        when (token) {
-            "CTRL" -> {
-                ctrlLatched = !ctrlLatched
-                nativeSetCtrlMod(ctrlLatched)
-                updateModifierPills()
-            }
-            "ALT" -> {
-                altLatched = !altLatched
-                nativeSetAltMod(altLatched)
-                updateModifierPills()
-            }
-            "ESC" -> {
-                nativeSendKey(KeyEvent.KEYCODE_ESCAPE, ctrlLatched, altLatched)
-                consumeModifiers()
-            }
-            "TAB" -> {
-                nativeSendKey(KeyEvent.KEYCODE_TAB, ctrlLatched, altLatched)
-                consumeModifiers()
-            }
-            "UP" -> {
-                nativeSendKey(KeyEvent.KEYCODE_DPAD_UP, ctrlLatched, altLatched)
-                consumeModifiers()
-            }
-            "DOWN" -> {
-                nativeSendKey(KeyEvent.KEYCODE_DPAD_DOWN, ctrlLatched, altLatched)
-                consumeModifiers()
-            }
-            "LEFT" -> {
-                nativeSendKey(KeyEvent.KEYCODE_DPAD_LEFT, ctrlLatched, altLatched)
-                consumeModifiers()
-            }
-            "RIGHT" -> {
-                nativeSendKey(KeyEvent.KEYCODE_DPAD_RIGHT, ctrlLatched, altLatched)
-                consumeModifiers()
-            }
-            "HOME" -> {
-                nativeSendKey(KeyEvent.KEYCODE_MOVE_HOME, ctrlLatched, altLatched)
-                consumeModifiers()
-            }
-            "END" -> {
-                nativeSendKey(KeyEvent.KEYCODE_MOVE_END, ctrlLatched, altLatched)
-                consumeModifiers()
-            }
-            "PGUP" -> {
-                nativeSendKey(KeyEvent.KEYCODE_PAGE_UP, ctrlLatched, altLatched)
-                consumeModifiers()
-            }
-            "PGDN" -> {
-                nativeSendKey(KeyEvent.KEYCODE_PAGE_DOWN, ctrlLatched, altLatched)
-                consumeModifiers()
-            }
-            else -> {
-                nativeSendText(token)
-                consumeModifiers()
-            }
-        }
-        terminalSurface.postInvalidateOnAnimation()
+        altBtnRef?.setTextColor(if (altArmed) 0xFF000000.toInt() else COLOR_TEXT_PRIMARY)
     }
 
     private fun showCustomizeExtraKeysDialog() {
@@ -567,17 +590,22 @@ class TermuxActivity : Activity() {
         }
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("Настройка панели клавиш")
-            .setMessage("Укажите клавиши через запятую (ESC, TAB, CTRL, ALT, UP, DOWN, LEFT, RIGHT, HOME, END, PGUP, PGDN, -, /, |, ~):")
+            .setMessage("Укажите клавиши через запятую (ESC, TAB, CTRL, ALT, UP, DOWN, LEFT, RIGHT, HOME, END, PGUP, PGDN, BKSP, DEL, -, /, |, ~):")
             .setView(edit)
             .setPositiveButton("Сохранить") { _, _ ->
                 prefs.edit().putString(PREF_EXTRA_KEYS, edit.text.toString()).apply()
                 rebuildExtraKeys()
             }
-            .setNeutralButton("Сброс") { _, _ ->
+            .setNeutralButton("Форма курсора") { _, _ ->
+                val nextShape = (prefs.getInt(PREF_CURSOR_SHAPE, 0) + 1) % 3
+                prefs.edit().putInt(PREF_CURSOR_SHAPE, nextShape).apply()
+                nativeSetDefaultCursorShape(nextShape)
+                terminalSurface.invalidateFullGrid()
+            }
+            .setNegativeButton("Сброс") { _, _ ->
                 prefs.edit().putString(PREF_EXTRA_KEYS, DEFAULT_EXTRA_KEYS).apply()
                 rebuildExtraKeys()
             }
-            .setNegativeButton("Отмена", null)
             .show()
     }
 
@@ -598,7 +626,8 @@ class TermuxActivity : Activity() {
     }
 
     /**
-     * Zero-Allocation Hardware-Accelerated Terminal View with Native Android FLOATING ActionMode
+     * Hardware-Accelerated C++23 Terminal View with JetBrains Mono Grid Rendering,
+     * Procedural Box-Drawing, ColorOS 17 Lollipop Handles & FLOATING ActionMode.
      */
     inner class TerminalSurface(context: Context, initialSp: Float) : View(context) {
 
@@ -617,38 +646,36 @@ class TermuxActivity : Activity() {
         var gridCols: Int = 80
             private set
 
-        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
-            typeface = Typeface.MONOSPACE
-        }
+        var scrollOffset: Int = 0
+            private set
+
+        private val tfRegular: Typeface
+        private val tfBold: Typeface
+        private val tfItalic: Typeface
+        private val tfBoldItalic: Typeface
+
+        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
         private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
         }
+        private val decorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+        }
+        private val wavePath = Path()
 
-        // Pre-allocated JNI transfer buffers (Zero GC pressure in onDraw)
+        // Pre-allocated JNI transfer buffers for nativePackRowRender (zero GC allocations in onDraw)
         private val maxGridRows = 250
         private val maxGridCols = 400
-        private val jniAttrsBuffer = LongArray(maxGridRows * maxGridCols)
-        private val jniRowStrings = Array(maxGridRows) { "" }
-        private val jniMeta = IntArray(8) // [rows, cols, curR, curC, curVis, scrollOff, bootState]
+        private val bgRunsBuf = IntArray(maxGridCols * 3)
+        private val glyphsBuf = IntArray(maxGridCols * 4 * 2)
+        private val charBuf = CharArray(2)
+        private val selGeomBuf = FloatArray(14)
 
-        // Local cached display rows for ultra-fast drawing
-        private val cachedRowStrings = Array(maxGridRows) { "" }
-        private val cachedRowFg = IntArray(maxGridRows) { COLOR_TEXT_PRIMARY }
-        private val cachedRowBg = IntArray(maxGridRows) { COLOR_AMOLED_BG }
-        private var cachedCursorR = 0
-        private var cachedCursorC = 0
-        private var cachedCursorVis = true
         private var sessionSpawned = false
-
-        // Native Selection state (Row/Col endpoints + System Floating Toolbar)
-        private var isSelecting = false
-        private var selStartRow = 0
-        private var selStartCol = 0
-        private var selEndRow = 0
-        private var selEndCol = 0
         private var activeActionMode: ActionMode? = null
         private val selectionContentRect = Rect()
-
+        private var draggingSelectionHandle = false
+        private var scrollAccumulatorPx = 0f
         private var pinchStartSp = fontSizeSp
 
         private val scaleDetector = ScaleGestureDetector(
@@ -672,12 +699,22 @@ class TermuxActivity : Activity() {
         private val gestureDetector = GestureDetector(
             context,
             object : GestureDetector.SimpleOnGestureListener() {
-                override fun onDown(e: MotionEvent): Boolean = true
+                override fun onDown(e: MotionEvent): Boolean {
+                    scrollAccumulatorPx = 0f
+                    return true
+                }
 
                 override fun onSingleTapUp(e: MotionEvent): Boolean {
-                    if (isSelecting) {
+                    if (nativeIsSelectingText()) {
                         stopNativeSelection()
                         return true
+                    }
+                    val modes = nativeGetModesMask()
+                    if ((modes and MODE_MOUSE_TRACKING) != 0) {
+                        val col1 = ((e.x / charWidthPx).toInt() + 1).coerceIn(1, gridCols)
+                        val row1 = ((e.y / charHeightPx).toInt() + 1).coerceIn(1, gridRows)
+                        nativeSendMouse(0, col1, row1, true)
+                        nativeSendMouse(0, col1, row1, false)
                     }
                     requestFocus()
                     val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
@@ -691,28 +728,37 @@ class TermuxActivity : Activity() {
                     distanceX: Float,
                     distanceY: Float
                 ): Boolean {
-                    if (scaleDetector.isInProgress) return false
-                    if (isSelecting) {
+                    if (scaleDetector.isInProgress || draggingSelectionHandle) return false
+                    if (nativeIsSelectingText()) {
                         val r = (e2.y / charHeightPx).toInt().coerceIn(0, gridRows - 1)
                         val c = (e2.x / charWidthPx).toInt().coerceIn(0, gridCols - 1)
-                        selEndRow = r
-                        selEndCol = c
+                        nativeUpdateSelectionHandle(false, c, r - scrollOffset)
                         activeActionMode?.invalidateContentRect()
                         postInvalidateOnAnimation()
                         return true
                     }
-                    if (!nativeGetAlternateScreen() && abs(distanceY) > 4f) {
-                        val lines = (distanceY / charHeightPx).roundToInt()
-                        if (lines != 0) {
-                            nativeScrollViewport(lines)
+                    val modes = nativeGetModesMask()
+                    if ((modes and MODE_ALT_SCREEN) == 0) {
+                        scrollAccumulatorPx += distanceY
+                        val deltaRows = (scrollAccumulatorPx / charHeightPx).toInt()
+                        if (deltaRows != 0) {
+                            scrollAccumulatorPx -= deltaRows * charHeightPx
+                            val maxSb = nativeGetActiveScrollback()
+                            scrollOffset = (scrollOffset - deltaRows).coerceIn(0, maxSb)
                             postInvalidateOnAnimation()
                         }
+                    } else if ((modes and MODE_MOUSE_TRACKING) != 0 && abs(distanceY) >= charHeightPx * 0.5f) {
+                        val col1 = ((e2.x / charWidthPx).toInt() + 1).coerceIn(1, gridCols)
+                        val row1 = ((e2.y / charHeightPx).toInt() + 1).coerceIn(1, gridRows)
+                        val wheelBtn = if (distanceY > 0) 65 else 64
+                        nativeSendMouse(wheelBtn, col1, row1, true)
                     }
                     return true
                 }
 
                 override fun onLongPress(e: MotionEvent) {
-                    if (scaleDetector.isInProgress || nativeGetBootstrapState() != 2) return
+                    if (scaleDetector.isInProgress) return
+                    if (nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir) != 2) return
                     performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                     val r = (e.y / charHeightPx).toInt().coerceIn(0, gridRows - 1)
                     val c = (e.x / charWidthPx).toInt().coerceIn(0, gridCols - 1)
@@ -722,10 +768,25 @@ class TermuxActivity : Activity() {
         )
 
         init {
+            val baseTf = try {
+                Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
+            } catch (_: Throwable) {
+                Typeface.MONOSPACE
+            }
+            tfRegular = baseTf
+            tfBold = Typeface.create(baseTf, Typeface.BOLD)
+            tfItalic = Typeface.create(baseTf, Typeface.ITALIC)
+            tfBoldItalic = Typeface.create(baseTf, Typeface.BOLD_ITALIC)
+            textPaint.typeface = tfRegular
+
             isFocusable = true
             isFocusableInTouchMode = true
             defaultFocusHighlightEnabled = false
             recomputeFontMetrics()
+        }
+
+        fun resetScrollOffset() {
+            scrollOffset = 0
         }
 
         private fun recomputeFontMetrics() {
@@ -734,6 +795,7 @@ class TermuxActivity : Activity() {
                 fontSizeSp,
                 resources.displayMetrics
             )
+            textPaint.typeface = tfRegular
             textPaint.textSize = px
             charWidthPx = max(6f, textPaint.measureText("M"))
             val fm = textPaint.fontMetrics
@@ -752,11 +814,10 @@ class TermuxActivity : Activity() {
             if (width > 0 && height > 0) {
                 val newCols = (width / charWidthPx).toInt().coerceIn(20, maxGridCols)
                 val newRows = (height / charHeightPx).coerceIn(5, maxGridRows)
-                if (newCols != gridCols || newRows != gridRows) {
-                    gridCols = newCols
-                    gridRows = newRows
-                    nativeResizePty(gridRows, gridCols)
-                }
+                gridCols = newCols
+                gridRows = newRows
+                nativeResizeActive(gridRows, gridCols, charWidthPx.roundToInt(), charHeightPx)
+                scrollOffset = scrollOffset.coerceIn(0, nativeGetActiveScrollback())
             }
             invalidateFullGrid()
         }
@@ -773,25 +834,25 @@ class TermuxActivity : Activity() {
             gridCols = newCols
             gridRows = newRows
 
-            if (nativeGetBootstrapState() == 2) {
+            if (nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir) == 2) {
                 if (!sessionSpawned && nativeGetSessionCount() == 0) {
                     sessionSpawned = true
-                    nativeCreateSession(gridRows, gridCols)
+                    nativeNewSession(false, gridRows, gridCols, charWidthPx.roundToInt(), charHeightPx)
                     post { rebuildTabs() }
                 } else {
-                    nativeResizePty(gridRows, gridCols)
+                    nativeResizeActive(gridRows, gridCols, charWidthPx.roundToInt(), charHeightPx)
                 }
             }
             postInvalidateOnAnimation()
         }
 
         override fun onDraw(canvas: Canvas) {
-            // Paint only within this View's bounds so headerBar above is never affected
             bgPaint.color = COLOR_AMOLED_BG
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
 
-            val bootState = nativeGetBootstrapState()
+            val bootState = nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
             if (bootState != 2) {
+                textPaint.typeface = tfRegular
                 textPaint.color = COLOR_ACCENT_ACTIVE
                 val msg = if (bootState == 3) {
                     "Ошибка bootstrap: ${nativeGetBootstrapError()}"
@@ -800,7 +861,6 @@ class TermuxActivity : Activity() {
                 }
                 canvas.drawText(msg, dp(16).toFloat(), dp(48).toFloat(), textPaint)
                 if (bootState != 3) {
-                    // Poll every 40ms while initializing so screen transitions automatically without waiting for touch
                     postInvalidateDelayed(40L)
                 }
                 return
@@ -808,87 +868,192 @@ class TermuxActivity : Activity() {
 
             if (!sessionSpawned && nativeGetSessionCount() == 0 && width > 0 && height > 0) {
                 sessionSpawned = true
-                nativeCreateSession(gridRows, gridCols)
+                nativeNewSession(false, gridRows, gridCols, charWidthPx.roundToInt(), charHeightPx)
                 post { rebuildTabs() }
             }
 
-            // Pull only dirty rows from C++23 engine
-            val dirtyCount = nativeFetchDirtyRows(jniAttrsBuffer, jniRowStrings, jniMeta)
-            val rows = jniMeta[0].coerceIn(1, maxGridRows)
-            val cols = jniMeta[1].coerceIn(1, maxGridCols)
-            cachedCursorR = jniMeta[2]
-            cachedCursorC = jniMeta[3]
-            cachedCursorVis = (jniMeta[4] != 0)
+            nativeConsumeFrameDirty()
 
-            if (dirtyCount > 0) {
-                for (r in 0 until rows) {
-                    val str = jniRowStrings[r]
-                    cachedRowStrings[r] = str
-                    val firstPack = jniAttrsBuffer[r * cols]
-                    val fg = ((firstPack ushr 32) and 0xFFFFFFFFL).toInt()
-                    val bg = (firstPack and 0xFFFFFFFFL).toInt()
-                    cachedRowFg[r] = if (fg != 0) fg else COLOR_TEXT_PRIMARY
-                    cachedRowBg[r] = if (bg != 0) bg else COLOR_AMOLED_BG
-                }
+            if (nativeConsumeBell()) {
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
             }
 
-            // Normalize selection range
-            var sR1 = selStartRow
-            var sC1 = selStartCol
-            var sR2 = selEndRow
-            var sC2 = selEndCol
-            if (sR1 > sR2 || (sR1 == sR2 && sC1 > sC2)) {
-                val tr = sR1; sR1 = sR2; sR2 = tr
-                val tc = sC1; sC1 = sC2; sC2 = tc
+            val oscClip = nativeConsumeOsc52Clipboard()
+            if (!oscClip.isNullOrEmpty()) {
+                copyToClipboard(oscClip, showToast = false)
             }
 
-            for (r in 0 until rows) {
-                val topY = (r * charHeightPx).toFloat()
-                val bottomY = topY + charHeightPx
+            val maxSb = nativeGetActiveScrollback()
+            if (scrollOffset > maxSb) scrollOffset = maxSb
+
+            val cellW = charWidthPx
+            val cellH = charHeightPx.toFloat()
+            val strokeW = max(1.5f, cellH * 0.06f)
+            decorPaint.strokeWidth = strokeW
+
+            for (r in 0 until gridRows) {
+                val topY = r * cellH
+                val bottomY = topY + cellH
                 val baseY = topY + charBaselinePx
 
-                if (cachedRowBg[r] != COLOR_AMOLED_BG) {
-                    bgPaint.color = cachedRowBg[r]
-                    canvas.drawRect(0f, topY, width.toFloat(), bottomY, bgPaint)
+                val packedCounts = nativePackRowRender(scrollOffset, r, bgRunsBuf, glyphsBuf)
+                val bgCount = (packedCounts ushr 16) and 0xFFFF
+                val glCount = packedCounts and 0xFFFF
+
+                // 1. Render background color runs (including selection highlights)
+                for (i in 0 until bgCount) {
+                    val base = i * 3
+                    val startCol = bgRunsBuf[base]
+                    val endCol = bgRunsBuf[base + 1]
+                    bgPaint.color = bgRunsBuf[base + 2]
+                    canvas.drawRect(startCol * cellW, topY, endCol * cellW, bottomY, bgPaint)
                 }
 
-                // Draw native text selection highlight
-                if (isSelecting && r in sR1..sR2) {
-                    val cStart = if (r == sR1) sC1 else 0
-                    val cEnd = if (r == sR2) sC2 + 1 else cols
-                    bgPaint.color = COLOR_SELECTION_BG
-                    canvas.drawRect(
-                        cStart * charWidthPx,
-                        topY,
-                        cEnd * charWidthPx,
-                        bottomY,
-                        bgPaint
-                    )
-                }
+                // 2. Render procedural box-drawing rects & grid-aligned glyphs
+                for (i in 0 until glCount) {
+                    val base = i * 4
+                    val cp = glyphsBuf[base]
+                    val col = glyphsBuf[base + 1]
+                    val fg = glyphsBuf[base + 2]
+                    val meta = glyphsBuf[base + 3]
+                    val cellLeft = col * cellW
 
-                val line = cachedRowStrings[r]
-                if (line.isNotEmpty()) {
-                    textPaint.color = cachedRowFg[r]
-                    canvas.drawText(line, 0f, baseY, textPaint)
+                    if (cp == -1) {
+                        // Procedural 1/16th cell box-drawing or block element from C++23
+                        val x0 = (meta ushr 24) and 0xFF
+                        val y0 = (meta ushr 16) and 0xFF
+                        val x1 = (meta ushr 8) and 0xFF
+                        val y1 = meta and 0xFF
+                        bgPaint.color = fg
+                        canvas.drawRect(
+                            cellLeft + (x0 / 16f) * cellW,
+                            topY + (y0 / 16f) * cellH,
+                            cellLeft + (x1 / 16f) * cellW,
+                            topY + (y1 / 16f) * cellH,
+                            bgPaint
+                        )
+                        continue
+                    }
+
+                    val isBold = (meta and FLAG_BOLD) != 0
+                    val isItalic = (meta and FLAG_ITALIC) != 0
+                    textPaint.typeface = when {
+                        isBold && isItalic -> tfBoldItalic
+                        isBold -> tfBold
+                        isItalic -> tfItalic
+                        else -> tfRegular
+                    }
+                    textPaint.color = fg
+
+                    val charCount = Character.toChars(cp, charBuf, 0)
+                    canvas.drawText(charBuf, 0, charCount, cellLeft, baseY, textPaint)
+
+                    // Text decorations (underline, double underline, undercurl, strikethrough)
+                    if ((meta and (FLAG_UNDERLINE or FLAG_DOUBLE_UNDERLINE or FLAG_UNDERCURL or FLAG_STRIKETHROUGH)) != 0) {
+                        decorPaint.color = fg
+                        val rightX = cellLeft + cellW
+                        if ((meta and FLAG_UNDERLINE) != 0) {
+                            val uy = bottomY - strokeW * 1.5f
+                            canvas.drawLine(cellLeft, uy, rightX, uy, decorPaint)
+                        }
+                        if ((meta and FLAG_DOUBLE_UNDERLINE) != 0) {
+                            val uy1 = bottomY - strokeW * 2.8f
+                            val uy2 = bottomY - strokeW * 0.8f
+                            canvas.drawLine(cellLeft, uy1, rightX, uy1, decorPaint)
+                            canvas.drawLine(cellLeft, uy2, rightX, uy2, decorPaint)
+                        }
+                        if ((meta and FLAG_UNDERCURL) != 0) {
+                            val uy = bottomY - strokeW * 1.8f
+                            val amp = strokeW * 1.1f
+                            wavePath.reset()
+                            wavePath.moveTo(cellLeft, uy)
+                            wavePath.quadTo(cellLeft + cellW * 0.25f, uy - amp, cellLeft + cellW * 0.5f, uy)
+                            wavePath.quadTo(cellLeft + cellW * 0.75f, uy + amp, rightX, uy)
+                            canvas.drawPath(wavePath, decorPaint)
+                        }
+                        if ((meta and FLAG_STRIKETHROUGH) != 0) {
+                            val sy = topY + cellH * 0.52f
+                            canvas.drawLine(cellLeft, sy, rightX, sy, decorPaint)
+                        }
+                    }
                 }
             }
 
-            // Draw active block cursor
-            if (cachedCursorVis && !isSelecting && cachedCursorR in 0 until rows) {
-                val cx = cachedCursorC * charWidthPx
-                val cy = (cachedCursorR * charHeightPx).toFloat()
+            nativeClearDirtyFlags()
+
+            // 3. Render active cursor (Block = 0, Underline = 1, Bar/Beam = 2)
+            val cursorState = nativeGetCursorState()
+            if (cursorState >= 0 && !nativeIsSelectingText() && scrollOffset == 0) {
+                val shape = (cursorState ushr 29) and 3
+                val curRow = (cursorState ushr 16) and 0x1FFF
+                val curCol = cursorState and 0xFFFF
+                if (curRow in 0 until gridRows && curCol in 0 until gridCols) {
+                    val cx = curCol * cellW
+                    val cy = curRow * cellH
+                    bgPaint.color = COLOR_ACCENT_ACTIVE
+                    when (shape) {
+                        1 -> canvas.drawRect(cx, cy + cellH - max(3f, cellH * 0.1f), cx + cellW, cy + cellH, bgPaint)
+                        2 -> canvas.drawRect(cx, cy, cx + max(3f, cellW * 0.14f), cy + cellH, bgPaint)
+                        else -> {
+                            bgPaint.alpha = 180
+                            canvas.drawRect(cx, cy, cx + cellW, cy + cellH, bgPaint)
+                            bgPaint.alpha = 255
+                        }
+                    }
+                }
+            }
+
+            // 4. Render ColorOS 17 Lollipop Selection Handles
+            val handleRadius = dp(7).toFloat()
+            if (nativeGetSelectionGeometryPx(
+                    scrollOffset,
+                    cellW,
+                    cellH,
+                    width.toFloat(),
+                    height.toFloat(),
+                    handleRadius,
+                    selGeomBuf
+                )
+            ) {
                 bgPaint.color = COLOR_ACCENT_ACTIVE
-                canvas.drawRect(cx, cy, cx + charWidthPx, cy + charHeightPx, bgPaint)
+                decorPaint.color = COLOR_ACCENT_ACTIVE
+                decorPaint.strokeWidth = max(2f, dp(2).toFloat())
+                // Start handle stem & circle
+                canvas.drawLine(selGeomBuf[0], selGeomBuf[1], selGeomBuf[0], selGeomBuf[2], decorPaint)
+                canvas.drawCircle(selGeomBuf[3], selGeomBuf[4], handleRadius, bgPaint)
+                // End handle stem & circle
+                canvas.drawLine(selGeomBuf[5], selGeomBuf[6], selGeomBuf[5], selGeomBuf[7], decorPaint)
+                canvas.drawCircle(selGeomBuf[8], selGeomBuf[9], handleRadius, bgPaint)
+
+                selectionContentRect.set(
+                    selGeomBuf[10].toInt(),
+                    selGeomBuf[11].toInt(),
+                    selGeomBuf[12].toInt(),
+                    selGeomBuf[13].toInt()
+                )
             }
         }
 
         private fun startNativeSelection(row: Int, col: Int) {
-            isSelecting = true
-            selStartRow = row
-            selStartCol = col
-            selEndRow = row
-            selEndCol = min(gridCols - 1, col + 6)
-            updateSelectionContentRect()
+            nativeStartTextSelection(scrollOffset, col, row)
+            val handleRadius = dp(7).toFloat()
+            if (nativeGetSelectionGeometryPx(
+                    scrollOffset,
+                    charWidthPx,
+                    charHeightPx.toFloat(),
+                    width.toFloat(),
+                    height.toFloat(),
+                    handleRadius,
+                    selGeomBuf
+                )
+            ) {
+                selectionContentRect.set(
+                    selGeomBuf[10].toInt(),
+                    selGeomBuf[11].toInt(),
+                    selGeomBuf[12].toInt(),
+                    selGeomBuf[13].toInt()
+                )
+            }
 
             activeActionMode?.finish()
             activeActionMode = startActionMode(object : ActionMode.Callback2() {
@@ -904,17 +1069,13 @@ class TermuxActivity : Activity() {
                 override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
                     when (item.itemId) {
                         1 -> {
-                            val selected = nativeGetSelectedText(selStartRow, selStartCol, selEndRow, selEndCol)
-                            copyToClipboard(selected)
+                            val selected = nativeGetSelectedText()
+                            copyToClipboard(selected, showToast = true)
                             stopNativeSelection()
                             return true
                         }
                         2 -> {
-                            selStartRow = 0
-                            selStartCol = 0
-                            selEndRow = gridRows - 1
-                            selEndCol = gridCols - 1
-                            updateSelectionContentRect()
+                            nativeSelectAll(scrollOffset)
                             mode.invalidateContentRect()
                             postInvalidateOnAnimation()
                             return true
@@ -929,13 +1090,12 @@ class TermuxActivity : Activity() {
                 }
 
                 override fun onDestroyActionMode(mode: ActionMode) {
-                    isSelecting = false
+                    nativeStopTextSelection()
                     activeActionMode = null
                     postInvalidateOnAnimation()
                 }
 
                 override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
-                    updateSelectionContentRect()
                     outRect.set(selectionContentRect)
                 }
             }, ActionMode.TYPE_FLOATING)
@@ -943,30 +1103,20 @@ class TermuxActivity : Activity() {
             postInvalidateOnAnimation()
         }
 
-        private fun updateSelectionContentRect() {
-            val minR = min(selStartRow, selEndRow)
-            val maxR = max(selStartRow, selEndRow)
-            val minC = min(selStartCol, selEndCol)
-            val maxC = max(selStartCol, selEndCol)
-            selectionContentRect.set(
-                (minC * charWidthPx).toInt(),
-                max(0, minR * charHeightPx - charHeightPx),
-                ((maxC + 2) * charWidthPx).toInt(),
-                min(height, (maxR + 1) * charHeightPx)
-            )
-        }
-
         fun stopNativeSelection() {
-            isSelecting = false
+            draggingSelectionHandle = false
+            nativeStopTextSelection()
             activeActionMode?.finish()
             activeActionMode = null
             postInvalidateOnAnimation()
         }
 
-        private fun copyToClipboard(text: String) {
+        private fun copyToClipboard(text: String, showToast: Boolean = true) {
             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             cm?.setPrimaryClip(ClipData.newPlainText("TermuxX", text))
-            Toast.makeText(context, "Скопировано в буфер обмена", Toast.LENGTH_SHORT).show()
+            if (showToast) {
+                Toast.makeText(context, "Скопировано в буфер обмена", Toast.LENGTH_SHORT).show()
+            }
         }
 
         private fun pasteFromClipboard() {
@@ -974,7 +1124,10 @@ class TermuxActivity : Activity() {
             val item = cm?.primaryClip?.getItemAt(0)
             val text = item?.coerceToText(context)?.toString()
             if (!text.isNullOrEmpty()) {
-                nativeSendText(text)
+                resetScrollOffset()
+                nativeSendText(text, true)
+                syncModifierPillsFromNative()
+                postInvalidateOnAnimation()
             }
         }
 
@@ -983,7 +1136,7 @@ class TermuxActivity : Activity() {
             val tv = TextView(context).apply {
                 text = fullText.ifEmpty { "Буфер терминала пуст." }
                 setTextIsSelectable(true)
-                typeface = Typeface.MONOSPACE
+                typeface = tfRegular
                 setTextColor(COLOR_TEXT_PRIMARY)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setPadding(dp(16), dp(12), dp(16), dp(12))
@@ -995,7 +1148,7 @@ class TermuxActivity : Activity() {
                 .setTitle("Выделение и копирование истории")
                 .setView(scroll)
                 .setPositiveButton("Копировать всё") { _, _ ->
-                    copyToClipboard(fullText)
+                    copyToClipboard(fullText, showToast = true)
                 }
                 .setNeutralButton("Вставить в терминал") { _, _ ->
                     pasteFromClipboard()
@@ -1005,14 +1158,32 @@ class TermuxActivity : Activity() {
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
+            if (nativeIsSelectingText() && event.pointerCount == 1) {
+                val res = nativeOnSelectionTouchPx(
+                    event.actionMasked,
+                    scrollOffset,
+                    event.x,
+                    event.y,
+                    charWidthPx,
+                    charHeightPx.toFloat(),
+                    width.toFloat(),
+                    height.toFloat(),
+                    dp(7).toFloat()
+                )
+                if (res == 1) {
+                    draggingSelectionHandle = true
+                    activeActionMode?.invalidateContentRect()
+                    postInvalidateOnAnimation()
+                    return true
+                } else if (res == 2) {
+                    draggingSelectionHandle = false
+                    activeActionMode?.invalidateContentRect()
+                    postInvalidateOnAnimation()
+                    return true
+                }
+            }
             scaleDetector.onTouchEvent(event)
             gestureDetector.onTouchEvent(event)
-            if (isSelecting && event.actionMasked == MotionEvent.ACTION_MOVE && !scaleDetector.isInProgress) {
-                selEndRow = (event.y / charHeightPx).toInt().coerceIn(0, gridRows - 1)
-                selEndCol = (event.x / charWidthPx).toInt().coerceIn(0, gridCols - 1)
-                activeActionMode?.invalidateContentRect()
-                postInvalidateOnAnimation()
-            }
             return true
         }
 
@@ -1026,8 +1197,9 @@ class TermuxActivity : Activity() {
                 EditorInfo.IME_FLAG_NO_EXTRACT_UI or
                 EditorInfo.IME_ACTION_NONE
 
-            return object : BaseInputConnection(this, true) {
+            return object : BaseInputConnection(this, false) {
                 private val editableBuf = SpannableStringBuilder()
+                private var lastComposing = ""
 
                 override fun getEditable(): Editable {
                     if (editableBuf.isEmpty()) {
@@ -1036,31 +1208,60 @@ class TermuxActivity : Activity() {
                     return editableBuf
                 }
 
-                override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                    if (!text.isNullOrEmpty()) {
-                        nativeResetScroll()
-                        nativeSendText(text.toString())
-                        consumeModifiers()
-                        postInvalidateOnAnimation()
+                private fun applyComposingDiff(newText: String) {
+                    var common = 0
+                    val minLen = min(lastComposing.length, newText.length)
+                    while (common < minLen && lastComposing[common] == newText[common]) {
+                        common++
                     }
+                    val toDelete = lastComposing.length - common
+                    repeat(toDelete) {
+                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
+                    }
+                    if (common < newText.length) {
+                        nativeSendText(newText.substring(common), false)
+                    }
+                }
+
+                override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                    val committed = text?.toString() ?: ""
+                    resetScrollOffset()
+                    if (lastComposing.isNotEmpty()) {
+                        applyComposingDiff(committed)
+                        lastComposing = ""
+                    } else if (committed.isNotEmpty()) {
+                        nativeSendText(committed, false)
+                    }
+                    syncModifierPillsFromNative()
+                    postInvalidateOnAnimation()
                     editableBuf.clear()
                     return true
                 }
 
                 override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                    if (!text.isNullOrEmpty()) {
-                        nativeResetScroll()
-                        nativeSendText(text.toString())
-                        consumeModifiers()
-                        postInvalidateOnAnimation()
-                    }
+                    val composing = text?.toString() ?: ""
+                    resetScrollOffset()
+                    applyComposingDiff(composing)
+                    lastComposing = composing
+                    syncModifierPillsFromNative()
+                    postInvalidateOnAnimation()
+                    return true
+                }
+
+                override fun finishComposingText(): Boolean {
+                    lastComposing = ""
                     editableBuf.clear()
                     return true
                 }
 
                 override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+                    resetScrollOffset()
+                    if (lastComposing.isNotEmpty()) {
+                        val drop = min(beforeLength, lastComposing.length)
+                        lastComposing = lastComposing.dropLast(drop)
+                    }
                     repeat(max(1, beforeLength)) {
-                        nativeSendKey(KeyEvent.KEYCODE_DEL, false, false)
+                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
                     }
                     postInvalidateOnAnimation()
                     return true
@@ -1082,28 +1283,25 @@ class TermuxActivity : Activity() {
 
         private fun handleHardwareKeyDown(keyCode: Int, event: KeyEvent): Boolean {
             if (keyCode == KeyEvent.KEYCODE_BACK) {
-                if (isSelecting) {
+                if (nativeIsSelectingText()) {
                     stopNativeSelection()
                     return true
                 }
                 return false
             }
-            nativeResetScroll()
-            val isCtrl = event.isCtrlPressed || ctrlLatched
-            val isAlt = event.isAltPressed || altLatched
-
-            val uni = event.getUnicodeChar(event.metaState and KeyEvent.META_CTRL_MASK.inv())
-            if (uni != 0 && !isCtrl && !isAlt && keyCode != KeyEvent.KEYCODE_ENTER && keyCode != KeyEvent.KEYCODE_DEL && keyCode != KeyEvent.KEYCODE_TAB && keyCode != KeyEvent.KEYCODE_ESCAPE) {
-                nativeSendText(String(Character.toChars(uni)))
-                consumeModifiers()
-                postInvalidateOnAnimation()
-                return true
+            if (keyCode == KeyEvent.KEYCODE_CTRL_LEFT || keyCode == KeyEvent.KEYCODE_CTRL_RIGHT ||
+                keyCode == KeyEvent.KEYCODE_ALT_LEFT || keyCode == KeyEvent.KEYCODE_ALT_RIGHT ||
+                keyCode == KeyEvent.KEYCODE_SHIFT_LEFT || keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT
+            ) {
+                return false
             }
 
-            nativeSendKey(keyCode, isCtrl, isAlt)
-            consumeModifiers()
+            resetScrollOffset()
+            val uni = event.getUnicodeChar(event.metaState and KeyEvent.META_CTRL_MASK.inv())
+            val rc = nativeSendKeyEvent(keyCode, uni, event.metaState)
+            syncModifierPillsFromNative()
             postInvalidateOnAnimation()
-            return true
+            return rc != 0
         }
     }
 }

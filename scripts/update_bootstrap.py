@@ -161,11 +161,12 @@ def main():
             )
 
         # Write updated SYMLINKS.txt with com.termuxx/file paths
-        with open(symlinks_path, "w", encoding="utf-8") as f:
-            for rel_link, target in sorted(symlinks_map.items()):
-                patched_target = target.replace("com.termux/files", "com.termuxx/file").replace("com.termux/cache", "com.termuxx/cach")
-                patched_link = rel_link.replace("com.termux/files", "com.termuxx/file").replace("com.termux/cache", "com.termuxx/cach")
-                f.write(f"{patched_target}←{patched_link}\n")
+        if symlinks_map:
+            with open(symlinks_path, "w", encoding="utf-8") as f:
+                for rel_link, target in sorted(symlinks_map.items()):
+                    patched_target = target.replace("com.termux/files", "com.termuxx/file").replace("com.termux/cache", "com.termuxx/cach")
+                    patched_link = rel_link.replace("com.termux/files", "com.termuxx/file").replace("com.termux/cache", "com.termuxx/cach")
+                    f.write(f"{patched_target}←{patched_link}\n")
 
         # Pre-patch all regular files in the bootstrap for com.termuxx
         patched_files = 0
@@ -192,6 +193,8 @@ def main():
                 dirs.sort()
                 for d in dirs:
                     full_d = os.path.join(root, d)
+                    if os.path.islink(full_d):
+                        continue
                     rel_d = os.path.relpath(full_d, extract_dir).replace("\\", "/") + "/"
                     zf.writestr(rel_d, b"")
                 for fname in sorted(files):
@@ -231,15 +234,20 @@ def slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, deb_url):
         rel_root = os.path.relpath(root, usr_src).replace("\\", "/")
         if rel_root == ".":
             rel_root = ""
-        for d in dirs:
+        for d in list(dirs):
+            src_d = os.path.join(root, d)
             rel_d = f"{rel_root}/{d}" if rel_root else d
             list_entries.append(f"/data/data/com.termuxx/file/usr/{rel_d}")
             dst_d = os.path.join(extract_dir, rel_d)
-            if os.path.islink(os.path.join(root, d)):
-                target = os.readlink(os.path.join(root, d))
+            if os.path.islink(src_d):
+                target = os.readlink(src_d)
                 symlinks_map[rel_d] = target
-                if os.path.exists(dst_d):
-                    shutil.rmtree(dst_d, ignore_errors=True)
+                dirs.remove(d)
+                if os.path.lexists(dst_d):
+                    if os.path.isdir(dst_d) and not os.path.islink(dst_d):
+                        shutil.rmtree(dst_d, ignore_errors=True)
+                    else:
+                        os.remove(dst_d)
             else:
                 os.makedirs(dst_d, exist_ok=True)
         for fname in files:
@@ -251,11 +259,13 @@ def slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, deb_url):
             if os.path.islink(src_f):
                 target = os.readlink(src_f)
                 symlinks_map[rel_f] = target
-                if os.path.exists(dst_f):
+                if os.path.lexists(dst_f):
                     os.remove(dst_f)
             else:
                 if rel_f in symlinks_map:
                     del symlinks_map[rel_f]
+                if os.path.lexists(dst_f) and os.path.islink(dst_f):
+                    os.remove(dst_f)
                 shutil.copy2(src_f, dst_f)
 
     info_dir = os.path.join(extract_dir, "var/lib/dpkg/info")

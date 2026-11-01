@@ -13,9 +13,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(COMMON_CXX_FLAGS
-    -Wall -Wextra -Wno-unused-command-line-argument -O3 -ffast-math
-    -fomit-frame-pointer -fno-exceptions -fno-rtti -fvisibility=hidden
-    -fdata-sections -ffunction-sections
+    -Wall -Wextra -Wno-unused-command-line-argument -O3
+    -fno-math-errno -fomit-frame-pointer -fno-exceptions -fno-rtti
+    -fvisibility=hidden -fdata-sections -ffunction-sections
+)
+
+set_source_files_properties(termux-bootstrap-zip.S PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/bootstrap-aarch64.zip"
 )
 
 add_library(termuxx-core SHARED
@@ -36,11 +40,10 @@ target_compile_options(termuxx-redirect PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${COMMON_CXX_FLAGS}>
 )
 
-check_cxx_compiler_flag("-march=armv9.2-a+sve2+crypto+dotprod+fp16+bf16+i8mm" HAS_ARMV9_2_SVE2)
-if(HAS_ARMV9_2_SVE2)
-    target_compile_options(termuxx-core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv9.2-a+sve2+crypto+dotprod+fp16+bf16+i8mm>)
-    target_compile_options(termuxx-redirect PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv9.2-a+sve2+crypto+dotprod+fp16+bf16+i8mm>)
-else()
+# Use ARMv8.2-A with NEON/DotProd/FP16/Crypto instead of SVE2 to prevent SIGILL
+# on Qualcomm Oryon (Snapdragon 8 Elite / Gen 5) and other ARM64 SoCs without SVE2.
+check_cxx_compiler_flag("-march=armv8.2-a+crypto+dotprod+fp16" HAS_ARMV8_2)
+if(HAS_ARMV8_2)
     target_compile_options(termuxx-core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
     target_compile_options(termuxx-redirect PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
 endif()
