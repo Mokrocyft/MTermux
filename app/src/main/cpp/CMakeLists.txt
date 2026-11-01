@@ -3,16 +3,20 @@ project(termuxx-core LANGUAGES C CXX ASM)
 
 include(CheckCXXCompilerFlag)
 
+check_cxx_compiler_flag("-std=c++26" HAS_CXX26)
 check_cxx_compiler_flag("-std=c++23" HAS_CXX23)
-if(HAS_CXX23)
-    set(CMAKE_CXX_STANDARD 23)
+if(HAS_CXX26)
+    set(CXX_STD_FLAG "-std=c++26")
+elseif(HAS_CXX23)
+    set(CXX_STD_FLAG "-std=c++23")
 else()
-    set(CMAKE_CXX_STANDARD 20)
+    set(CXX_STD_FLAG "-std=c++2b")
 endif()
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(COMMON_CXX_FLAGS
+    ${CXX_STD_FLAG}
     -Wall -Wextra -Wno-unused-command-line-argument -O3
     -fno-math-errno -fomit-frame-pointer -fno-exceptions -fno-rtti
     -fvisibility=hidden -fdata-sections -ffunction-sections
