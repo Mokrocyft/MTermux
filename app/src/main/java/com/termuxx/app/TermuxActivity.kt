@@ -556,7 +556,7 @@ class TermuxActivity : Activity() {
             background = pillBg(COLOR_AMOLED_BG, COLOR_BORDER, dp(8))
         }
         val previewText = TextView(this).apply {
-            text = "~ › echo "Termux C++23" "
+            text = "~ › echo 'Termux C++23' "
             setTextColor(COLOR_TEXT)
             typeface = Typeface.MONOSPACE
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
@@ -932,16 +932,12 @@ class TermuxActivity : Activity() {
         if (rem <= 0) {
             finish()
         } else {
-            val initCursorShape = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
-        nativeSetDefaultCursorShape(initCursorShape)
-        rebuildTabs()
+            rebuildTabs()
             terminalSurface.invalidateAllRows()
         }
     }
 
-    internal fun val initCursorShape = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
-        nativeSetDefaultCursorShape(initCursorShape)
-        rebuildTabs() {
+    internal fun rebuildTabs() {
         tabStrip.removeAllViews()
         val rawCount = nativeGetSessionCount()
         val count = max(1, rawCount)
