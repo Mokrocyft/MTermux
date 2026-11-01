@@ -139,6 +139,7 @@ constexpr int AMETA_CTRL_ON  = 4096;
 
 // Event-driven JNI UI wakeup state
 static JavaVM* gJvm = nullptr;
+static int gDefaultCursorShape = 0;
 static pthread_mutex_t gViewMutex = PTHREAD_MUTEX_INITIALIZER;
 static jobject gSurfaceView = nullptr;
 static jmethodID gPostInvalidateId = nullptr;
@@ -900,7 +901,7 @@ public:
 
     int mCursorRow = 0;
     int mCursorCol = 0;
-    int mCursorShape = 0; // 0 = Block, 1 = Underline, 2 = Bar/Beam (DECSCUSR)
+    int mCursorShape = gDefaultCursorShape; // 0 = Block, 1 = Underline, 2 = Bar/Beam (DECSCUSR)
     bool mCursorVisible = true;
     bool mPendingWrap = false;
 
@@ -1288,7 +1289,7 @@ public:
         mCurFlags = 0;
         mCursorRow = 0;
         mCursorCol = 0;
-        mCursorShape = 0;
+        mCursorShape = gDefaultCursorShape;
         mCursorVisible = true;
         mPendingWrap = false;
         mScrollTop = 0;
@@ -1814,7 +1815,7 @@ public:
 
         if (mCsiIntermediate == ' ' && finalByte == 'q') {
             int style = param(0, 1);
-            if (style <= 2) mCursorShape = 0;
+            if (style <= 2) mCursorShape = gDefaultCursorShape;
             else if (style <= 4) mCursorShape = 1;
             else if (style <= 6) mCursorShape = 2;
             return;
@@ -3181,6 +3182,19 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     engine->unlock();
 
     return (bgCount << 16) | (glCount & 0xFFFF);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSetDefaultCursorShape(JNIEnv* /*env*/, jclass /*clazz*/, jint shape) {
+    pthread_mutex_lock(&gGlobalMutex);
+    gDefaultCursorShape = std::clamp<int>(shape, 0, 2);
+    for (auto& eng : gSessions) {
+        if (eng) {
+            eng->mCursorShape = gDefaultCursorShape;
+            eng->markAllDirty();
+        }
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
 }
 
 JNIEXPORT jint JNICALL

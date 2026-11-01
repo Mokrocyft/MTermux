@@ -84,6 +84,18 @@ private const val COLOR_HANDLE_FILL = 0xFFF8F8FA.toInt()
 
 private const val PREFS_NAME = "termuxx_prefs"
 private const val KEY_EXTRA_KEYS_SPEC = "extra_keys_spec_v2"
+private const val KEY_CURSOR_SHAPE = "cursor_shape_v2"
+private const val KEY_CURSOR_BLINK = "cursor_blink_v2"
+private const val KEY_CURSOR_BLINK_RATE = "cursor_blink_rate_ms_v2"
+private const val KEY_CURSOR_COLOR = "cursor_color_v2"
+private const val KEY_CURSOR_THICKNESS = "cursor_thickness_dp_v2"
+
+private const val DEFAULT_CURSOR_SHAPE = 0 // 0: Block, 1: Underline, 2: Bar
+private const val DEFAULT_CURSOR_BLINK = true
+private const val DEFAULT_CURSOR_BLINK_RATE = 530L
+private const val DEFAULT_CURSOR_COLOR = 0xFFA8C7FA.toInt()
+private const val DEFAULT_CURSOR_THICKNESS = 2
+
 private const val REQ_POST_NOTIFICATIONS = 1001
 
 private const val DEFAULT_EXTRA_KEYS_SPEC =
@@ -189,7 +201,7 @@ class TermuxActivity : Activity() {
                 onLongClick = { terminalSurface.showTranscriptCopyDialog() }
             )
         )
-        headerBar.addView(makeHeaderButton("⚙") { showExtraKeysSettingsDialog() })
+        headerBar.addView(makeHeaderButton("⚙", onClick = { showSettingsHubDialog() }, onLongClick = { showCursorSettingsDialog() }))
         headerBar.addView(makeHeaderButton("✕") { closeCurrentSession() })
 
         rootLayout.addView(
@@ -254,6 +266,8 @@ class TermuxActivity : Activity() {
         }
         rootLayout.post { rootLayout.requestApplyInsets() }
 
+        val initCursorShape = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
+        nativeSetDefaultCursorShape(initCursorShape)
         rebuildTabs()
         nativeRegisterSurface(terminalSurface)
         nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
@@ -500,6 +514,299 @@ class TermuxActivity : Activity() {
         }
     }
 
+        private fun showSettingsHubDialog() {
+        val options = arrayOf(
+            "⚡ Настройки курсора (форма, мигание, скорость, цвет)",
+            "⌨ Настройки нижней клавиатуры (клавиши, строки, пресеты)"
+        )
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Настройки Termux")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> showCursorSettingsDialog()
+                    1 -> showExtraKeysSettingsDialog()
+                }
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
+    private fun showCursorSettingsDialog() {
+        var selectedShape = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
+        var selectedBlink = prefs.getBoolean(KEY_CURSOR_BLINK, DEFAULT_CURSOR_BLINK)
+        var selectedRate = prefs.getLong(KEY_CURSOR_BLINK_RATE, DEFAULT_CURSOR_BLINK_RATE)
+        var selectedColor = prefs.getInt(KEY_CURSOR_COLOR, DEFAULT_CURSOR_COLOR)
+        var selectedThickness = prefs.getInt(KEY_CURSOR_THICKNESS, DEFAULT_CURSOR_THICKNESS)
+
+        val dialogLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(8))
+            setBackgroundColor(COLOR_HEADER_BG)
+        }
+        val scroll = ScrollView(this).apply {
+            addView(dialogLayout)
+        }
+
+        // Live Preview Box
+        val previewCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(COLOR_AMOLED_BG)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = pillBg(COLOR_AMOLED_BG, COLOR_BORDER, dp(8))
+        }
+        val previewText = TextView(this).apply {
+            text = "~ › echo "Termux C++23" "
+            setTextColor(COLOR_TEXT)
+            typeface = Typeface.MONOSPACE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+        }
+        previewCard.addView(previewText)
+
+        val cursorView = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(8), dp(18))
+        }
+        previewCard.addView(cursorView)
+        dialogLayout.addView(previewCard)
+
+        var previewBlinkOn = true
+        val previewBlinkRunnable = object : Runnable {
+            override fun run() {
+                if (!selectedBlink) {
+                    previewBlinkOn = true
+                } else {
+                    previewBlinkOn = !previewBlinkOn
+                }
+                val alpha = if (previewBlinkOn) 0xFF else 0x00
+                cursorView.setBackgroundColor((alpha shl 24) or (selectedColor and 0x00FFFFFF))
+                cursorView.postDelayed(this, selectedRate)
+            }
+        }
+
+        fun updatePreviewGeometry() {
+            cursorView.removeCallbacks(previewBlinkRunnable)
+            val thickPx = max(1, dp(selectedThickness))
+            when (selectedShape) {
+                1 -> { // Underline
+                    cursorView.layoutParams = LinearLayout.LayoutParams(dp(9), thickPx).apply {
+                        topMargin = dp(14)
+                    }
+                }
+                2 -> { // Bar
+                    cursorView.layoutParams = LinearLayout.LayoutParams(thickPx, dp(18))
+                }
+                else -> { // Block
+                    cursorView.layoutParams = LinearLayout.LayoutParams(dp(9), dp(18))
+                }
+            }
+            previewBlinkOn = true
+            cursorView.setBackgroundColor(selectedColor)
+            cursorView.postDelayed(previewBlinkRunnable, selectedRate)
+        }
+        updatePreviewGeometry()
+
+        fun makeSectionTitle(title: String): TextView {
+            return TextView(this).apply {
+                text = title
+                setTextColor(COLOR_TEXT_DIM)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, dp(10), 0, dp(4))
+            }
+        }
+
+        fun makeSelectableChip(title: String, isSelected: Boolean, onClick: Runnable): TextView {
+            return TextView(this).apply {
+                text = title
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setPadding(dp(10), dp(5), dp(10), dp(5))
+                setTextColor(if (isSelected) COLOR_AMOLED_BG else COLOR_TEXT)
+                background = pillBg(
+                    if (isSelected) COLOR_ACCENT else COLOR_SURFACE,
+                    if (isSelected) COLOR_ACCENT else COLOR_BORDER,
+                    dp(6)
+                )
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    setMargins(0, 0, dp(6), dp(4))
+                }
+                setOnClickListener { onClick.run() }
+            }
+        }
+
+        // Section 1: Форма курсора
+        dialogLayout.addView(makeSectionTitle("ФОРМА КУРСОРА"))
+        val shapeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        dialogLayout.addView(shapeRow)
+
+        fun rebuildShapeChips() {
+            shapeRow.removeAllViews()
+            val shapes = listOf("█ Блок" to 0, "_ Подчёркивание" to 1, "| Луч / Bar" to 2)
+            for ((label, s) in shapes) {
+                shapeRow.addView(makeSelectableChip(label, selectedShape == s) {
+                    selectedShape = s
+                    rebuildShapeChips()
+                    updatePreviewGeometry()
+                })
+            }
+        }
+        rebuildShapeChips()
+
+        // Section 2: Режим мигания
+        dialogLayout.addView(makeSectionTitle("МИГАНИЕ КУРСОРА"))
+        val blinkRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        dialogLayout.addView(blinkRow)
+
+        fun rebuildBlinkChips() {
+            blinkRow.removeAllViews()
+            blinkRow.addView(makeSelectableChip("✔ Мигающий", selectedBlink) {
+                selectedBlink = true
+                rebuildBlinkChips()
+                updatePreviewGeometry()
+            })
+            blinkRow.addView(makeSelectableChip("✕ Непрерывный", !selectedBlink) {
+                selectedBlink = false
+                rebuildBlinkChips()
+                updatePreviewGeometry()
+            })
+        }
+        rebuildBlinkChips()
+
+        // Section 3: Скорость мигания
+        dialogLayout.addView(makeSectionTitle("СКОРОСТЬ МИГАНИЯ"))
+        val rateRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        dialogLayout.addView(rateRow)
+
+        fun rebuildRateChips() {
+            rateRow.removeAllViews()
+            val rates = listOf("Быстро (320 мс)" to 320L, "Стандартно (530 мс)" to 530L, "Плавно (750 мс)" to 750L)
+            for ((label, r) in rates) {
+                rateRow.addView(makeSelectableChip(label, selectedRate == r) {
+                    selectedRate = r
+                    rebuildRateChips()
+                    updatePreviewGeometry()
+                })
+            }
+        }
+        rebuildRateChips()
+
+        // Section 4: Цвет курсора
+        dialogLayout.addView(makeSectionTitle("ЦВЕТ КУРСОРА"))
+        val colorRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val colorRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        dialogLayout.addView(colorRow1)
+        dialogLayout.addView(colorRow2)
+
+        val colors = listOf(
+            ("Голубой M3" to 0xFFA8C7FA.toInt()),
+            ("Неоновый" to 0xFF00E676.toInt()),
+            ("Белый" to 0xFFFFFFFF.toInt()),
+            ("Янтарный" to 0xFFFFB74D.toInt()),
+            ("Коралловый" to 0xFFFF80AB.toInt()),
+            ("Фиолетовый" to 0xFFC084FC.toInt())
+        )
+
+        fun rebuildColorChips() {
+            colorRow1.removeAllViews()
+            colorRow2.removeAllViews()
+            for (i in colors.indices) {
+                val (label, c) = colors[i]
+                val chip = TextView(this).apply {
+                    text = label
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    setPadding(dp(10), dp(5), dp(10), dp(5))
+                    val isSel = (selectedColor == c)
+                    setTextColor(if (isSel) 0xFF000000.toInt() else c)
+                    background = pillBg(
+                        if (isSel) c else COLOR_SURFACE,
+                        c,
+                        dp(6)
+                    )
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        setMargins(0, 0, dp(6), dp(4))
+                    }
+                    setOnClickListener {
+                        selectedColor = c
+                        rebuildColorChips()
+                        updatePreviewGeometry()
+                    }
+                }
+                if (i < 3) colorRow1.addView(chip) else colorRow2.addView(chip)
+            }
+        }
+        rebuildColorChips()
+
+        // Section 5: Толщина курсора
+        dialogLayout.addView(makeSectionTitle("ТОЛЩИНА (ДЛЯ ЛУЧА И ПОДЧЁРКИВАНИЯ)"))
+        val thickRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        dialogLayout.addView(thickRow)
+
+        fun rebuildThickChips() {
+            thickRow.removeAllViews()
+            val thicks = listOf("2 dp" to 2, "3 dp" to 3, "4 dp" to 4)
+            for ((label, t) in thicks) {
+                thickRow.addView(makeSelectableChip(label, selectedThickness == t) {
+                    selectedThickness = t
+                    rebuildThickChips()
+                    updatePreviewGeometry()
+                })
+            }
+        }
+        rebuildThickChips()
+
+        val dialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("⚡ Настройки курсора")
+            .setView(scroll)
+            .setPositiveButton("Сохранить") { _, _ ->
+                prefs.edit()
+                    .putInt(KEY_CURSOR_SHAPE, selectedShape)
+                    .putBoolean(KEY_CURSOR_BLINK, selectedBlink)
+                    .putLong(KEY_CURSOR_BLINK_RATE, selectedRate)
+                    .putInt(KEY_CURSOR_COLOR, selectedColor)
+                    .putInt(KEY_CURSOR_THICKNESS, selectedThickness)
+                    .apply()
+                nativeSetDefaultCursorShape(selectedShape)
+                terminalSurface.applyCursorSettings(
+                    selectedShape,
+                    selectedBlink,
+                    selectedRate,
+                    selectedColor,
+                    selectedThickness
+                )
+                Toast.makeText(this, "Настройки курсора сохранены", Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("Сброс") { _, _ ->
+                prefs.edit()
+                    .putInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
+                    .putBoolean(KEY_CURSOR_BLINK, DEFAULT_CURSOR_BLINK)
+                    .putLong(KEY_CURSOR_BLINK_RATE, DEFAULT_CURSOR_BLINK_RATE)
+                    .putInt(KEY_CURSOR_COLOR, DEFAULT_CURSOR_COLOR)
+                    .putInt(KEY_CURSOR_THICKNESS, DEFAULT_CURSOR_THICKNESS)
+                    .apply()
+                nativeSetDefaultCursorShape(DEFAULT_CURSOR_SHAPE)
+                terminalSurface.applyCursorSettings(
+                    DEFAULT_CURSOR_SHAPE,
+                    DEFAULT_CURSOR_BLINK,
+                    DEFAULT_CURSOR_BLINK_RATE,
+                    DEFAULT_CURSOR_COLOR,
+                    DEFAULT_CURSOR_THICKNESS
+                )
+                Toast.makeText(this, "Курсор сброшен к настройкам по умолчанию", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Отмена", null)
+            .create()
+
+        dialog.setOnDismissListener {
+            cursorView.removeCallbacks(previewBlinkRunnable)
+        }
+        dialog.show()
+    }
+
     private fun showExtraKeysSettingsDialog() {
         val currentSpec = prefs.getString(KEY_EXTRA_KEYS_SPEC, DEFAULT_EXTRA_KEYS_SPEC)
             ?: DEFAULT_EXTRA_KEYS_SPEC
@@ -607,6 +914,8 @@ class TermuxActivity : Activity() {
             terminalSurface.cellWidth.roundToInt(),
             terminalSurface.cellHeight.roundToInt()
         )
+        val initCursorShape = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
+        nativeSetDefaultCursorShape(initCursorShape)
         rebuildTabs()
         terminalSurface.resetScrollAndBlink()
         terminalSurface.invalidateAllRows()
@@ -623,12 +932,16 @@ class TermuxActivity : Activity() {
         if (rem <= 0) {
             finish()
         } else {
-            rebuildTabs()
+            val initCursorShape = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
+        nativeSetDefaultCursorShape(initCursorShape)
+        rebuildTabs()
             terminalSurface.invalidateAllRows()
         }
     }
 
-    internal fun rebuildTabs() {
+    internal fun val initCursorShape = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
+        nativeSetDefaultCursorShape(initCursorShape)
+        rebuildTabs() {
         tabStrip.removeAllViews()
         val rawCount = nativeGetSessionCount()
         val count = max(1, rawCount)
@@ -663,7 +976,9 @@ class TermuxActivity : Activity() {
                         terminalSurface.stopTextSelection()
                         nativeSwitchSession(idx)
                         terminalSurface.syncSize()
-                        rebuildTabs()
+                        val initCursorShape = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
+        nativeSetDefaultCursorShape(initCursorShape)
+        rebuildTabs()
                         terminalSurface.invalidateAllRows()
                     }
                 }
@@ -797,6 +1112,12 @@ class TermuxActivity : Activity() {
         private var scrollAccum = 0f
 
         private var cursorBlinkOn = true
+        internal var cursorShapePref = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
+        internal var cursorBlinkEnabled = prefs.getBoolean(KEY_CURSOR_BLINK, DEFAULT_CURSOR_BLINK)
+        internal var cursorBlinkRateMs = prefs.getLong(KEY_CURSOR_BLINK_RATE, DEFAULT_CURSOR_BLINK_RATE)
+        internal var cursorColor = prefs.getInt(KEY_CURSOR_COLOR, DEFAULT_CURSOR_COLOR)
+        internal var cursorThicknessDp = prefs.getInt(KEY_CURSOR_THICKNESS, DEFAULT_CURSOR_THICKNESS)
+
         private var activityResumed = false
 
         private val bgRunsBuf = IntArray(512 * 3)
@@ -818,12 +1139,12 @@ class TermuxActivity : Activity() {
 
         private val blinkRunnable = object : Runnable {
             override fun run() {
-                if (!activityResumed) return
+                if (!activityResumed || !cursorBlinkEnabled) return
                 if (scrollOffset == 0 && !nativeIsSelectingText()) {
                     cursorBlinkOn = !cursorBlinkOn
                     postInvalidateOnAnimation()
                 }
-                postDelayed(this, 530L)
+                postDelayed(this, cursorBlinkRateMs)
             }
         }
 
@@ -847,6 +1168,12 @@ class TermuxActivity : Activity() {
             graphicPaint.style = Paint.Style.FILL
 
             updateMetrics(false)
+            activityResumed = true
+            cursorBlinkOn = true
+            if (cursorBlinkEnabled) {
+                removeCallbacks(blinkRunnable)
+                postDelayed(blinkRunnable, cursorBlinkRateMs)
+            }
 
             gestureDetector = GestureDetector(
                 context,
@@ -914,6 +1241,12 @@ class TermuxActivity : Activity() {
                         fontScale = (fontScale * detector.scaleFactor).coerceIn(0.45f, 3.0f)
                         if (abs(fontScale - prevScale) > 0.004f) {
                             updateMetrics(false)
+            activityResumed = true
+            cursorBlinkOn = true
+            if (cursorBlinkEnabled) {
+                removeCallbacks(blinkRunnable)
+                postDelayed(blinkRunnable, cursorBlinkRateMs)
+            }
                             syncSize()
                         }
                         return true
@@ -929,8 +1262,11 @@ class TermuxActivity : Activity() {
 
         internal fun onActivityResume() {
             activityResumed = true
+            cursorBlinkOn = true
             removeCallbacks(blinkRunnable)
-            postDelayed(blinkRunnable, 530L)
+            if (cursorBlinkEnabled) {
+                postDelayed(blinkRunnable, cursorBlinkRateMs)
+            }
             postInvalidateOnAnimation()
         }
 
@@ -1076,8 +1412,25 @@ class TermuxActivity : Activity() {
             scrollOffset = 0
             cursorBlinkOn = true
             removeCallbacks(blinkRunnable)
-            if (activityResumed) postDelayed(blinkRunnable, 530L)
+            if (activityResumed && cursorBlinkEnabled) {
+                postDelayed(blinkRunnable, cursorBlinkRateMs)
+            }
             invalidateAllRows()
+        }
+
+        internal fun applyCursorSettings(
+            shape: Int,
+            blink: Boolean,
+            rateMs: Long,
+            color: Int,
+            thicknessDp: Int
+        ) {
+            cursorShapePref = shape
+            cursorBlinkEnabled = blink
+            cursorBlinkRateMs = rateMs
+            cursorColor = color
+            cursorThicknessDp = thicknessDp
+            resetScrollAndBlink()
         }
 
         internal fun invalidateAllRows() {
@@ -1136,7 +1489,9 @@ class TermuxActivity : Activity() {
                     cellWidth.roundToInt(),
                     cellHeight.roundToInt()
                 )
-                post { rebuildTabs() }
+                post { val initCursorShape = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
+        nativeSetDefaultCursorShape(initCursorShape)
+        rebuildTabs() }
                 rowNodesValid?.fill(false)
             }
 
@@ -1191,21 +1546,26 @@ class TermuxActivity : Activity() {
 
             val selecting = nativeIsSelectingText()
 
-            // Draw Cursor (DECSCUSR) in Material 3 Primary Blue (#A8C7FA)
+            // Draw Cursor (DECSCUSR + user custom shape, blink, color & thickness)
             if (scrollOffset == 0 && !selecting) {
                 val cursorState = nativeGetCursorState()
                 if (cursorState >= 0) {
-                    val shape = (cursorState ushr 29) and 3
+                    val rawShape = (cursorState ushr 29) and 3
+                    val shape = if (rawShape in 0..2) rawShape else cursorShapePref
                     val cRow = (cursorState ushr 16) and 0x1FFF
                     val cCol = cursorState and 0xFFFF
                     if (cRow in 0 until rows && cCol in 0 until cols) {
                         val cx = cCol * cellWidth
                         val cy = cRow * cellHeight
-                        bgPaint.color = if (cursorBlinkOn) 0xCCA8C7FA.toInt() else 0x44A8C7FA
-                        when (shape) {
-                            1 -> canvas.drawRect(cx, cy + cellHeight - dp(2), cx + cellWidth, cy + cellHeight, bgPaint)
-                            2 -> canvas.drawRect(cx, cy, cx + dp(2), cy + cellHeight, bgPaint)
-                            else -> canvas.drawRect(cx, cy, cx + cellWidth, cy + cellHeight, bgPaint)
+                        val isVisible = if (cursorBlinkEnabled) cursorBlinkOn else true
+                        if (isVisible) {
+                            bgPaint.color = cursorColor
+                            val thickPx = max(1f, dpF(cursorThicknessDp.toFloat()))
+                            when (shape) {
+                                1 -> canvas.drawRect(cx, cy + cellHeight - thickPx, cx + cellWidth, cy + cellHeight, bgPaint)
+                                2 -> canvas.drawRect(cx, cy, cx + thickPx, cy + cellHeight, bgPaint)
+                                else -> canvas.drawRect(cx, cy, cx + cellWidth, cy + cellHeight, bgPaint)
+                            }
                         }
                     }
                 }
@@ -1587,6 +1947,7 @@ class TermuxActivity : Activity() {
         @JvmStatic external fun nativeIsSelectingText(): Boolean
         @JvmStatic external fun nativeSelectAll(scrollOffset: Int)
         @JvmStatic external fun nativeGetSelectionSelectors(outSelectors: IntArray)
+        @JvmStatic external fun nativeSetDefaultCursorShape(shape: Int)
         @JvmStatic external fun nativeGetSelectedText(): String
     }
 }
