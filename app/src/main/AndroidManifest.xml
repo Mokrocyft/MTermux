@@ -44,7 +44,7 @@
         </activity>
 
         <service
-            android:name=".app.TermuxActivity$KeepAliveService"
+            android:name=".app.KeepAliveService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property

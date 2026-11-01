@@ -18,6 +18,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RenderNode
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.net.wifi.WifiManager
@@ -33,17 +34,14 @@ import android.view.Choreographer
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
-import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
-import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
-import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
@@ -56,11 +54,40 @@ import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.TextView
 import android.widget.Toast
+import com.termuxx.R
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+
+private const val COLOR_AMOLED_BG = 0xFF000000.toInt()
+private const val COLOR_SURFACE = 0xFF080808.toInt()
+private const val COLOR_BORDER = 0xFF161616.toInt()
+private const val COLOR_TEXT = 0xFFEAEAEA.toInt()
+private const val COLOR_TEXT_DIM = 0xFF8A8A8A.toInt()
+private const val COLOR_ACCENT = 0xFF00E676.toInt()
+private const val COLOR_ROOT = 0xFFFF5252.toInt()
+
+private const val PREFS_NAME = "termuxx_prefs"
+private const val KEY_EXTRA_KEYS_SPEC = "extra_keys_spec_v2"
+
+private const val DEFAULT_EXTRA_KEYS_SPEC =
+    "ESC|TAB|CTRL|ALT|-|/|▲|▼|◀|▶"
+
+private const val EXTENDED_EXTRA_KEYS_SPEC =
+    "ESC|/|\\|-|HOME|▲|END|PGUP\nTAB|CTRL|ALT|_|◀|▼|▶|PGDN"
+
+private const val VIM_TMUX_EXTRA_KEYS_SPEC =
+    "ESC|:|CTRL|ALT|\"|%|h|j|k|l"
+
+private const val ITEM_COPY = 1
+private const val ITEM_PASTE = 2
+private const val ITEM_SELECT_ALL = 3
+private const val ITEM_SHARE = 4
+
+private const val HANDLE_LEFT = 0
+private const val HANDLE_RIGHT = 2
 
 /**
  * Termuxx — Modern Kotlin + C++23 (C++2b) Minimalist Pure Dark AMOLED Terminal.
@@ -1043,7 +1070,7 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                 }
                 0x253C, 0x254B -> {
                     c.drawRect(x, cy - hw, x + w, cy + hw, graphicPaint)
-                    c.drawRect(cx - hw, y, cx + hw, y + h, graphicPaint)
+                    c.drawRect(cx - hw, y, cx + hw, cy + hw, graphicPaint)
                     return true
                 }
                 else -> return false
@@ -1166,8 +1193,8 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
     inner class TextSelectionController(private val surface: TerminalSurface) :
         ViewTreeObserver.OnTouchModeChangeListener {
 
-        private val startHandle = SelectionHandleView(surface, this, SelectionHandleView.LEFT)
-        private val endHandle = SelectionHandleView(surface, this, SelectionHandleView.RIGHT)
+        private val startHandle = SelectionHandleView(surface, this, HANDLE_LEFT)
+        private val endHandle = SelectionHandleView(surface, this, HANDLE_RIGHT)
         private val handleHeight = max(startHandle.handleHeight, endHandle.handleHeight)
         private val selectors = IntArray(4)
 
@@ -1333,8 +1360,10 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
     ) : View(surface.context) {
 
         private var window: PopupWindow? = null
-        private val leftDrawable: Drawable = context.getDrawable(R.drawable.text_select_handle_left_material)!!
-        private val rightDrawable: Drawable = context.getDrawable(R.drawable.text_select_handle_right_material)!!
+        private val leftDrawable: Drawable = context.getDrawable(R.drawable.text_select_handle_left_material)
+            ?: ColorDrawable(0)
+        private val rightDrawable: Drawable = context.getDrawable(R.drawable.text_select_handle_right_material)
+            ?: ColorDrawable(0)
         private var handleDrawable: Drawable = leftDrawable
 
         private var isDragging = false
@@ -1369,8 +1398,9 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                     height = ViewGroup.LayoutParams.WRAP_CONTENT
                     setBackgroundDrawable(null)
                     animationStyle = 0
-                    windowLayoutType = WindowManager.LayoutParams.TYPE_APPLICATION_SUB_PANEL
-                    isEnterTransitionOverlap = false
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        windowLayoutType = WindowManager.LayoutParams.TYPE_APPLICATION_SUB_PANEL
+                    }
                     contentView = this@SelectionHandleView
                 }
             }
@@ -1380,12 +1410,12 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
             orientation = newOrientation
             var w = 0
             when (newOrientation) {
-                LEFT -> {
+                HANDLE_LEFT -> {
                     handleDrawable = leftDrawable
                     w = handleDrawable.intrinsicWidth
                     hotspotX = (w * 3) / 4f
                 }
-                RIGHT -> {
+                HANDLE_RIGHT -> {
                     handleDrawable = rightDrawable
                     w = handleDrawable.intrinsicWidth
                     hotspotX = w / 4f
@@ -1490,9 +1520,9 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
             if (!surface.getGlobalVisibleRect(rect)) return
 
             if (posX - handleWidth < rect.left) {
-                changeOrientation(RIGHT)
+                changeOrientation(HANDLE_RIGHT)
             } else if (posX + handleWidth > rect.right) {
-                changeOrientation(LEFT)
+                changeOrientation(HANDLE_LEFT)
             } else {
                 changeOrientation(initialOrientation)
             }
@@ -1570,125 +1600,12 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
 
         val isShowing: Boolean
             get() = window?.isShowing == true
-
-        companion object {
-            const val LEFT = 0
-            const val RIGHT = 2
-        }
-    }
-
-    // ========================================================================
-    // Minimal Keep-Alive Foreground Service (WakeLock + WifiLock)
-    // ========================================================================
-    class KeepAliveService : Service() {
-        private var wakeLock: PowerManager.WakeLock? = null
-        private var wifiLock: WifiManager.WifiLock? = null
-
-        override fun onCreate() {
-            super.onCreate()
-            val chId = "termuxx_session_channel"
-            val nm = getSystemService(NOTIFICATION_SERVICE) as? NotificationManager
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && nm != null) {
-                val ch = NotificationChannel(chId, "Termuxx Core", NotificationManager.IMPORTANCE_LOW).apply {
-                    setShowBadge(false)
-                }
-                nm.createNotificationChannel(ch)
-            }
-
-            val pi = PendingIntent.getActivity(
-                this,
-                0,
-                Intent(this, TermuxActivity::class.java),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-
-            val nb = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification.Builder(this, chId)
-            } else {
-                @Suppress("DEPRECATION")
-                Notification.Builder(this)
-            }
-
-            nb.setContentTitle("Termuxx (Kotlin + C++23)")
-                .setContentText("Active terminal sessions running")
-                .setSmallIcon(R.mipmap.ic_launcher)
-                .setContentIntent(pi)
-                .setOngoing(true)
-
-            try {
-                startForeground(1, nb.build())
-            } catch (_: Throwable) {
-            }
-
-            try {
-                val pm = getSystemService(POWER_SERVICE) as? PowerManager
-                if (pm != null) {
-                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Termuxx::CoreLock").apply {
-                        setReferenceCounted(false)
-                        acquire()
-                    }
-                }
-                val wm = applicationContext.getSystemService(WIFI_SERVICE) as? WifiManager
-                if (wm != null) {
-                    @Suppress("DEPRECATION")
-                    val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                    } else {
-                        WifiManager.WIFI_MODE_FULL_HIGH_PERF
-                    }
-                    wifiLock = wm.createWifiLock(mode, "Termuxx::WifiLock").apply {
-                        setReferenceCounted(false)
-                        acquire()
-                    }
-                }
-            } catch (_: Throwable) {
-            }
-        }
-
-        override fun onDestroy() {
-            try {
-                if (wakeLock?.isHeld == true) wakeLock?.release()
-            } catch (_: Throwable) {
-            }
-            try {
-                if (wifiLock?.isHeld == true) wifiLock?.release()
-            } catch (_: Throwable) {
-            }
-            super.onDestroy()
-        }
-
-        override fun onBind(intent: Intent?): IBinder? = null
     }
 
     companion object {
         init {
             System.loadLibrary("termuxx-core")
         }
-
-        private const val COLOR_AMOLED_BG = 0xFF000000.toInt()
-        private const val COLOR_SURFACE = 0xFF080808.toInt()
-        private const val COLOR_BORDER = 0xFF161616.toInt()
-        private const val COLOR_TEXT = 0xFFEAEAEA.toInt()
-        private const val COLOR_TEXT_DIM = 0xFF8A8A8A.toInt()
-        private const val COLOR_ACCENT = 0xFF00E676.toInt()
-        private const val COLOR_ROOT = 0xFFFF5252.toInt()
-
-        private const val PREFS_NAME = "termuxx_prefs"
-        private const val KEY_EXTRA_KEYS_SPEC = "extra_keys_spec_v2"
-
-        private const val DEFAULT_EXTRA_KEYS_SPEC =
-            "ESC|TAB|CTRL|ALT|-|/|▲|▼|◀|▶"
-
-        private const val EXTENDED_EXTRA_KEYS_SPEC =
-            "ESC|/|\\|-|HOME|▲|END|PGUP\nTAB|CTRL|ALT|_|◀|▼|▶|PGDN"
-
-        private const val VIM_TMUX_EXTRA_KEYS_SPEC =
-            "ESC|:|CTRL|ALT|\"|%|h|j|k|l"
-
-        private const val ITEM_COPY = 1
-        private const val ITEM_PASTE = 2
-        private const val ITEM_SELECT_ALL = 3
-        private const val ITEM_SHARE = 4
 
         @JvmStatic external fun nativeInitAndPollBootstrap(nativeLibDir: String): Int
         @JvmStatic external fun nativeNewSession(asRoot: Boolean, rows: Int, cols: Int, cellW: Int, cellH: Int): Int
@@ -1726,4 +1643,87 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         @JvmStatic external fun nativeGetSelectionSelectors(outSelectors: IntArray)
         @JvmStatic external fun nativeGetSelectedText(): String
     }
+}
+
+// ========================================================================
+// Minimal Keep-Alive Foreground Service (WakeLock + WifiLock)
+// ========================================================================
+class KeepAliveService : Service() {
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        val chId = "termuxx_session_channel"
+        val nm = getSystemService(NOTIFICATION_SERVICE) as? NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && nm != null) {
+            val ch = NotificationChannel(chId, "Termuxx Core", NotificationManager.IMPORTANCE_LOW).apply {
+                setShowBadge(false)
+            }
+            nm.createNotificationChannel(ch)
+        }
+
+        val pi = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, TermuxActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val nb = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, chId)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+
+        nb.setContentTitle("Termuxx (Kotlin + C++23)")
+            .setContentText("Active terminal sessions running")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(pi)
+            .setOngoing(true)
+
+        try {
+            startForeground(1, nb.build())
+        } catch (_: Throwable) {
+        }
+
+        try {
+            val pm = getSystemService(POWER_SERVICE) as? PowerManager
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Termuxx::CoreLock").apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }
+            val wm = applicationContext.getSystemService(WIFI_SERVICE) as? WifiManager
+            if (wm != null) {
+                @Suppress("DEPRECATION")
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wm.createWifiLock(mode, "Termuxx::WifiLock").apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    override fun onDestroy() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (_: Throwable) {
+        }
+        try {
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (_: Throwable) {
+        }
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
 }
