@@ -1,6 +1,7 @@
 package com.termuxx.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -10,6 +11,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -25,14 +27,20 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.text.InputType;
+import android.text.Selection;
+import android.text.Spannable;
 import android.util.TypedValue;
+import android.view.ActionMode;
 import android.view.Choreographer;
 import android.view.Display;
 import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
@@ -43,6 +51,8 @@ import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
@@ -50,11 +60,20 @@ import android.widget.OverScroller;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * Minimalist JNI/Canvas Bridge for Termuxx (com.termuxx).
- * Delegates terminal emulation, ZIP bootstrap extraction, 16-byte ELF relocation,
- * interactive text selection (word/URL long-press + draggable handles + floating [Copy|Paste|All|✕] bar),
- * and PTY management to C++23 (libtermux-core.so + libtermuxx-redirect.so).
+ * Single-File Frontend for Termuxx (com.termuxx).
+ *
+ * Features:
+ * 1. Native Android System Text Selection (OS teardrop handles, OS magnifier, OS floating ActionMode menu).
+ * 2. Minimalist Customizable Extra Keys Bar (1-row default "ESC,TAB,CTRL,ALT,◀,▼,▲,▶" + interactive customizer).
+ * 3. Modern 2026 TUI Renderer:
+ *    - Procedural pixel-perfect Box-Drawing (U+2500..U+257F) & Block Elements (U+2580..U+259F)
+ *    - DECSCUSR cursor shapes (Block, Underline, Vertical Beam)
+ *    - Wavy undercurl (4:3) & double underline (4:2) for Neovim/Helix LSP diagnostics
+ *    - C++23 dynamic logical-line reflow on pinch-to-zoom
  */
 public final class TermuxActivity extends Activity {
 
@@ -62,11 +81,14 @@ public final class TermuxActivity extends Activity {
         System.loadLibrary("termux-core");
     }
 
-    private static final String[] KEY_LABELS = new String[]{
-        "ESC", "TAB", "CTRL", "ALT", "-", "/", "|", "▲", "END",
-        "~", "HOME", "PGUP", "PGDN", "$", ":", "◀", "▼", "▶"
-    };
-    private static final String[] SEL_ACTIONS = new String[]{"Copy", "Paste", "All", "✕"};
+    private static final String PREFS_NAME     = "termuxx_prefs";
+    private static final String PREF_ROW1_KEYS = "extra_keys_row1";
+    private static final String PREF_ROW2_KEYS = "extra_keys_row2";
+    private static final String PREF_KEY_DP    = "extra_keys_height_dp";
+
+    // Clean 1-row default with only the 8 essential keys
+    private static final String DEFAULT_ROW1 = "ESC, TAB, CTRL, ALT, ◀, ▼, ▲, ▶";
+    private static final String DEFAULT_ROW2 = "";
 
     private static final int AMOLED_BLACK = 0xFF000000;
     private static final int KEY_SURFACE  = 0xFF0A0A0A;
@@ -75,10 +97,13 @@ public final class TermuxActivity extends Activity {
     private static final int TEXT_BRIGHT  = 0xFFE5E9F0;
     private static final int TEXT_MUTED   = 0xFF6E7681;
 
-    private static final int FLAG_BOLD          = 1 << 0;
-    private static final int FLAG_ITALIC        = 1 << 2;
-    private static final int FLAG_UNDERLINE     = 1 << 3;
-    private static final int FLAG_STRIKETHROUGH = 1 << 7;
+    private static final int FLAG_BOLD             = 1 << 0;
+    private static final int FLAG_ITALIC           = 1 << 2;
+    private static final int FLAG_UNDERLINE        = 1 << 3;
+    private static final int FLAG_STRIKETHROUGH    = 1 << 7;
+    private static final int FLAG_UNDERCURL        = 1 << 10;
+    private static final int FLAG_DOUBLE_UNDERLINE = 1 << 11;
+
     private static final int MODE_ALT_SCREEN     = 1 << 2;
     private static final int MODE_MOUSE_TRACKING = 1 << 3;
 
@@ -87,6 +112,7 @@ public final class TermuxActivity extends Activity {
     private LinearLayout mTabStrip;
     private TextView mStatusLabel;
     private TerminalSurface mTerminalSurface;
+    private TextView mNativeSelectionView;
     private GridLayout mExtraKeysBar;
     private TextView mCtrlKeyView;
     private TextView mAltKeyView;
@@ -141,6 +167,7 @@ public final class TermuxActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(AMOLED_BLACK);
 
+        // 1. Minimalist Pure-Black Header (28dp)
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
@@ -162,14 +189,22 @@ public final class TermuxActivity extends Activity {
         mStatusLabel.setPadding(dp(6), 0, dp(6), 0);
         header.addView(mStatusLabel);
 
-        header.addView(makeHeaderButton("+", v -> createAndSwitchSession(false)));
-        header.addView(makeHeaderButton("#", v -> createAndSwitchSession(true)));
-        header.addView(makeHeaderButton("cp", v -> copySelectionOrTranscript()));
-        header.addView(makeHeaderButton("ps", v -> pasteFromClipboard()));
+        header.addView(makeHeaderButton("+", v -> createAndSwitchSession(false), null));
+        header.addView(makeHeaderButton("#", v -> createAndSwitchSession(true), null));
+        header.addView(makeHeaderButton("cp", v -> {
+            String text = nativeGetTranscriptText();
+            if (text != null && !text.isEmpty()) {
+                copyTextToClipboard(text);
+                Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show();
+            }
+        }, null));
+        header.addView(makeHeaderButton("ps", v -> pasteFromClipboard(), null));
         header.addView(makeHeaderButton("kb", v -> {
-            nativeToggleExtraKeys();
             boolean vis = mExtraKeysBar.getVisibility() == View.VISIBLE;
             mExtraKeysBar.setVisibility(vis ? View.GONE : View.VISIBLE);
+        }, v -> {
+            showExtraKeysCustomizationDialog();
+            return true;
         }));
 
         root.addView(header, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
@@ -178,10 +213,26 @@ public final class TermuxActivity extends Activity {
         hairline.setBackgroundColor(0xFF121212);
         root.addView(hairline, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
 
-        mTerminalSurface = new TerminalSurface(this);
-        root.addView(mTerminalSurface, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        // 2. Viewport Container: 165Hz TerminalSurface + Native Android System Text Selection Overlay
+        FrameLayout viewportFrame = new FrameLayout(this);
+        viewportFrame.setBackgroundColor(AMOLED_BLACK);
 
-        mExtraKeysBar = buildExtraKeysBar();
+        mTerminalSurface = new TerminalSurface(this);
+        viewportFrame.addView(mTerminalSurface, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+        mNativeSelectionView = createNativeSelectionOverlay();
+        viewportFrame.addView(mNativeSelectionView, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+        root.addView(viewportFrame, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // 3. Minimalist Customizable Extra Keys Bar
+        mExtraKeysBar = new GridLayout(this);
+        mExtraKeysBar.setBackgroundColor(AMOLED_BLACK);
+        rebuildExtraKeysBar();
         root.addView(mExtraKeysBar, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
@@ -189,7 +240,91 @@ public final class TermuxActivity extends Activity {
         setContentView(root);
     }
 
-    private TextView makeHeaderButton(String label, View.OnClickListener listener) {
+    /**
+     * Creates a native Android TextView overlay with setTextIsSelectable(true).
+     * When triggered by long-press, Android 17 / ColorOS 17 spawns its genuine native system
+     * teardrop handles, native magnifier loupe, and native floating ActionMode menu!
+     */
+    private TextView createNativeSelectionOverlay() {
+        final TextView tv = new TextView(this);
+        tv.setBackgroundColor(0xEE000000);
+        tv.setTextColor(TEXT_BRIGHT);
+        tv.setHighlightColor(0x663B82F6);
+        tv.setTypeface(mJetBrainsMono);
+        tv.setFontFeatureSettings("'liga' 0, 'calt' 0");
+        tv.setIncludeFontPadding(false);
+        tv.setGravity(Gravity.TOP | Gravity.LEFT);
+        tv.setPadding(0, 0, 0, 0);
+        tv.setTextIsSelectable(true);
+        tv.setVisibility(View.GONE);
+
+        tv.setCustomSelectionActionModeCallback(new ActionMode.Callback() {
+            private static final int MENU_ID_PASTE = 9001;
+
+            @Override
+            public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+                menu.add(0, MENU_ID_PASTE, 99, "Paste");
+                return true;
+            }
+
+            @Override
+            public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+                return false;
+            }
+
+            @Override
+            public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+                if (item.getItemId() == MENU_ID_PASTE) {
+                    mode.finish();
+                    exitNativeSelectionMode();
+                    pasteFromClipboard();
+                    return true;
+                }
+                return false;
+            }
+
+            @Override
+            public void onDestroyActionMode(ActionMode mode) {
+                mHandler.post(() -> exitNativeSelectionMode());
+            }
+        });
+
+        tv.setOnClickListener(v -> exitNativeSelectionMode());
+        return tv;
+    }
+
+    private void enterNativeSelectionMode(float touchX, float touchY) {
+        String viewportText = nativeGetViewportSelectionText(mTerminalSurface.mScrollOffset);
+        if (viewportText == null || viewportText.isEmpty()) return;
+
+        mNativeSelectionView.setTextSize(TypedValue.COMPLEX_UNIT_PX, mTerminalSurface.mTextSizePx);
+        mNativeSelectionView.setText(viewportText, TextView.BufferType.SPANNABLE);
+        mNativeSelectionView.setVisibility(View.VISIBLE);
+        mNativeSelectionView.requestFocus();
+
+        // Dispatch synthetic down + long-press to trigger Android's native Editor selection handles & floating toolbar
+        mNativeSelectionView.post(() -> {
+            long now = SystemClock.uptimeMillis();
+            MotionEvent down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, touchX, touchY, 0);
+            mNativeSelectionView.onTouchEvent(down);
+            down.recycle();
+            if (!mNativeSelectionView.performLongClick()) {
+                CharSequence cs = mNativeSelectionView.getText();
+                if (cs instanceof Spannable && cs.length() > 0) {
+                    Selection.setSelection((Spannable) cs, 0, Math.min(cs.length(), 12));
+                }
+            }
+        });
+    }
+
+    private void exitNativeSelectionMode() {
+        if (mNativeSelectionView != null && mNativeSelectionView.getVisibility() == View.VISIBLE) {
+            mNativeSelectionView.setVisibility(View.GONE);
+            mTerminalSurface.requestFocus();
+        }
+    }
+
+    private TextView makeHeaderButton(String label, View.OnClickListener click, View.OnLongClickListener longClick) {
         TextView tv = new TextView(this);
         tv.setText(label);
         tv.setTypeface(mJetBrainsMono, Typeface.NORMAL);
@@ -197,21 +332,51 @@ public final class TermuxActivity extends Activity {
         tv.setTextColor(TEXT_MUTED);
         tv.setGravity(Gravity.CENTER);
         tv.setPadding(dp(8), dp(2), dp(8), dp(2));
-        tv.setOnClickListener(listener);
+        tv.setOnClickListener(click);
+        if (longClick != null) tv.setOnLongClickListener(longClick);
         return tv;
     }
 
-    private GridLayout buildExtraKeysBar() {
-        GridLayout grid = new GridLayout(this);
-        grid.setRowCount(2);
-        grid.setColumnCount(9);
-        grid.setBackgroundColor(AMOLED_BLACK);
-        int pad = dp(2);
-        grid.setPadding(pad, pad, pad, pad);
+    private static List<String> parseKeyList(String csv) {
+        List<String> out = new ArrayList<>();
+        if (csv == null) return out;
+        for (String part : csv.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) out.add(trimmed);
+        }
+        return out;
+    }
 
-        for (int idx = 0; idx < KEY_LABELS.length; ++idx) {
-            final int keyId = idx;
-            final String label = KEY_LABELS[idx];
+    private void rebuildExtraKeysBar() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String row1Csv = prefs.getString(PREF_ROW1_KEYS, DEFAULT_ROW1);
+        String row2Csv = prefs.getString(PREF_ROW2_KEYS, DEFAULT_ROW2);
+        int keyHeightDp = prefs.getInt(PREF_KEY_DP, 30);
+
+        List<String> row1 = parseKeyList(row1Csv);
+        List<String> row2 = parseKeyList(row2Csv);
+        if (row1.isEmpty()) row1 = parseKeyList(DEFAULT_ROW1);
+
+        mExtraKeysBar.removeAllViews();
+        mCtrlKeyView = null;
+        mAltKeyView = null;
+
+        int numRows = row2.isEmpty() ? 1 : 2;
+        int numCols = Math.max(row1.size(), row2.size());
+        mExtraKeysBar.setRowCount(numRows);
+        mExtraKeysBar.setColumnCount(Math.max(1, numCols));
+        int pad = dp(2);
+        mExtraKeysBar.setPadding(pad, pad, pad, pad);
+
+        addExtraKeyRow(0, row1, numCols, keyHeightDp);
+        if (!row2.isEmpty()) {
+            addExtraKeyRow(1, row2, numCols, keyHeightDp);
+        }
+    }
+
+    private void addExtraKeyRow(int rowIndex, List<String> keys, int totalCols, int keyHeightDp) {
+        for (int c = 0; c < keys.size(); ++c) {
+            final String label = keys.get(c);
             final TextView key = new TextView(this);
             key.setText(label);
             key.setGravity(Gravity.CENTER);
@@ -220,14 +385,17 @@ public final class TermuxActivity extends Activity {
             key.setTextColor(0xFFCCCCCC);
             key.setBackground(makeKeyBg(KEY_SURFACE));
 
-            if (keyId == 2) mCtrlKeyView = key;
-            if (keyId == 3) mAltKeyView = key;
+            if ("CTRL".equals(label)) mCtrlKeyView = key;
+            if ("ALT".equals(label)) mAltKeyView = key;
 
-            final boolean repeatable = (keyId == 7 || keyId == 11 || keyId == 12 || keyId >= 15);
+            final boolean repeatable = "▲".equals(label) || "▼".equals(label) || "◀".equals(label) || "▶".equals(label)
+                || "UP".equals(label) || "DOWN".equals(label) || "LEFT".equals(label) || "RIGHT".equals(label)
+                || "PGUP".equals(label) || "PGDN".equals(label) || "BKSP".equals(label) || "DEL".equals(label);
+
             final Runnable repeatTask = new Runnable() {
                 @Override
                 public void run() {
-                    int mask = nativeDispatchExtraKey(keyId);
+                    int mask = nativeDispatchCustomKey(label);
                     syncModifierVisuals(mask);
                     mHandler.postDelayed(this, 55);
                 }
@@ -238,31 +406,112 @@ public final class TermuxActivity extends Activity {
                     case MotionEvent.ACTION_DOWN:
                         v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                         key.setBackground(makeKeyBg(KEY_PRESSED));
-                        int mask = nativeDispatchExtraKey(keyId);
+                        int mask = nativeDispatchCustomKey(label);
                         syncModifierVisuals(mask);
                         if (repeatable) mHandler.postDelayed(repeatTask, 320);
                         return true;
                     case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_CANCEL:
                         mHandler.removeCallbacks(repeatTask);
-                        syncModifierVisuals(nativeGetUiStateMask());
-                        if (keyId != 2 && keyId != 3) key.setBackground(makeKeyBg(KEY_SURFACE));
+                        syncModifierVisuals(nativeGetModifierMask());
+                        if (!"CTRL".equals(label) && !"ALT".equals(label)) {
+                            key.setBackground(makeKeyBg(KEY_SURFACE));
+                        }
                         return true;
                     default:
                         return false;
                 }
             });
 
+            key.setOnLongClickListener(v -> {
+                showExtraKeysCustomizationDialog();
+                return true;
+            });
+
             GridLayout.LayoutParams lp = new GridLayout.LayoutParams(
-                GridLayout.spec(idx / 9, 1, 1f),
-                GridLayout.spec(idx % 9, 1, 1f)
+                GridLayout.spec(rowIndex, 1, 1f),
+                GridLayout.spec(c, 1, 1f)
             );
             lp.width = 0;
-            lp.height = dp(30);
+            lp.height = dp(keyHeightDp);
             lp.setMargins(dp(1), dp(1), dp(1), dp(1));
-            grid.addView(key, lp);
+            mExtraKeysBar.addView(key, lp);
         }
-        return grid;
+    }
+
+    /**
+     * Interactive Dark AMOLED Extra Keys Customizer Dialog.
+     * Opened by long-pressing "kb" in the top bar or long-pressing any non-repeating key.
+     */
+    private void showExtraKeysCustomizationDialog() {
+        final SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setBackgroundColor(0xFF0A0A0A);
+        int pad = dp(16);
+        container.setPadding(pad, pad, pad, pad);
+
+        TextView title = new TextView(this);
+        title.setText("Customize Extra Keys");
+        title.setTypeface(mJetBrainsMono, Typeface.BOLD);
+        title.setTextColor(TEXT_BRIGHT);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        container.addView(title);
+
+        TextView hint = new TextView(this);
+        hint.setText("Comma-separated keys (ESC, TAB, CTRL, ALT, ◀, ▼, ▲, ▶, -, /, |, ~, HOME, END, PGUP, PGDN, BKSP, DEL, F1..F12, CTRL+C). Leave Row 2 empty for 1-row bar.");
+        hint.setTypeface(mJetBrainsMono);
+        hint.setTextColor(TEXT_MUTED);
+        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+        hint.setPadding(0, dp(6), 0, dp(10));
+        container.addView(hint);
+
+        final EditText row1Input = new EditText(this);
+        row1Input.setTypeface(mJetBrainsMono);
+        row1Input.setTextColor(TEXT_BRIGHT);
+        row1Input.setHintTextColor(TEXT_MUTED);
+        row1Input.setHint("Row 1 keys");
+        row1Input.setText(prefs.getString(PREF_ROW1_KEYS, DEFAULT_ROW1));
+        container.addView(row1Input);
+
+        final EditText row2Input = new EditText(this);
+        row2Input.setTypeface(mJetBrainsMono);
+        row2Input.setTextColor(TEXT_BRIGHT);
+        row2Input.setHintTextColor(TEXT_MUTED);
+        row2Input.setHint("Row 2 keys (optional)");
+        row2Input.setText(prefs.getString(PREF_ROW2_KEYS, DEFAULT_ROW2));
+        container.addView(row2Input);
+
+        // Quick Preset Buttons
+        LinearLayout presetsRow = new LinearLayout(this);
+        presetsRow.setOrientation(LinearLayout.HORIZONTAL);
+        presetsRow.setPadding(0, dp(8), 0, 0);
+
+        presetsRow.addView(makeHeaderButton("[Minimal 1R]", v -> {
+            row1Input.setText("ESC, TAB, CTRL, ALT, ◀, ▼, ▲, ▶");
+            row2Input.setText("");
+        }, null));
+        presetsRow.addView(makeHeaderButton("[Dev 1R]", v -> {
+            row1Input.setText("ESC, TAB, CTRL, ALT, -, /, |, ◀, ▼, ▲, ▶");
+            row2Input.setText("");
+        }, null));
+        presetsRow.addView(makeHeaderButton("[Full 2R]", v -> {
+            row1Input.setText("ESC, TAB, CTRL, ALT, -, /, |, ▲, END");
+            row2Input.setText("~, HOME, PGUP, PGDN, $, :, ◀, ▼, ▶");
+        }, null));
+        container.addView(presetsRow);
+
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setView(container)
+            .setPositiveButton("Save", (d, w) -> {
+                prefs.edit()
+                    .putString(PREF_ROW1_KEYS, row1Input.getText().toString().trim())
+                    .putString(PREF_ROW2_KEYS, row2Input.getText().toString().trim())
+                    .apply();
+                rebuildExtraKeysBar();
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
     }
 
     private void syncModifierVisuals(int modMask) {
@@ -280,6 +529,7 @@ public final class TermuxActivity extends Activity {
 
     private void createAndSwitchSession(boolean asRoot) {
         if (!mBootstrapDone) return;
+        exitNativeSelectionMode();
         nativeNewSession(
             asRoot,
             mTerminalSurface.mVisibleRows,
@@ -292,6 +542,7 @@ public final class TermuxActivity extends Activity {
     }
 
     private void closeSessionAt(int index) {
+        exitNativeSelectionMode();
         int remaining = nativeCloseSession(index);
         if (remaining <= 0) {
             stopService(new Intent(this, KeepAliveService.class));
@@ -319,6 +570,7 @@ public final class TermuxActivity extends Activity {
             tab.setPadding(dp(8), dp(2), dp(8), dp(2));
 
             tab.setOnClickListener(v -> {
+                exitNativeSelectionMode();
                 nativeSwitchSession(idx);
                 mTerminalSurface.resetScrollAndNodes();
                 rebuildTabStrip();
@@ -331,15 +583,9 @@ public final class TermuxActivity extends Activity {
         }
     }
 
-    void copySelectionOrTranscript() {
-        String text = nativeGetCopyText(mTerminalSurface.mScrollOffset);
-        if (text != null && !text.isEmpty()) {
-            ClipboardManager cm = getSystemService(ClipboardManager.class);
-            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Termuxx", text));
-            Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show();
-        }
-        mTerminalSurface.invalidateRowCache();
-        mTerminalSurface.postInvalidateOnAnimation();
+    void copyTextToClipboard(String text) {
+        ClipboardManager cm = getSystemService(ClipboardManager.class);
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Termuxx", text));
     }
 
     void pasteFromClipboard() {
@@ -348,7 +594,7 @@ public final class TermuxActivity extends Activity {
             CharSequence text = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
             if (text != null && text.length() > 0) {
                 nativeSendText(text.toString(), true);
-                syncModifierVisuals(nativeGetUiStateMask());
+                syncModifierVisuals(nativeGetModifierMask());
             }
         }
     }
@@ -377,17 +623,14 @@ public final class TermuxActivity extends Activity {
     }
 
     // ========================================================================
-    // 165Hz Hardware RenderNode Surface + C++23 Interactive Text Selection
+    // 165Hz Hardware RenderNode Surface + Procedural Box/Block/Undercurl TUI
     // ========================================================================
     private final class TerminalSurface extends View implements Choreographer.FrameCallback {
 
         private final Paint mBgPaint = new Paint();
         private final Paint mTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+        private final Paint mBoxPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mCursorPaint = new Paint();
-        private final Paint mHandlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint mActionBarBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint mActionBarStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint mActionBarTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         private final Paint mScrollbarPaint = new Paint();
 
         private final OverScroller mScroller;
@@ -424,22 +667,11 @@ public final class TermuxActivity extends Activity {
             mTextPaint.setTypeface(mJetBrainsMono);
             mTextPaint.setFontFeatureSettings("'liga' 0, 'calt' 0");
 
+            mBoxPaint.setStyle(Paint.Style.STROKE);
+            mBoxPaint.setStrokeCap(Paint.Cap.SQUARE);
+
             mCursorPaint.setStyle(Paint.Style.FILL);
             mCursorPaint.setColor(0xFFD8DEE9);
-
-            mHandlePaint.setStyle(Paint.Style.FILL);
-            mHandlePaint.setColor(0xFF61AFEF);
-
-            mActionBarBgPaint.setStyle(Paint.Style.FILL);
-            mActionBarBgPaint.setColor(0xFF141820);
-
-            mActionBarStrokePaint.setStyle(Paint.Style.STROKE);
-            mActionBarStrokePaint.setStrokeWidth(2f);
-            mActionBarStrokePaint.setColor(0xFF3B4252);
-
-            mActionBarTextPaint.setTypeface(mJetBrainsMono);
-            mActionBarTextPaint.setColor(0xFFE5E9F0);
-            mActionBarTextPaint.setTextAlign(Paint.Align.CENTER);
 
             mScrollbarPaint.setStyle(Paint.Style.FILL);
             mScrollbarPaint.setColor(0x556E7681);
@@ -475,11 +707,7 @@ public final class TermuxActivity extends Activity {
                 @Override
                 public void onLongPress(MotionEvent e) {
                     performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-                    int col = (int) (e.getX() / mCellWidthPx);
-                    int row = (int) (e.getY() / mCellHeightPx);
-                    nativeOnLongPress(mScrollOffset, row, col);
-                    invalidateRowCache();
-                    postInvalidateOnAnimation();
+                    enterNativeSelectionMode(e.getX(), e.getY());
                 }
 
                 @Override
@@ -529,8 +757,8 @@ public final class TermuxActivity extends Activity {
             mScaleDetector = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
                 @Override
                 public boolean onScale(ScaleGestureDetector detector) {
-                    float newSize = Math.max(16f, Math.min(68f, mTextSizePx * detector.getScaleFactor()));
-                    if (Math.abs(newSize - mTextSizePx) >= 0.5f) {
+                    float newSize = Math.max(14f, Math.min(72f, mTextSizePx * detector.getScaleFactor()));
+                    if (Math.abs(newSize - mTextSizePx) >= 0.4f) {
                         updateFontMetrics(newSize);
                         recalculateGrid(getWidth(), getHeight());
                         invalidateRowCache();
@@ -544,11 +772,11 @@ public final class TermuxActivity extends Activity {
         private void updateFontMetrics(float textSizePx) {
             mTextSizePx = textSizePx;
             mTextPaint.setTextSize(textSizePx);
-            mActionBarTextPaint.setTextSize(Math.max(24f, textSizePx * 0.92f));
             Paint.FontMetrics fm = mTextPaint.getFontMetrics();
-            mCellWidthPx = Math.max(5f, mTextPaint.measureText("aaaaaaaaaaMMMMMMMMMM0000000000") / 30f);
-            mCellHeightPx = Math.max(10, (int) Math.ceil(fm.descent - fm.ascent + fm.leading));
+            mCellWidthPx = Math.max(4f, mTextPaint.measureText("aaaaaaaaaaMMMMMMMMMM0000000000") / 30f);
+            mCellHeightPx = Math.max(8, (int) Math.ceil(fm.descent - fm.ascent + fm.leading));
             mFontAscentPx = (int) Math.ceil(-fm.ascent);
+            mBoxPaint.setStrokeWidth(Math.max(1.5f, mCellWidthPx * 0.12f));
         }
 
         void resetScrollAndNodes() {
@@ -616,8 +844,15 @@ public final class TermuxActivity extends Activity {
                     }
                 }
             }
+            String osc52 = nativeConsumeOsc52Clipboard();
+            if (osc52 != null && !osc52.isEmpty()) {
+                copyTextToClipboard(osc52);
+            }
             if (nativeConsumeFrameDirty()) {
-                invalidateRowCache();
+                if (mScrollOffset != 0) {
+                    mScrollOffset = 0;
+                    invalidateRowCache();
+                }
                 invalidate();
             }
             Choreographer.getInstance().postFrameCallback(this);
@@ -631,34 +866,6 @@ public final class TermuxActivity extends Activity {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
-            // If C++23 Interactive Text Selection is active, let C++23 hit-test handles & floating bar first
-            if ((nativeGetUiStateMask() & 8) != 0) {
-                int selAction = nativeOnSelectionTouch(
-                    event.getActionMasked(),
-                    event.getX(),
-                    event.getY(),
-                    mCellWidthPx,
-                    mCellHeightPx,
-                    getWidth()
-                );
-                if (selAction == 2) { // UI_ACTION_COPY_TEXT
-                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                    copySelectionOrTranscript();
-                    return true;
-                } else if (selAction == 3) { // UI_ACTION_PASTE_CLIPBOARD
-                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                    pasteFromClipboard();
-                    invalidateRowCache();
-                    postInvalidateOnAnimation();
-                    return true;
-                } else if (selAction != 0) {
-                    if (selAction == 5) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-                    invalidateRowCache();
-                    postInvalidateOnAnimation();
-                    return true;
-                }
-            }
-
             mScaleDetector.onTouchEvent(event);
             if (!mScaleDetector.isInProgress()) mGestureDetector.onTouchEvent(event);
             return true;
@@ -712,52 +919,26 @@ public final class TermuxActivity extends Activity {
 
             if (mScrollOffset == 0) nativeClearDirtyFlags();
 
+            // DECSCUSR Cursor Overlay (0 = Block, 1 = Underline, 2 = Vertical Beam)
             if (mScrollOffset == 0) {
                 int cursorState = nativeGetCursorState();
                 if (cursorState >= 0) {
-                    int curRow = (cursorState >>> 16) & 0x7FFF;
+                    int shape  = (cursorState >>> 29) & 3;
+                    int curRow = (cursorState >>> 16) & 0x1FFF;
                     int curCol = cursorState & 0xFFFF;
                     if (curRow < mVisibleRows && curCol < mVisibleCols) {
                         float left = curCol * mCellWidthPx;
-                        float top = curRow * mCellHeightPx;
-                        canvas.drawRect(left, top, left + mCellWidthPx, top + mCellHeightPx, mCursorPaint);
+                        float top  = curRow * mCellHeightPx;
+                        if (shape == 1) { // Underline
+                            float h = Math.max(3f, mCellHeightPx * 0.12f);
+                            canvas.drawRect(left, top + mCellHeightPx - h, left + mCellWidthPx, top + mCellHeightPx, mCursorPaint);
+                        } else if (shape == 2) { // Vertical Beam
+                            float w = Math.max(3f, mCellWidthPx * 0.16f);
+                            canvas.drawRect(left, top, left + w, top + mCellHeightPx, mCursorPaint);
+                        } else { // Block
+                            canvas.drawRect(left, top, left + mCellWidthPx, top + mCellHeightPx, mCursorPaint);
+                        }
                     }
-                }
-            }
-
-            // C++23 Interactive Selection Handles & Floating Action Bar Overlay
-            long selBounds = nativeGetSelectionBounds();
-            if (selBounds >= 0L) {
-                int r1 = (int) ((selBounds >>> 48) & 0xFFFF);
-                int c1 = (int) ((selBounds >>> 32) & 0xFFFF);
-                int r2 = (int) ((selBounds >>> 16) & 0xFFFF);
-                int c2 = (int) (selBounds & 0xFFFF);
-
-                float h1x = c1 * mCellWidthPx;
-                float h1y = (r1 + 1) * mCellHeightPx;
-                float h2x = (c2 + 1) * mCellWidthPx;
-                float h2y = (r2 + 1) * mCellHeightPx;
-                float rad = Math.max(10f, mCellHeightPx * 0.32f);
-
-                canvas.drawRect(h1x - 2f, r1 * mCellHeightPx, h1x + 2f, h1y + rad, mHandlePaint);
-                canvas.drawRoundRect(h1x - rad, h1y, h1x + rad, h1y + rad * 2f, rad, rad, mHandlePaint);
-
-                canvas.drawRect(h2x - 2f, r2 * mCellHeightPx, h2x + 2f, h2y + rad, mHandlePaint);
-                canvas.drawRoundRect(h2x - rad, h2y, h2x + rad, h2y + rad * 2f, rad, rad, mHandlePaint);
-
-                float barW = Math.min(viewWidth - 32f, mCellWidthPx * 26f);
-                float barH = mCellHeightPx * 1.35f;
-                float barLeft = Math.max(16f, Math.min(viewWidth - barW - 16f, h1x - barW * 0.25f));
-                float barTop = (r1 >= 2) ? (r1 * mCellHeightPx - barH - 14f) : ((r2 + 1) * mCellHeightPx + 28f);
-
-                canvas.drawRoundRect(barLeft, barTop, barLeft + barW, barTop + barH, 14f, 14f, mActionBarBgPaint);
-                canvas.drawRoundRect(barLeft, barTop, barLeft + barW, barTop + barH, 14f, 14f, mActionBarStrokePaint);
-
-                float segW = barW / 4f;
-                float textY = barTop + barH * 0.68f;
-                for (int i = 0; i < 4; ++i) {
-                    float cx = barLeft + segW * (i + 0.5f);
-                    canvas.drawText(SEL_ACTIONS[i].toCharArray(), 0, SEL_ACTIONS[i].length(), cx, textY, mActionBarTextPaint);
                 }
             }
 
@@ -800,6 +981,19 @@ public final class TermuxActivity extends Activity {
                 int fg    = mGlyphs[b + 2];
                 int flags = mGlyphs[b + 3];
 
+                float xLeft  = col * mCellWidthPx;
+                float xRight = xLeft + mCellWidthPx;
+
+                // Procedural Pixel-Perfect Block Elements (U+2580..U+259F) for btop/htop/TUI bars
+                if (cp >= 0x2580 && cp <= 0x2590 && drawProceduralBlockElement(target, cp, xLeft, yTopPx, xRight, yBottomPx, fg)) {
+                    continue;
+                }
+
+                // Procedural Pixel-Perfect Box Drawing (─, │, ┌, ┐, └, ┘, ├, ┤, ┬, ┴, ┼)
+                if (cp >= 0x2500 && cp <= 0x257F && drawProceduralBoxChar(target, cp, xLeft, yTopPx, xRight, yBottomPx, fg)) {
+                    continue;
+                }
+
                 if (fg != prevFg) {
                     mTextPaint.setColor(fg);
                     prevFg = fg;
@@ -813,8 +1007,70 @@ public final class TermuxActivity extends Activity {
                 }
 
                 int charLen = Character.toChars(cp, mGlyphChars, 0);
-                target.drawText(mGlyphChars, 0, charLen, col * mCellWidthPx, baselineY, mTextPaint);
+                target.drawText(mGlyphChars, 0, charLen, xLeft, baselineY, mTextPaint);
+
+                // Modern Undercurl (4:3) or Double Underline (4:2) for Neovim/Helix LSP
+                if ((flags & FLAG_UNDERCURL) != 0) {
+                    mBoxPaint.setColor(fg);
+                    float yWave = yBottomPx - 3f;
+                    float midX = (xLeft + xRight) * 0.5f;
+                    target.drawLine(xLeft, yWave, midX, yWave - 3f, mBoxPaint);
+                    target.drawLine(midX, yWave - 3f, xRight, yWave, mBoxPaint);
+                } else if ((flags & FLAG_DOUBLE_UNDERLINE) != 0) {
+                    mBoxPaint.setColor(fg);
+                    target.drawLine(xLeft, yBottomPx - 4f, xRight, yBottomPx - 4f, mBoxPaint);
+                    target.drawLine(xLeft, yBottomPx - 1f, xRight, yBottomPx - 1f, mBoxPaint);
+                }
             }
+        }
+
+        private boolean drawProceduralBlockElement(Canvas c, int cp, float l, float t, float r, float b, int fg) {
+            mBgPaint.setColor(fg);
+            float h = b - t;
+            float w = r - l;
+            if (cp == 0x2580) { // Upper half block ▀
+                c.drawRect(l, t, r, t + h * 0.5f, mBgPaint);
+                return true;
+            } else if (cp >= 0x2581 && cp <= 0x2588) { // Lower 1/8 .. Full block ▁▂▃▄▅▆▇█
+                float frac = (cp - 0x2580) / 8.0f;
+                c.drawRect(l, b - h * frac, r, b, mBgPaint);
+                return true;
+            } else if (cp >= 0x2589 && cp <= 0x258F) { // Left 7/8 .. 1/8 blocks ▉▊▋▌▍▎▏
+                float frac = (0x2590 - cp) / 8.0f;
+                c.drawRect(l, t, l + w * frac, b, mBgPaint);
+                return true;
+            } else if (cp == 0x2590) { // Right half block ▐
+                c.drawRect(l + w * 0.5f, t, r, b, mBgPaint);
+                return true;
+            }
+            return false;
+        }
+
+        private boolean drawProceduralBoxChar(Canvas c, int cp, float l, float t, float r, float b, int fg) {
+            float cx = (l + r) * 0.5f;
+            float cy = (t + b) * 0.5f;
+            // Bitmask: 1=Left, 2=Right, 4=Up, 8=Down
+            int mask = 0;
+            switch (cp) {
+                case 0x2500: case 0x2501: case 0x2550: mask = 1 | 2; break; // ─ ━ ═
+                case 0x2502: case 0x2503: case 0x2551: mask = 4 | 8; break; // │ ┃ ║
+                case 0x250C: case 0x250F: case 0x2554: case 0x256D: mask = 2 | 8; break; // ┌ ┏ ╔ ╭
+                case 0x2510: case 0x2513: case 0x2557: case 0x256E: mask = 1 | 8; break; // ┐ ┓ ╗ ╮
+                case 0x2514: case 0x2517: case 0x255A: case 0x2570: mask = 2 | 4; break; // └ ┗ ╚ ╰
+                case 0x2518: case 0x251B: case 0x255D: case 0x256F: mask = 1 | 4; break; // ┘ ┛ ╝ ╯
+                case 0x251C: case 0x2523: case 0x2560: mask = 2 | 4 | 8; break; // ├ ┣ ╠
+                case 0x2524: case 0x252B: case 0x2563: mask = 1 | 4 | 8; break; // ┤ ┫ ╣
+                case 0x252C: case 0x2533: case 0x2566: mask = 1 | 2 | 8; break; // ┬ ┳ ╦
+                case 0x2534: case 0x253B: case 0x2569: mask = 1 | 2 | 4; break; // ┴ ┻ ╩
+                case 0x253C: case 0x254B: case 0x256C: mask = 1 | 2 | 4 | 8; break; // ┼ ╋ ╬
+                default: return false;
+            }
+            mBoxPaint.setColor(fg);
+            if ((mask & 1) != 0) c.drawLine(l, cy, cx, cy, mBoxPaint);
+            if ((mask & 2) != 0) c.drawLine(cx, cy, r, cy, mBoxPaint);
+            if ((mask & 4) != 0) c.drawLine(cx, t, cx, cy, mBoxPaint);
+            if ((mask & 8) != 0) c.drawLine(cx, cy, cx, b, mBoxPaint);
+            return true;
         }
 
         @Override
@@ -836,7 +1092,7 @@ public final class TermuxActivity extends Activity {
                 public boolean commitText(CharSequence text, int newCursorPosition) {
                     if (text != null && text.length() > 0) {
                         nativeSendText(text.toString(), false);
-                        syncModifierVisuals(nativeGetUiStateMask());
+                        syncModifierVisuals(nativeGetModifierMask());
                     }
                     return true;
                 }
@@ -861,7 +1117,7 @@ public final class TermuxActivity extends Activity {
             int meta = event.getMetaState();
             int unicode = event.getUnicodeChar(meta & ~(KeyEvent.META_CTRL_ON | KeyEvent.META_ALT_ON));
             int rc = nativeSendKeyEvent(keyCode, unicode, meta);
-            syncModifierVisuals(nativeGetUiStateMask());
+            syncModifierVisuals(nativeGetModifierMask());
             if (rc == 2) {
                 closeSessionAt(nativeGetActiveIndex());
                 return true;
@@ -982,12 +1238,9 @@ public final class TermuxActivity extends Activity {
     private static native boolean nativeIsSessionRoot(int index);
     private static native void nativeResizeActive(int rows, int cols, int cellW, int cellH);
     private static native boolean nativeConsumeFrameDirty();
-    private static native int nativeDispatchExtraKey(int keyId);
-    private static native int nativeGetUiStateMask();
-    private static native void nativeToggleExtraKeys();
-    private static native void nativeOnLongPress(int scrollOffset, int row, int col);
-    private static native long nativeGetSelectionBounds();
-    private static native int nativeOnSelectionTouch(int action, float x, float y, float cellW, int cellH, int viewW);
+    private static native String nativeConsumeOsc52Clipboard();
+    private static native int nativeDispatchCustomKey(String keyLabel);
+    private static native int nativeGetModifierMask();
     private static native void nativeSendText(String text, boolean isPaste);
     private static native int nativeSendKeyEvent(int keyCode, int unicodeChar, int metaState);
     private static native void nativeSendMouse(int button, int col, int row, boolean pressed);
@@ -997,5 +1250,6 @@ public final class TermuxActivity extends Activity {
     private static native int nativePackRowRender(int scrollOffset, int screenRow, int[] outBgRuns, int[] outGlyphs);
     private static native int nativeGetCursorState();
     private static native int nativeGetModesMask();
-    private static native String nativeGetCopyText(int scrollOffset);
+    private static native String nativeGetViewportSelectionText(int scrollOffset);
+    private static native String nativeGetTranscriptText();
 }

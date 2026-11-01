@@ -1,14 +1,18 @@
 /*
- * Termuxx — All-In-One C++23 Engine & UI Controller (libtermux-core.so)
+ * Termuxx — All-In-One C++23 Engine (libtermux-core.so)
  *
- * Subsystems implemented in C++23:
+ * Features:
  * 1. Native C++23 ZIP Decompressor (zlib) + Dual 16-Byte Relocator ("com.termux/files" & "com.termux/cache")
- * 2. Silent Second-Stage Bootstrap Initializer + APT Cache Configurator (/data/data/com.termuxx/cach/apt/archives/partial)
- * 3. Multithreaded Non-Blocking PTY Engine (openpty/fork/execve + pthread poll() 64KB reader + waitpid reaper)
- * 4. ARMv9.2 NEON SIMD-Accelerated VT520 / XTerm / 24-Bit TrueColor Terminal Emulator
- * 5. Interactive Text Selection Engine (Long-Press Word/URL Selection, Draggable Start/End Handles,
- *    Selection Highlighting in Row Packer, Floating [Copy | Paste | All | ✕] Action Bar)
- * 6. Full-Screen C++23 UI Hit-Tester (Top Header Tabs & Actions, Terminal Viewport, 2-Row Extra Keys Bar)
+ * 2. Silent Second-Stage Bootstrap Initializer + APT Cache Configurator
+ * 3. Logical-Line Reflow Engine on Resize/Pinch-Zoom (unwraps & re-wraps scrollback + screen lines dynamically)
+ * 4. Modern 2026 TUI Standards:
+ *    - Synchronized Output (?2026h / ?2026l tear-free rendering)
+ *    - DECSCUSR Cursor Shapes (CSI Ps SP q: Block, Underline, Vertical Beam)
+ *    - Sub-parameter SGR (4:0..4:5 undercurl FLAG_UNDERCURL & double-underline, 58;2;r;g;b underline color)
+ *    - OSC 52 Base64 System Clipboard Integration (works inside tmux, neovim, helix, ssh)
+ *    - XTVERSION (CSI > q), Window/Pixel Size Reporting (CSI 14 t / 18 t)
+ * 5. Customizable Extra-Keys Engine (supports any key label, F1-F12, arrows, CTRL+X macros, sticky CTRL/ALT)
+ * 6. Native Viewport Text Exporter for Android System Text Selection
  */
 
 #ifndef _GNU_SOURCE
@@ -53,7 +57,6 @@ extern const int32_t blob_size;
 
 namespace {
 
-// Canonical paths for com.termuxx (exact 16-byte token lengths matching com.termux)
 constexpr const char APP_ROOT_PATH[]   = "/data/data/com.termuxx";
 constexpr const char FILES_REAL_PATH[] = "/data/data/com.termuxx/file";
 constexpr const char FILES_LINK_PATH[] = "/data/data/com.termuxx/files";
@@ -63,8 +66,6 @@ constexpr const char BIN_PATH[]        = "/data/data/com.termuxx/file/usr/bin";
 constexpr const char LIB_PATH[]        = "/data/data/com.termuxx/file/usr/lib";
 constexpr const char TMP_PATH[]        = "/data/data/com.termuxx/file/usr/tmp";
 constexpr const char HOME_PATH[]       = "/data/data/com.termuxx/file/home";
-constexpr const char CACHE_REAL_PATH[] = "/data/data/com.termuxx/cach";
-constexpr const char CACHE_LINK_PATH[] = "/data/data/com.termuxx/cache";
 constexpr const char APT_ARCHIVES_PARTIAL[] = "/data/data/com.termuxx/cach/apt/archives/partial";
 
 constexpr const char OLD_FILES_16[] = "com.termux/files";
@@ -74,16 +75,18 @@ constexpr const char NEW_CACHE_16[] = "com.termuxx/cach";
 constexpr size_t TOKEN_16_LEN = 16;
 
 // Cell style bit flags
-constexpr uint16_t FLAG_BOLD          = 1u << 0;
-constexpr uint16_t FLAG_DIM           = 1u << 1;
-constexpr uint16_t FLAG_ITALIC        = 1u << 2;
-constexpr uint16_t FLAG_UNDERLINE     = 1u << 3;
-constexpr uint16_t FLAG_BLINK         = 1u << 4;
-constexpr uint16_t FLAG_INVERSE       = 1u << 5;
-constexpr uint16_t FLAG_INVISIBLE     = 1u << 6;
-constexpr uint16_t FLAG_STRIKETHROUGH = 1u << 7;
-constexpr uint16_t FLAG_WIDE_LEAD     = 1u << 8;
-constexpr uint16_t FLAG_WIDE_TRAIL    = 1u << 9;
+constexpr uint16_t FLAG_BOLD             = 1u << 0;
+constexpr uint16_t FLAG_DIM              = 1u << 1;
+constexpr uint16_t FLAG_ITALIC           = 1u << 2;
+constexpr uint16_t FLAG_UNDERLINE        = 1u << 3;
+constexpr uint16_t FLAG_BLINK            = 1u << 4;
+constexpr uint16_t FLAG_INVERSE          = 1u << 5;
+constexpr uint16_t FLAG_INVISIBLE        = 1u << 6;
+constexpr uint16_t FLAG_STRIKETHROUGH    = 1u << 7;
+constexpr uint16_t FLAG_WIDE_LEAD        = 1u << 8;
+constexpr uint16_t FLAG_WIDE_TRAIL       = 1u << 9;
+constexpr uint16_t FLAG_UNDERCURL        = 1u << 10;
+constexpr uint16_t FLAG_DOUBLE_UNDERLINE = 1u << 11;
 
 // Mode mask bits
 constexpr int MODE_APP_CURSOR_KEYS = 1 << 0;
@@ -93,20 +96,12 @@ constexpr int MODE_MOUSE_TRACKING  = 1 << 3;
 constexpr int MODE_MOUSE_SGR       = 1 << 4;
 constexpr int MODE_BELL_TRIGGERED  = 1 << 5;
 constexpr int MODE_AUTOWRAP        = 1 << 6;
+constexpr int MODE_SYNC_OUTPUT     = 1 << 7;
+constexpr int MODE_FOCUS_EVENTS    = 1 << 8;
 
-// Pure Dark AMOLED Palette (#000000 background, #E5E9F0 foreground, #264F78 selection highlight)
-constexpr uint32_t DEFAULT_FG   = 0xFFE5E9F0u;
-constexpr uint32_t DEFAULT_BG   = 0xFF000000u;
-constexpr uint32_t SELECTION_BG = 0xFF264F78u;
-constexpr uint32_t SELECTION_FG = 0xFFFFFFFFu;
-
-// UI Action return codes from C++23 touch handler to Java
-constexpr int UI_ACTION_NONE            = 0;
-constexpr int UI_ACTION_SHOW_KEYBOARD   = 1;
-constexpr int UI_ACTION_COPY_TEXT       = 2;
-constexpr int UI_ACTION_PASTE_CLIPBOARD = 3;
-constexpr int UI_ACTION_EXIT_APP        = 4;
-constexpr int UI_ACTION_HAPTIC_TAP      = 5;
+// Pure Dark AMOLED Palette (#000000 background, #E5E9F0 foreground)
+constexpr uint32_t DEFAULT_FG = 0xFFE5E9F0u;
+constexpr uint32_t DEFAULT_BG = 0xFF000000u;
 
 // Android KeyEvent constants
 constexpr int AKEYCODE_ENTER        = 66;
@@ -154,6 +149,10 @@ struct alignas(16) Cell {
         bg = defaultBg;
         flags = defaultFlags;
         reserved = 0;
+    }
+
+    bool isDefaultBlank() const noexcept {
+        return codepoint == ' ' && bg == DEFAULT_BG && (flags & (FLAG_INVERSE | FLAG_UNDERLINE | FLAG_UNDERCURL | FLAG_STRIKETHROUGH | FLAG_WIDE_LEAD | FLAG_WIDE_TRAIL)) == 0;
     }
 };
 
@@ -229,6 +228,43 @@ static void appendUtf8(std::string& out, uint32_t cp) {
         out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
         out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
     }
+}
+
+static std::string decodeBase64(const std::string& in) {
+    static constexpr int8_t T[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
+    std::string out;
+    out.reserve(in.size() * 3 / 4);
+    int val = 0, valb = -8;
+    for (unsigned char c : in) {
+        if (T[c] == -1) {
+            if (c == '=') break;
+            continue;
+        }
+        val = (val << 6) + T[c];
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back(static_cast<char>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return out;
 }
 
 static inline uint32_t resolveFgColor(uint32_t fg, uint32_t bg, uint16_t flags) noexcept {
@@ -435,7 +471,7 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
                 if (nl == std::string::npos) nl = text.size();
                 std::string line = text.substr(lineStart, nl - lineStart);
                 if (!line.empty() && line.back() == '\r') line.pop_back();
-                size_t arrow = line.find("\xE2\x86\x90"); // "←"
+                size_t arrow = line.find("\xE2\x86\x90");
                 if (arrow != std::string::npos && arrow > 0) {
                     std::string oldTarget = line.substr(0, arrow);
                     std::string relLink   = line.substr(arrow + 3);
@@ -528,7 +564,6 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         }
     }
 
-    // Ensure apt cache configuration exists in $PREFIX/etc/apt/apt.conf.d/00termuxx
     mkdirsRecursive("/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d", 0700);
     const char* aptConfPath = "/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d/00termuxx";
     const char* aptConfText =
@@ -540,7 +575,6 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         close(afd);
     }
 
-    // Ensure profile.d script preserves libtermuxx-redirect.so alongside libtermux-exec
     mkdirsRecursive("/data/data/com.termuxx/file/usr/etc/profile.d", 0700);
     const char* profPath = "/data/data/com.termuxx/file/usr/etc/profile.d/99-termuxx-preload.sh";
     const char* profText =
@@ -560,7 +594,6 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         runSecondStageBootstrapSilently(dstSo.c_str());
     }
 
-    // Write minimalist AMOLED ~/.bashrc
     std::string bashrcPath = std::string(HOME_PATH) + "/.bashrc";
     const char* rcText =
         "export TERM=xterm-256color\n"
@@ -585,18 +618,7 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         close(fd);
     }
 
-    // Suppress default noisy MOTD if desired or keep it clean
     unlink("/data/data/com.termuxx/file/usr/etc/motd");
-}
-
-static bool isWordChar(uint32_t cp) noexcept {
-    if (cp <= 0x20) return false;
-    if (cp < 0x7F) {
-        const char ch = static_cast<char>(cp);
-        return isalnum(static_cast<unsigned char>(ch)) ||
-               ch == '_' || ch == '-' || ch == '.' || ch == '/' || ch == ':' || ch == '~' || ch == '+' || ch == '@';
-    }
-    return true;
 }
 
 class NeoTerminalEngine {
@@ -604,6 +626,8 @@ public:
     mutable pthread_mutex_t mMutex;
     int mRows;
     int mCols;
+    int mCellWidthPx = 18;
+    int mCellHeightPx = 36;
     int mMaxScrollback;
 
     std::vector<Row> mPrimaryGrid;
@@ -614,6 +638,7 @@ public:
 
     int mCursorRow = 0;
     int mCursorCol = 0;
+    int mCursorShape = 0; // 0 = Block, 1 = Underline, 2 = Bar/Beam (DECSCUSR)
     bool mCursorVisible = true;
     bool mPendingWrap = false;
 
@@ -636,6 +661,8 @@ public:
     char mCsiPrefix = 0;
     char mCsiIntermediate = 0;
     std::vector<int> mCsiParams;
+    std::vector<bool> mCsiColonSubparam; // true if parameter was preceded by ':' (e.g. 4:3 undercurl)
+    bool mNextParamIsSub = false;
     int mCurParam = -1;
     std::string mOscBuffer;
 
@@ -644,11 +671,8 @@ public:
 
     std::string mWindowTitle;
     bool mTitleChanged = false;
-
-    // Interactive Text Selection State (screen-space coordinates for current scrollOffset)
-    bool mSelActive = false;
-    int mSelR1 = 0, mSelC1 = 0;
-    int mSelR2 = 0, mSelC2 = 0;
+    std::string mOsc52Clipboard;
+    bool mOsc52Changed = false;
 
     int mPtyFd = -1;
     int mShellPid = -1;
@@ -717,106 +741,13 @@ public:
         mFrameDirty.store(true, std::memory_order_release);
     }
 
-    void clearSelection() noexcept {
-        if (mSelActive) {
-            mSelActive = false;
-            markAllDirty();
-        }
-    }
-
-    void selectWordAt(int scrollOffset, int screenRow, int col) noexcept {
-        lock();
-        screenRow = std::clamp(screenRow, 0, mRows - 1);
-        col = std::clamp(col, 0, mCols - 1);
-        const Row& row = getVisualRow(scrollOffset, screenRow);
-
-        int c1 = col;
-        int c2 = col;
-        if (col < static_cast<int>(row.cells.size()) && isWordChar(row.cells[static_cast<size_t>(col)].codepoint)) {
-            while (c1 > 0 && isWordChar(row.cells[static_cast<size_t>(c1 - 1)].codepoint)) c1--;
-            while (c2 + 1 < static_cast<int>(row.cells.size()) && isWordChar(row.cells[static_cast<size_t>(c2 + 1)].codepoint)) c2++;
-        } else {
-            c2 = std::min(mCols - 1, c1 + 4);
-        }
-
-        mSelActive = true;
-        mSelR1 = screenRow;
-        mSelC1 = c1;
-        mSelR2 = screenRow;
-        mSelC2 = c2;
-        markAllDirty();
-        unlock();
-    }
-
-    void selectAll() noexcept {
-        lock();
-        mSelActive = true;
-        mSelR1 = 0;
-        mSelC1 = 0;
-        mSelR2 = mRows - 1;
-        mSelC2 = mCols - 1;
-        markAllDirty();
-        unlock();
-    }
-
-    void normalizedSel(int& r1, int& c1, int& r2, int& c2) const noexcept {
-        if (mSelR1 < mSelR2 || (mSelR1 == mSelR2 && mSelC1 <= mSelC2)) {
-            r1 = mSelR1; c1 = mSelC1; r2 = mSelR2; c2 = mSelC2;
-        } else {
-            r1 = mSelR2; c1 = mSelC2; r2 = mSelR1; c2 = mSelC1;
-        }
-    }
-
-    bool isCellSelected(int screenRow, int col) const noexcept {
-        if (!mSelActive) return false;
-        int r1, c1, r2, c2;
-        normalizedSel(r1, c1, r2, c2);
-        if (screenRow < r1 || screenRow > r2) return false;
-        if (r1 == r2) return col >= c1 && col <= c2;
-        if (screenRow == r1) return col >= c1;
-        if (screenRow == r2) return col <= c2;
-        return true;
-    }
-
-    std::string extractSelectedText(int scrollOffset) const {
-        if (!mSelActive) return "";
-        int r1, c1, r2, c2;
-        normalizedSel(r1, c1, r2, c2);
-
-        std::string out;
-        out.reserve(4096);
-        for (int r = r1; r <= r2; ++r) {
-            const Row& row = getVisualRow(scrollOffset, r);
-            int startCol = (r == r1) ? std::max(0, c1) : 0;
-            int endCol   = (r == r2) ? std::min<int>(mCols - 1, c2) : (mCols - 1);
-
-            int lastNonSpace = startCol - 1;
-            for (int c = endCol; c >= startCol; --c) {
-                if (c < static_cast<int>(row.cells.size()) &&
-                    row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
-                    !(row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL)) {
-                    lastNonSpace = c;
-                    break;
-                }
-            }
-            for (int c = startCol; c <= lastNonSpace; ++c) {
-                const Cell& cell = row.cells[static_cast<size_t>(c)];
-                if (cell.flags & FLAG_WIDE_TRAIL) continue;
-                appendUtf8(out, cell.codepoint);
-            }
-            if (r < r2 && !row.wrapped) {
-                out.push_back('\n');
-            }
-        }
-        return out;
-    }
-
     void reset() noexcept {
         mCurFg = DEFAULT_FG;
         mCurBg = DEFAULT_BG;
         mCurFlags = 0;
         mCursorRow = 0;
         mCursorCol = 0;
+        mCursorShape = 0;
         mCursorVisible = true;
         mPendingWrap = false;
         mScrollTop = 0;
@@ -824,22 +755,171 @@ public:
         mModes = MODE_AUTOWRAP;
         mState = State::NORMAL;
         mUtf8BytesNeeded = 0;
-        mSelActive = false;
         for (auto& r : mPrimaryGrid) r.clear();
         for (auto& r : mAltGrid) r.clear();
         mFrameDirty.store(true, std::memory_order_release);
     }
 
+    /*
+     * Dynamic Logical-Line Reflow Engine:
+     * When zooming in or out (newCols != mCols), reconstructs logical lines across
+     * mScrollback and mPrimaryGrid by joining soft-wrapped rows (row.wrapped == true)
+     * and re-wraps them to newCols while tracking the exact cursor position!
+     */
+    void reflowPrimaryAndScrollback(int newRows, int newCols) {
+        int maxActivePrimary = mCursorRow;
+        for (int r = mRows - 1; r > mCursorRow; --r) {
+            const Row& row = mPrimaryGrid[static_cast<size_t>(r)];
+            bool nonEmpty = row.wrapped;
+            if (!nonEmpty) {
+                for (const auto& c : row.cells) {
+                    if (!c.isDefaultBlank()) { nonEmpty = true; break; }
+                }
+            }
+            if (nonEmpty) {
+                maxActivePrimary = r;
+                break;
+            }
+        }
+
+        int totalInputRows = mScrollbackCount + (maxActivePrimary + 1);
+        auto getInputRow = [&](int idx) -> const Row& {
+            if (idx < mScrollbackCount) {
+                int phys = (mScrollbackHead + idx) % mMaxScrollback;
+                return mScrollback[static_cast<size_t>(phys)];
+            }
+            return mPrimaryGrid[static_cast<size_t>(idx - mScrollbackCount)];
+        };
+
+        int cursorInputRow = mScrollbackCount + mCursorRow;
+        int newCursorGlobalRow = 0;
+        int newCursorCol = mCursorCol;
+        bool cursorMapped = false;
+
+        std::vector<Row> outRows;
+        outRows.reserve(static_cast<size_t>(totalInputRows + 32));
+        std::vector<Cell> logicalLine;
+        logicalLine.reserve(static_cast<size_t>(std::max(mCols, newCols) * 4));
+
+        int idx = 0;
+        while (idx < totalInputRows) {
+            logicalLine.clear();
+            int cursorOffsetInLogical = -1;
+
+            while (idx < totalInputRows) {
+                const Row& r = getInputRow(idx);
+                bool isCursorRow = (idx == cursorInputRow);
+                int rowCols = static_cast<int>(r.cells.size());
+
+                int effectiveLen = rowCols;
+                if (!r.wrapped) {
+                    effectiveLen = 0;
+                    for (int c = rowCols - 1; c >= 0; --c) {
+                        if (!r.cells[static_cast<size_t>(c)].isDefaultBlank()) {
+                            effectiveLen = c + 1;
+                            break;
+                        }
+                    }
+                    if (isCursorRow) {
+                        effectiveLen = std::max(effectiveLen, std::min(mCursorCol, rowCols));
+                    }
+                }
+
+                if (isCursorRow) {
+                    cursorOffsetInLogical = static_cast<int>(logicalLine.size()) + std::min(mCursorCol, rowCols);
+                }
+
+                for (int c = 0; c < effectiveLen; ++c) {
+                    logicalLine.push_back(r.cells[static_cast<size_t>(c)]);
+                }
+
+                idx++;
+                if (!r.wrapped) break;
+            }
+
+            if (logicalLine.empty()) {
+                Row blankRow(newCols);
+                if (cursorOffsetInLogical >= 0 && !cursorMapped) {
+                    newCursorGlobalRow = static_cast<int>(outRows.size());
+                    newCursorCol = 0;
+                    cursorMapped = true;
+                }
+                outRows.push_back(std::move(blankRow));
+                continue;
+            }
+
+            size_t pos = 0;
+            size_t totalCells = logicalLine.size();
+            while (pos < totalCells) {
+                Row slice(newCols);
+                int dstCol = 0;
+                while (pos < totalCells && dstCol < newCols) {
+                    const Cell& cell = logicalLine[pos];
+                    if ((cell.flags & FLAG_WIDE_LEAD) && dstCol == newCols - 1) {
+                        break; // Wrap wide char to start of next slice
+                    }
+                    if (cursorOffsetInLogical >= 0 && !cursorMapped && static_cast<size_t>(cursorOffsetInLogical) == pos) {
+                        newCursorGlobalRow = static_cast<int>(outRows.size());
+                        newCursorCol = dstCol;
+                        cursorMapped = true;
+                    }
+                    slice.cells[static_cast<size_t>(dstCol++)] = cell;
+                    pos++;
+                }
+                if (cursorOffsetInLogical >= 0 && !cursorMapped && static_cast<size_t>(cursorOffsetInLogical) <= pos) {
+                    newCursorGlobalRow = static_cast<int>(outRows.size());
+                    newCursorCol = std::min(dstCol, newCols - 1);
+                    cursorMapped = true;
+                }
+                slice.wrapped = (pos < totalCells);
+                slice.dirty = true;
+                outRows.push_back(std::move(slice));
+            }
+        }
+
+        // Rebuild mScrollback and mPrimaryGrid from outRows
+        mScrollback.assign(static_cast<size_t>(mMaxScrollback), Row(newCols));
+        mScrollbackHead = 0;
+        mScrollbackCount = 0;
+
+        mPrimaryGrid.assign(static_cast<size_t>(newRows), Row(newCols));
+        int totalOut = static_cast<int>(outRows.size());
+        if (totalOut <= newRows) {
+            for (int r = 0; r < totalOut; ++r) {
+                mPrimaryGrid[static_cast<size_t>(r)] = std::move(outRows[static_cast<size_t>(r)]);
+            }
+            mCursorRow = std::clamp(newCursorGlobalRow, 0, newRows - 1);
+        } else {
+            int sbCount = totalOut - newRows;
+            for (int i = 0; i < sbCount; ++i) {
+                pushScrollbackRow(outRows[static_cast<size_t>(i)]);
+            }
+            for (int r = 0; r < newRows; ++r) {
+                mPrimaryGrid[static_cast<size_t>(r)] = std::move(outRows[static_cast<size_t>(sbCount + r)]);
+            }
+            mCursorRow = std::clamp(newCursorGlobalRow - sbCount, 0, newRows - 1);
+        }
+        mCursorCol = std::clamp(newCursorCol, 0, newCols - 1);
+    }
+
     void resize(int newRows, int newCols, int cellW = 18, int cellH = 36) {
         newRows = std::max(2, newRows);
         newCols = std::max(4, newCols);
+        mCellWidthPx = std::max(4, cellW);
+        mCellHeightPx = std::max(8, cellH);
+
         lock();
         if (newRows != mRows || newCols != mCols) {
-            mPrimaryGrid.resize(static_cast<size_t>(newRows), Row(newCols));
+            if (!(mModes & MODE_ALT_SCREEN) && newCols != mCols) {
+                reflowPrimaryAndScrollback(newRows, newCols);
+            } else {
+                mPrimaryGrid.resize(static_cast<size_t>(newRows), Row(newCols));
+                for (auto& r : mPrimaryGrid) r.resize(newCols);
+                for (auto& r : mScrollback) r.resize(newCols);
+            }
+
             mAltGrid.resize(static_cast<size_t>(newRows), Row(newCols));
-            for (auto& r : mPrimaryGrid) r.resize(newCols);
             for (auto& r : mAltGrid) r.resize(newCols);
-            for (auto& r : mScrollback) r.resize(newCols);
 
             mRows = newRows;
             mCols = newCols;
@@ -851,15 +931,20 @@ public:
             markAllDirty();
         }
         int fd = mPtyFd;
+        int pid = mShellPid;
         unlock();
 
         if (fd >= 0) {
             struct winsize sz{};
             sz.ws_row = static_cast<unsigned short>(newRows);
             sz.ws_col = static_cast<unsigned short>(newCols);
-            sz.ws_xpixel = static_cast<unsigned short>(newCols * std::max(4, cellW));
-            sz.ws_ypixel = static_cast<unsigned short>(newRows * std::max(8, cellH));
+            sz.ws_xpixel = static_cast<unsigned short>(newCols * mCellWidthPx);
+            sz.ws_ypixel = static_cast<unsigned short>(newRows * mCellHeightPx);
             ioctl(fd, TIOCSWINSZ, &sz);
+            if (pid > 0) {
+                kill(-pid, SIGWINCH);
+                kill(pid, SIGWINCH);
+            }
         }
     }
 
@@ -1002,46 +1087,96 @@ public:
     }
 
     void handleSgr() noexcept {
-        if (mCsiParams.empty()) mCsiParams.push_back(0);
+        if (mCsiParams.empty()) {
+            mCsiParams.push_back(0);
+            mCsiColonSubparam.push_back(false);
+        }
         for (size_t i = 0; i < mCsiParams.size(); ++i) {
             int p = mCsiParams[i];
-            if (p <= 0) { mCurFg = DEFAULT_FG; mCurBg = DEFAULT_BG; mCurFlags = 0; }
-            else if (p == 1) mCurFlags |= FLAG_BOLD;
-            else if (p == 2) mCurFlags |= FLAG_DIM;
-            else if (p == 3) mCurFlags |= FLAG_ITALIC;
-            else if (p == 4) mCurFlags |= FLAG_UNDERLINE;
-            else if (p == 5 || p == 6) mCurFlags |= FLAG_BLINK;
-            else if (p == 7) mCurFlags |= FLAG_INVERSE;
-            else if (p == 8) mCurFlags |= FLAG_INVISIBLE;
-            else if (p == 9) mCurFlags |= FLAG_STRIKETHROUGH;
-            else if (p == 21 || p == 22) mCurFlags &= ~(FLAG_BOLD | FLAG_DIM);
-            else if (p == 23) mCurFlags &= ~FLAG_ITALIC;
-            else if (p == 24) mCurFlags &= ~FLAG_UNDERLINE;
-            else if (p == 25) mCurFlags &= ~FLAG_BLINK;
-            else if (p == 27) mCurFlags &= ~FLAG_INVERSE;
-            else if (p == 28) mCurFlags &= ~FLAG_INVISIBLE;
-            else if (p == 29) mCurFlags &= ~FLAG_STRIKETHROUGH;
-            else if (p >= 30 && p <= 37) mCurFg = mPalette[p - 30];
-            else if (p == 39) mCurFg = DEFAULT_FG;
-            else if (p >= 40 && p <= 47) mCurBg = mPalette[p - 40];
-            else if (p == 49) mCurBg = DEFAULT_BG;
-            else if (p >= 90 && p <= 97) mCurFg = mPalette[8 + (p - 90)];
-            else if (p >= 100 && p <= 107) mCurBg = mPalette[8 + (p - 100)];
-            else if (p == 38 || p == 48) {
+            if (p <= 0) {
+                mCurFg = DEFAULT_FG;
+                mCurBg = DEFAULT_BG;
+                mCurFlags = 0;
+            } else if (p == 1) {
+                mCurFlags |= FLAG_BOLD;
+            } else if (p == 2) {
+                mCurFlags |= FLAG_DIM;
+            } else if (p == 3) {
+                mCurFlags |= FLAG_ITALIC;
+            } else if (p == 4) {
+                // Check for modern subparameter 4:x (0=off, 1=single, 2=double, 3=undercurl)
+                if (i + 1 < mCsiParams.size() && i + 1 < mCsiColonSubparam.size() && mCsiColonSubparam[i + 1]) {
+                    int sub = mCsiParams[++i];
+                    mCurFlags &= ~(FLAG_UNDERLINE | FLAG_UNDERCURL | FLAG_DOUBLE_UNDERLINE);
+                    if (sub == 1 || sub == 4 || sub == 5) mCurFlags |= FLAG_UNDERLINE;
+                    else if (sub == 2) mCurFlags |= FLAG_DOUBLE_UNDERLINE;
+                    else if (sub == 3) mCurFlags |= FLAG_UNDERCURL;
+                } else {
+                    mCurFlags |= FLAG_UNDERLINE;
+                }
+            } else if (p == 5 || p == 6) {
+                mCurFlags |= FLAG_BLINK;
+            } else if (p == 7) {
+                mCurFlags |= FLAG_INVERSE;
+            } else if (p == 8) {
+                mCurFlags |= FLAG_INVISIBLE;
+            } else if (p == 9) {
+                mCurFlags |= FLAG_STRIKETHROUGH;
+            } else if (p == 21) {
+                mCurFlags |= FLAG_DOUBLE_UNDERLINE;
+            } else if (p == 22) {
+                mCurFlags &= ~(FLAG_BOLD | FLAG_DIM);
+            } else if (p == 23) {
+                mCurFlags &= ~FLAG_ITALIC;
+            } else if (p == 24) {
+                mCurFlags &= ~(FLAG_UNDERLINE | FLAG_UNDERCURL | FLAG_DOUBLE_UNDERLINE);
+            } else if (p == 25) {
+                mCurFlags &= ~FLAG_BLINK;
+            } else if (p == 27) {
+                mCurFlags &= ~FLAG_INVERSE;
+            } else if (p == 28) {
+                mCurFlags &= ~FLAG_INVISIBLE;
+            } else if (p == 29) {
+                mCurFlags &= ~FLAG_STRIKETHROUGH;
+            } else if (p >= 30 && p <= 37) {
+                mCurFg = mPalette[p - 30];
+            } else if (p == 39) {
+                mCurFg = DEFAULT_FG;
+            } else if (p >= 40 && p <= 47) {
+                mCurBg = mPalette[p - 40];
+            } else if (p == 49) {
+                mCurBg = DEFAULT_BG;
+            } else if (p == 59) {
+                // Reset underline color
+            } else if (p >= 90 && p <= 97) {
+                mCurFg = mPalette[8 + (p - 90)];
+            } else if (p >= 100 && p <= 107) {
+                mCurBg = mPalette[8 + (p - 100)];
+            } else if (p == 38 || p == 48 || p == 58) {
                 bool isFg = (p == 38);
+                bool isBg = (p == 48);
                 if (i + 1 < mCsiParams.size()) {
                     int mode = mCsiParams[i + 1];
                     if (mode == 5 && i + 2 < mCsiParams.size()) {
                         int idx = std::clamp(mCsiParams[i + 2], 0, 255);
-                        if (isFg) mCurFg = mPalette[idx]; else mCurBg = mPalette[idx];
+                        if (isFg) mCurFg = mPalette[idx];
+                        else if (isBg) mCurBg = mPalette[idx];
                         i += 2;
                     } else if (mode == 2 && i + 4 < mCsiParams.size()) {
-                        uint32_t r = static_cast<uint32_t>(std::clamp(mCsiParams[i + 2], 0, 255));
-                        uint32_t g = static_cast<uint32_t>(std::clamp(mCsiParams[i + 3], 0, 255));
-                        uint32_t b = static_cast<uint32_t>(std::clamp(mCsiParams[i + 4], 0, 255));
-                        uint32_t color = 0xFF000000u | (r << 16) | (g << 8) | b;
-                        if (isFg) mCurFg = color; else mCurBg = color;
-                        i += 4;
+                        // Handle optional colorspace ID in colon-separated 38:2:cs:R:G:B
+                        size_t rIdx = i + 2;
+                        if (i + 5 < mCsiParams.size() && i + 2 < mCsiColonSubparam.size() && mCsiColonSubparam[i + 2]) {
+                            rIdx = i + 3;
+                        }
+                        if (rIdx + 2 < mCsiParams.size()) {
+                            uint32_t r = static_cast<uint32_t>(std::clamp(mCsiParams[rIdx], 0, 255));
+                            uint32_t g = static_cast<uint32_t>(std::clamp(mCsiParams[rIdx + 1], 0, 255));
+                            uint32_t b = static_cast<uint32_t>(std::clamp(mCsiParams[rIdx + 2], 0, 255));
+                            uint32_t color = 0xFF000000u | (r << 16) | (g << 8) | b;
+                            if (isFg) mCurFg = color;
+                            else if (isBg) mCurBg = color;
+                            i = rIdx + 2;
+                        }
                     }
                 }
             }
@@ -1076,8 +1211,18 @@ public:
             case 1000:
             case 1002:
             case 1003: if (enabled) mModes |= MODE_MOUSE_TRACKING; else mModes &= ~MODE_MOUSE_TRACKING; break;
-            case 1006: if (enabled) mModes |= MODE_MOUSE_SGR; else mModes &= ~MODE_MOUSE_SGR; break;
+            case 1004: if (enabled) mModes |= MODE_FOCUS_EVENTS; else mModes &= ~MODE_FOCUS_EVENTS; break;
+            case 1006:
+            case 1016: if (enabled) mModes |= MODE_MOUSE_SGR; else mModes &= ~MODE_MOUSE_SGR; break;
             case 2004: if (enabled) mModes |= MODE_BRACKETED_PASTE; else mModes &= ~MODE_BRACKETED_PASTE; break;
+            case 2026: // Synchronized Output (BSU / ESU)
+                if (enabled) {
+                    mModes |= MODE_SYNC_OUTPUT;
+                } else {
+                    mModes &= ~MODE_SYNC_OUTPUT;
+                    mFrameDirty.store(true, std::memory_order_release);
+                }
+                break;
             default: break;
         }
     }
@@ -1085,12 +1230,28 @@ public:
     void dispatchCsi(char finalByte, std::string& reply) {
         if (mCurParam >= 0 || !mCsiParams.empty()) {
             mCsiParams.push_back(mCurParam < 0 ? 0 : mCurParam);
+            mCsiColonSubparam.push_back(mNextParamIsSub);
         }
         auto param = [&](size_t idx, int defVal) -> int {
             if (idx >= mCsiParams.size() || mCsiParams[idx] <= 0) return defVal;
             return mCsiParams[idx];
         };
         auto& grid = activeGrid();
+
+        // DECSCUSR: CSI Ps SP q (Set Cursor Style)
+        if (mCsiIntermediate == ' ' && finalByte == 'q') {
+            int style = param(0, 1);
+            if (style <= 2) mCursorShape = 0;      // Block
+            else if (style <= 4) mCursorShape = 1; // Underline
+            else if (style <= 6) mCursorShape = 2; // Vertical Beam/Bar
+            return;
+        }
+
+        // XTVERSION: CSI > q
+        if (mCsiPrefix == '>' && finalByte == 'q') {
+            reply += "\x1bP>|Termuxx-C++23(3.0)\x1b\\";
+            return;
+        }
 
         if (mCsiPrefix == '?') {
             if (finalByte == 'h' || finalByte == 'l') {
@@ -1193,6 +1354,21 @@ public:
                 }
                 break;
             }
+            case 't': { // XTWINOPS: Window size reporting for modern TUIs (yazi, btop, kitty protocol)
+                int op = param(0, 0);
+                char buf[64];
+                if (op == 14) {
+                    snprintf(buf, sizeof(buf), "\x1b[4;%d;%dt", mRows * mCellHeightPx, mCols * mCellWidthPx);
+                    reply += buf;
+                } else if (op == 16) {
+                    snprintf(buf, sizeof(buf), "\x1b[6;%d;%dt", mCellHeightPx, mCellWidthPx);
+                    reply += buf;
+                } else if (op == 18) {
+                    snprintf(buf, sizeof(buf), "\x1b[8;%d;%dt", mRows, mCols);
+                    reply += buf;
+                }
+                break;
+            }
             case 'c':
                 if (mCsiPrefix == 0) reply += "\x1b[?62;22c";
                 else if (mCsiPrefix == '>') reply += "\x1b[>41;350;0c";
@@ -1208,6 +1384,13 @@ public:
         if (code == 0 || code == 2) {
             mWindowTitle = mOscBuffer.substr(semi + 1);
             mTitleChanged = true;
+        } else if (code == 52) {
+            // OSC 52 ; c ; <base64>
+            size_t secondSemi = mOscBuffer.find(';', semi + 1);
+            if (secondSemi != std::string::npos) {
+                mOsc52Clipboard = decodeBase64(mOscBuffer.substr(secondSemi + 1));
+                if (!mOsc52Clipboard.empty()) mOsc52Changed = true;
+            }
         }
     }
 
@@ -1276,7 +1459,13 @@ public:
             switch (mState) {
                 case State::ESC:
                     if (b == '[') {
-                        mState = State::CSI; mCsiPrefix = 0; mCsiIntermediate = 0; mCsiParams.clear(); mCurParam = -1;
+                        mState = State::CSI;
+                        mCsiPrefix = 0;
+                        mCsiIntermediate = 0;
+                        mCsiParams.clear();
+                        mCsiColonSubparam.clear();
+                        mNextParamIsSub = false;
+                        mCurParam = -1;
                     } else if (b == ']') {
                         mState = State::OSC; mOscBuffer.clear();
                     } else if (b == '(' || b == ')' || b == '*' || b == '+') {
@@ -1300,8 +1489,12 @@ public:
                 case State::CSI:
                     if (b == 0x1B) mState = State::ESC;
                     else if (b >= '0' && b <= '9') mCurParam = (mCurParam < 0 ? 0 : mCurParam * 10) + (b - '0');
-                    else if (b == ';' || b == ':') { mCsiParams.push_back(mCurParam < 0 ? 0 : mCurParam); mCurParam = -1; }
-                    else if (b >= '<' && b <= '?') mCsiPrefix = static_cast<char>(b);
+                    else if (b == ';' || b == ':') {
+                        mCsiParams.push_back(mCurParam < 0 ? 0 : mCurParam);
+                        mCsiColonSubparam.push_back(mNextParamIsSub);
+                        mNextParamIsSub = (b == ':');
+                        mCurParam = -1;
+                    } else if (b >= '<' && b <= '?') mCsiPrefix = static_cast<char>(b);
                     else if (b >= 0x20 && b <= 0x2F) mCsiIntermediate = static_cast<char>(b);
                     else if (b >= 0x40 && b <= 0x7E) { dispatchCsi(static_cast<char>(b), reply); mState = State::NORMAL; }
                     else if (b < 0x20) handleControlChar(b);
@@ -1309,7 +1502,7 @@ public:
                 case State::OSC:
                     if (b == 0x07) { handleOscComplete(); mState = State::NORMAL; }
                     else if (b == 0x1B) mState = State::OSC_ESC;
-                    else if (mOscBuffer.size() < 1024) mOscBuffer.push_back(static_cast<char>(b));
+                    else if (mOscBuffer.size() < 8192) mOscBuffer.push_back(static_cast<char>(b));
                     break;
                 case State::OSC_ESC:
                     if (b == '\\') handleOscComplete();
@@ -1318,7 +1511,9 @@ public:
                 default: mState = State::NORMAL; break;
             }
         }
-        mFrameDirty.store(true, std::memory_order_release);
+        if (!(mModes & MODE_SYNC_OUTPUT)) {
+            mFrameDirty.store(true, std::memory_order_release);
+        }
     }
 
     const Row& getVisualRow(int scrollOffset, int screenRow) const noexcept {
@@ -1355,12 +1550,18 @@ public:
             struct pollfd pfd{};
             pfd.fd = fd;
             pfd.events = POLLIN | POLLERR | POLLHUP;
-            int prc = poll(&pfd, 1, 250);
+            int prc = poll(&pfd, 1, 50);
             if (prc < 0) {
                 if (errno == EINTR) continue;
                 break;
             }
-            if (prc == 0) continue;
+            if (prc == 0) {
+                // Safety flush if synchronized output (?2026h) was left open by TUI
+                if (mModes & MODE_SYNC_OUTPUT) {
+                    mFrameDirty.store(true, std::memory_order_release);
+                }
+                continue;
+            }
 
             if (pfd.revents & (POLLIN | POLLERR | POLLHUP)) {
                 ssize_t n = read(fd, buf, sizeof(buf));
@@ -1397,6 +1598,7 @@ public:
                  mExitCode.load(std::memory_order_relaxed));
         std::string dummy;
         lock();
+        mModes &= ~MODE_SYNC_OUTPUT;
         processStream(reinterpret_cast<const uint8_t*>(exitMsg), strlen(exitMsg), dummy);
         unlock();
     }
@@ -1462,6 +1664,7 @@ static bool startSessionProcess(
     std::vector<std::string> envStrings;
     envStrings.emplace_back("TERM=xterm-256color");
     envStrings.emplace_back("COLORTERM=truecolor");
+    envStrings.emplace_back("TERM_PROGRAM=Termuxx-C++23");
     envStrings.emplace_back("HOME=" + std::string(HOME_PATH));
     envStrings.emplace_back("PREFIX=" + std::string(PREFIX_PATH));
     envStrings.emplace_back("TMPDIR=" + std::string(TMP_PATH));
@@ -1585,18 +1788,13 @@ static bool startSessionProcess(
     return true;
 }
 
-// ============================================================================
-// Global C++23 Multi-Session, Selection & Extra-Keys Controller
-// ============================================================================
 static pthread_mutex_t gGlobalMutex = PTHREAD_MUTEX_INITIALIZER;
 static std::vector<NeoTerminalEngine*> gSessions;
 static int gActiveIdx = -1;
 static std::string gNativeLibDir;
-static std::atomic<int> gBootstrapState{0}; // 0 = unchecked, 1 = extracting, 2 = ready
+static std::atomic<int> gBootstrapState{0};
 static bool gCtrlArmed = false;
 static bool gAltArmed  = false;
-static bool gExtraKeysVisible = true;
-static int gDraggingHandle = 0; // 0 = none, 1 = start handle, 2 = end handle
 
 static NeoTerminalEngine* activeEngineLocked() noexcept {
     if (gActiveIdx >= 0 && gActiveIdx < static_cast<int>(gSessions.size())) {
@@ -1660,7 +1858,7 @@ static bool sendKeyCodeInternal(NeoTerminalEngine* engine, int keyCode, int meta
             break;
         case AKEYCODE_PAGE_DOWN:
             if (mod > 1) { snprintf(buf, sizeof(buf), "\x1b[6;%d~", mod); seq = buf; }
-            else seq = "\x1b[6~";
+            else seq = appCursor ? "\x1b[6~" : "\x1b[6~";
             break;
         case AKEYCODE_F1:  seq = "\x1bOP"; break;
         case AKEYCODE_F2:  seq = "\x1bOQ"; break;
@@ -1853,206 +2051,88 @@ Java_com_termuxx_app_TermuxActivity_nativeConsumeFrameDirty(JNIEnv* /*env*/, jcl
     return d ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeDispatchExtraKey(JNIEnv* /*env*/, jclass /*clazz*/, jint keyId) {
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeConsumeOsc52Clipboard(JNIEnv* env, jclass /*clazz*/) {
     pthread_mutex_lock(&gGlobalMutex);
-    if (keyId == 2) {
+    NeoTerminalEngine* eng = activeEngineLocked();
+    if (!eng || !eng->mOsc52Changed) {
+        pthread_mutex_unlock(&gGlobalMutex);
+        return nullptr;
+    }
+    eng->mOsc52Changed = false;
+    std::string clip = eng->mOsc52Clipboard;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return env->NewStringUTF(clip.c_str());
+}
+
+/**
+ * C++23 Universal Customizable Extra-Key Dispatcher:
+ * Supports any key name configured by the user (ESC, TAB, CTRL, ALT, ▲/UP, ▼/DOWN, ◀/LEFT, ▶/RIGHT,
+ * HOME, END, PGUP, PGDN, BKSP, DEL, INS, ENTER, F1..F12, CTRL+C, CTRL+D, CTRL+Z, CTRL+L, or any symbol).
+ */
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeDispatchCustomKey(JNIEnv* env, jclass /*clazz*/, jstring keyLabel) {
+    if (!keyLabel) return 0;
+    const char* utf = env->GetStringUTFChars(keyLabel, nullptr);
+    if (!utf) return 0;
+    std::string label(utf);
+    env->ReleaseStringUTFChars(keyLabel, utf);
+
+    pthread_mutex_lock(&gGlobalMutex);
+    if (label == "CTRL") {
         gCtrlArmed = !gCtrlArmed;
-    } else if (keyId == 3) {
+    } else if (label == "ALT") {
         gAltArmed = !gAltArmed;
     } else {
         NeoTerminalEngine* eng = activeEngineLocked();
-        if (eng) {
-            eng->clearSelection();
+        if (eng && !label.empty()) {
             int meta = (gCtrlArmed ? AMETA_CTRL_ON : 0) | (gAltArmed ? AMETA_ALT_ON : 0);
-            switch (keyId) {
-                case 0:  sendKeyCodeInternal(eng, AKEYCODE_ESCAPE, meta); break;
-                case 1:  sendKeyCodeInternal(eng, AKEYCODE_TAB, meta); break;
-                case 4:  sendCodepointInternal(eng, '-', gCtrlArmed, gAltArmed); break;
-                case 5:  sendCodepointInternal(eng, '/', gCtrlArmed, gAltArmed); break;
-                case 6:  sendCodepointInternal(eng, '|', gCtrlArmed, gAltArmed); break;
-                case 7:  sendKeyCodeInternal(eng, AKEYCODE_DPAD_UP, meta); break;
-                case 8:  sendKeyCodeInternal(eng, AKEYCODE_MOVE_END, meta); break;
-                case 9:  sendCodepointInternal(eng, '~', gCtrlArmed, gAltArmed); break;
-                case 10: sendKeyCodeInternal(eng, AKEYCODE_MOVE_HOME, meta); break;
-                case 11: sendKeyCodeInternal(eng, AKEYCODE_PAGE_UP, meta); break;
-                case 12: sendKeyCodeInternal(eng, AKEYCODE_PAGE_DOWN, meta); break;
-                case 13: sendCodepointInternal(eng, '$', gCtrlArmed, gAltArmed); break;
-                case 14: sendCodepointInternal(eng, ':', gCtrlArmed, gAltArmed); break;
-                case 15: sendKeyCodeInternal(eng, AKEYCODE_DPAD_LEFT, meta); break;
-                case 16: sendKeyCodeInternal(eng, AKEYCODE_DPAD_DOWN, meta); break;
-                case 17: sendKeyCodeInternal(eng, AKEYCODE_DPAD_RIGHT, meta); break;
-                default: break;
+            if (label == "ESC") sendKeyCodeInternal(eng, AKEYCODE_ESCAPE, meta);
+            else if (label == "TAB") sendKeyCodeInternal(eng, AKEYCODE_TAB, meta);
+            else if (label == "ENTER" || label == "RET") sendKeyCodeInternal(eng, AKEYCODE_ENTER, meta);
+            else if (label == "BKSP") sendKeyCodeInternal(eng, AKEYCODE_DEL, meta);
+            else if (label == "DEL") sendKeyCodeInternal(eng, AKEYCODE_FORWARD_DEL, meta);
+            else if (label == "INS") sendKeyCodeInternal(eng, AKEYCODE_INSERT, meta);
+            else if (label == "▲" || label == "UP") sendKeyCodeInternal(eng, AKEYCODE_DPAD_UP, meta);
+            else if (label == "▼" || label == "DOWN") sendKeyCodeInternal(eng, AKEYCODE_DPAD_DOWN, meta);
+            else if (label == "◀" || label == "LEFT") sendKeyCodeInternal(eng, AKEYCODE_DPAD_LEFT, meta);
+            else if (label == "▶" || label == "RIGHT") sendKeyCodeInternal(eng, AKEYCODE_DPAD_RIGHT, meta);
+            else if (label == "HOME") sendKeyCodeInternal(eng, AKEYCODE_MOVE_HOME, meta);
+            else if (label == "END") sendKeyCodeInternal(eng, AKEYCODE_MOVE_END, meta);
+            else if (label == "PGUP") sendKeyCodeInternal(eng, AKEYCODE_PAGE_UP, meta);
+            else if (label == "PGDN") sendKeyCodeInternal(eng, AKEYCODE_PAGE_DOWN, meta);
+            else if (label == "F1") sendKeyCodeInternal(eng, AKEYCODE_F1, meta);
+            else if (label == "F2") sendKeyCodeInternal(eng, AKEYCODE_F2, meta);
+            else if (label == "F3") sendKeyCodeInternal(eng, AKEYCODE_F3, meta);
+            else if (label == "F4") sendKeyCodeInternal(eng, AKEYCODE_F4, meta);
+            else if (label == "F5") sendKeyCodeInternal(eng, AKEYCODE_F5, meta);
+            else if (label == "F6") sendKeyCodeInternal(eng, AKEYCODE_F6, meta);
+            else if (label == "F7") sendKeyCodeInternal(eng, AKEYCODE_F7, meta);
+            else if (label == "F8") sendKeyCodeInternal(eng, AKEYCODE_F8, meta);
+            else if (label == "F9") sendKeyCodeInternal(eng, AKEYCODE_F9, meta);
+            else if (label == "F10") sendKeyCodeInternal(eng, AKEYCODE_F10, meta);
+            else if (label == "F11") sendKeyCodeInternal(eng, AKEYCODE_F11, meta);
+            else if (label == "F12") sendKeyCodeInternal(eng, AKEYCODE_F12, meta);
+            else if (label.rfind("CTRL+", 0) == 0 && label.size() == 6) {
+                sendCodepointInternal(eng, static_cast<unsigned char>(label[5]), true, gAltArmed);
+            } else {
+                sendCodepointInternal(eng, static_cast<unsigned char>(label[0]), gCtrlArmed, gAltArmed);
             }
         }
         gCtrlArmed = false;
         gAltArmed = false;
     }
-    int modMask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0) | (gExtraKeysVisible ? 4 : 0);
-    pthread_mutex_unlock(&gGlobalMutex);
-    return modMask;
-}
-
-JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetUiStateMask(JNIEnv* /*env*/, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
-    int mask = (gCtrlArmed ? 1 : 0)
-             | (gAltArmed ? 2 : 0)
-             | (gExtraKeysVisible ? 4 : 0)
-             | ((eng && eng->mSelActive) ? 8 : 0);
+    int mask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0);
     pthread_mutex_unlock(&gGlobalMutex);
     return mask;
 }
 
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeToggleExtraKeys(JNIEnv* /*env*/, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    gExtraKeysVisible = !gExtraKeysVisible;
-    NeoTerminalEngine* eng = activeEngineLocked();
-    if (eng) eng->markAllDirty();
-    pthread_mutex_unlock(&gGlobalMutex);
-}
-
-/**
- * C++23 Interactive Text Selection & Touch Handler:
- * - nativeOnLongPress(scrollOffset, row, col): selects word/URL at (row, col)
- * - nativeGetSelectionBounds(): returns packed [r1, c1, r2, c2] or -1 if inactive
- * - nativeOnSelectionTouch(action, x, y, cellW, cellH, viewW):
- *     Hit-tests the floating [Copy | Paste | All | ✕] bar AND draggable start/end handles!
- */
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeOnLongPress(
-    JNIEnv* /*env*/, jclass /*clazz*/, jint scrollOffset, jint row, jint col) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
-    if (eng) {
-        eng->selectWordAt(scrollOffset, row, col);
-    }
-    pthread_mutex_unlock(&gGlobalMutex);
-}
-
-JNIEXPORT jlong JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetSelectionBounds(JNIEnv* /*env*/, jclass /*clazz*/) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
-    if (!eng || !eng->mSelActive) {
-        pthread_mutex_unlock(&gGlobalMutex);
-        return -1L;
-    }
-    int r1, c1, r2, c2;
-    eng->normalizedSel(r1, c1, r2, c2);
-    pthread_mutex_unlock(&gGlobalMutex);
-    return (static_cast<jlong>(r1 & 0xFFFF) << 48) |
-           (static_cast<jlong>(c1 & 0xFFFF) << 32) |
-           (static_cast<jlong>(r2 & 0xFFFF) << 16) |
-           static_cast<jlong>(c2 & 0xFFFF);
-}
-
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeOnSelectionTouch(
-    JNIEnv* /*env*/,
-    jclass /*clazz*/,
-    jint action,
-    jfloat x,
-    jfloat y,
-    jfloat cellW,
-    jint cellH,
-    jint viewW) {
-
+Java_com_termuxx_app_TermuxActivity_nativeGetModifierMask(JNIEnv* /*env*/, jclass /*clazz*/) {
     pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* eng = activeEngineLocked();
-    if (!eng || !eng->mSelActive) {
-        gDraggingHandle = 0;
-        pthread_mutex_unlock(&gGlobalMutex);
-        return 0; // Not handled by selection overlay
-    }
-
-    int r1, c1, r2, c2;
-    eng->normalizedSel(r1, c1, r2, c2);
-
-    // Floating Action Bar geometry: 280dp-wide centered above r1 (or below r2 if r1 <= 1)
-    float barW = std::min<float>(viewW - 32.0f, cellW * 26.0f);
-    float barH = static_cast<float>(cellH) * 1.35f;
-    float barLeft = std::clamp((c1 * cellW) - barW * 0.25f, 16.0f, std::max(16.0f, viewW - barW - 16.0f));
-    float barTop = (r1 >= 2) ? ((r1 * cellH) - barH - 14.0f) : (((r2 + 1) * cellH) + 28.0f);
-
-    if (action == 0) { // ACTION_DOWN
-        // 1. Check Floating Action Bar buttons: [Copy | Paste | All | ✕]
-        if (x >= barLeft && x <= barLeft + barW && y >= barTop && y <= barTop + barH) {
-            int seg = static_cast<int>(((x - barLeft) / barW) * 4.0f);
-            gDraggingHandle = 0;
-            if (seg == 0) {
-                pthread_mutex_unlock(&gGlobalMutex);
-                return UI_ACTION_COPY_TEXT;
-            } else if (seg == 1) {
-                eng->clearSelection();
-                pthread_mutex_unlock(&gGlobalMutex);
-                return UI_ACTION_PASTE_CLIPBOARD;
-            } else if (seg == 2) {
-                eng->selectAll();
-                pthread_mutex_unlock(&gGlobalMutex);
-                return UI_ACTION_HAPTIC_TAP;
-            } else {
-                eng->clearSelection();
-                pthread_mutex_unlock(&gGlobalMutex);
-                return UI_ACTION_HAPTIC_TAP;
-            }
-        }
-
-        // 2. Check Start Handle & End Handle hit radius
-        float h1x = c1 * cellW;
-        float h1y = (r1 + 1) * cellH;
-        float h2x = (c2 + 1) * cellW;
-        float h2y = (r2 + 1) * cellH;
-        float radius = std::max(48.0f, cellH * 1.4f);
-
-        float d1 = hypotf(x - h1x, y - h1y);
-        float d2 = hypotf(x - h2x, y - h2y);
-        if (d1 <= radius || d2 <= radius) {
-            // Normalize stored coordinates before dragging
-            eng->mSelR1 = r1; eng->mSelC1 = c1;
-            eng->mSelR2 = r2; eng->mSelC2 = c2;
-            gDraggingHandle = (d1 <= d2) ? 1 : 2;
-            pthread_mutex_unlock(&gGlobalMutex);
-            return UI_ACTION_HAPTIC_TAP;
-        }
-
-        // Tapped outside selection -> dismiss selection
-        eng->clearSelection();
-        gDraggingHandle = 0;
-        pthread_mutex_unlock(&gGlobalMutex);
-        return UI_ACTION_HAPTIC_TAP;
-    } else if (action == 2) { // ACTION_MOVE
-        if (gDraggingHandle != 0) {
-            int targetCol = std::clamp(static_cast<int>(x / std::max(1.0f, cellW)), 0, eng->mCols - 1);
-            int targetRow = std::clamp(static_cast<int>((y - cellH * 0.5f) / std::max(1, cellH)), 0, eng->mRows - 1);
-            if (gDraggingHandle == 1) {
-                if (eng->mSelR1 != targetRow || eng->mSelC1 != targetCol) {
-                    eng->mSelR1 = targetRow;
-                    eng->mSelC1 = targetCol;
-                    eng->markAllDirty();
-                }
-            } else {
-                if (eng->mSelR2 != targetRow || eng->mSelC2 != targetCol) {
-                    eng->mSelR2 = targetRow;
-                    eng->mSelC2 = targetCol;
-                    eng->markAllDirty();
-                }
-            }
-            pthread_mutex_unlock(&gGlobalMutex);
-            return 1; // Consumed drag move
-        }
-    } else if (action == 1 || action == 3) { // ACTION_UP / ACTION_CANCEL
-        if (gDraggingHandle != 0) {
-            gDraggingHandle = 0;
-            pthread_mutex_unlock(&gGlobalMutex);
-            return 1;
-        }
-    }
-
+    int mask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0);
     pthread_mutex_unlock(&gGlobalMutex);
-    return 0;
+    return mask;
 }
 
 JNIEXPORT void JNICALL
@@ -2065,7 +2145,6 @@ Java_com_termuxx_app_TermuxActivity_nativeSendText(
     bool alt  = gAltArmed;
     gCtrlArmed = false;
     gAltArmed  = false;
-    if (engine) engine->clearSelection();
     pthread_mutex_unlock(&gGlobalMutex);
     if (!engine) return;
 
@@ -2112,7 +2191,6 @@ Java_com_termuxx_app_TermuxActivity_nativeSendKeyEvent(
         pthread_mutex_unlock(&gGlobalMutex);
         return 0;
     }
-    engine->clearSelection();
 
     if (!engine->mRunning.load(std::memory_order_acquire) &&
         (keyCode == AKEYCODE_ENTER || keyCode == AKEYCODE_NUMPAD_ENTER)) {
@@ -2208,17 +2286,14 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     int glCount = 0;
 
     if (bgPtr && glPtr) {
-        auto cellBgAt = [&](int c) -> uint32_t {
-            if (engine->isCellSelected(screenRow, c)) return SELECTION_BG;
-            const Cell& cell = row.cells[static_cast<size_t>(c)];
-            return resolveBgColor(cell.fg, cell.bg, cell.flags);
-        };
-
         int runStart = 0;
         while (runStart < cols) {
-            uint32_t bg = cellBgAt(runStart);
+            const Cell& c0 = row.cells[static_cast<size_t>(runStart)];
+            uint32_t bg = resolveBgColor(c0.fg, c0.bg, c0.flags);
             int runEnd = runStart + 1;
-            while (runEnd < cols && cellBgAt(runEnd) == bg) {
+            while (runEnd < cols) {
+                const Cell& c1 = row.cells[static_cast<size_t>(runEnd)];
+                if (resolveBgColor(c1.fg, c1.bg, c1.flags) != bg) break;
                 runEnd++;
             }
             if (bg != DEFAULT_BG) {
@@ -2236,9 +2311,7 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
             if (cell.codepoint <= ' ' || (cell.flags & (FLAG_INVISIBLE | FLAG_WIDE_TRAIL)) != 0) {
                 continue;
             }
-            uint32_t fg = engine->isCellSelected(screenRow, c)
-                ? SELECTION_FG
-                : resolveFgColor(cell.fg, cell.bg, cell.flags);
+            uint32_t fg = resolveFgColor(cell.fg, cell.bg, cell.flags);
             int base = glCount * 4;
             glPtr[base]     = static_cast<jint>(cell.codepoint);
             glPtr[base + 1] = c;
@@ -2261,7 +2334,9 @@ Java_com_termuxx_app_TermuxActivity_nativeGetCursorState(JNIEnv* /*env*/, jclass
     NeoTerminalEngine* eng = activeEngineLocked();
     int state = -1;
     if (eng && eng->mCursorVisible) {
-        state = ((eng->mCursorRow & 0x7FFF) << 16) | (eng->mCursorCol & 0xFFFF);
+        state = ((eng->mCursorShape & 3) << 29) |
+                ((eng->mCursorRow & 0x1FFF) << 16) |
+                (eng->mCursorCol & 0xFFFF);
     }
     pthread_mutex_unlock(&gGlobalMutex);
     return state;
@@ -2276,8 +2351,11 @@ Java_com_termuxx_app_TermuxActivity_nativeGetModesMask(JNIEnv* /*env*/, jclass /
     return m;
 }
 
+/**
+ * Exports the visible viewport rows as a rectangular string for Android's Native System Text Selection.
+ */
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetCopyText(
+Java_com_termuxx_app_TermuxActivity_nativeGetViewportSelectionText(
     JNIEnv* env, jclass /*clazz*/, jint scrollOffset) {
     pthread_mutex_lock(&gGlobalMutex);
     NeoTerminalEngine* engine = activeEngineLocked();
@@ -2286,29 +2364,56 @@ Java_com_termuxx_app_TermuxActivity_nativeGetCopyText(
 
     std::string out;
     engine->lock();
-    if (engine->mSelActive) {
-        out = engine->extractSelectedText(scrollOffset);
-        engine->clearSelection();
-    } else {
-        out.reserve(16384);
-        int sbCount = (engine->mModes & MODE_ALT_SCREEN) ? 0 : engine->mScrollbackCount;
-        for (int i = -sbCount; i < engine->mRows; ++i) {
-            const Row& row = engine->getVisualRow(0, i);
-            int lastNonSpace = -1;
-            for (int c = static_cast<int>(row.cells.size()) - 1; c >= 0; --c) {
-                if (row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
-                    !(row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL)) {
-                    lastNonSpace = c;
-                    break;
-                }
+    out.reserve(static_cast<size_t>(engine->mRows * (engine->mCols + 1)));
+    for (int r = 0; r < engine->mRows; ++r) {
+        const Row& row = engine->getVisualRow(scrollOffset, r);
+        int lastNonSpace = -1;
+        for (int c = static_cast<int>(row.cells.size()) - 1; c >= 0; --c) {
+            if (row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
+                !(row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL)) {
+                lastNonSpace = c;
+                break;
             }
-            for (int c = 0; c <= lastNonSpace; ++c) {
-                const Cell& cell = row.cells[static_cast<size_t>(c)];
-                if (cell.flags & FLAG_WIDE_TRAIL) continue;
-                appendUtf8(out, cell.codepoint);
-            }
-            if (!row.wrapped && i < engine->mRows - 1) out.push_back('\n');
         }
+        for (int c = 0; c <= lastNonSpace; ++c) {
+            const Cell& cell = row.cells[static_cast<size_t>(c)];
+            if (cell.flags & FLAG_WIDE_TRAIL) continue;
+            appendUtf8(out, cell.codepoint);
+        }
+        if (r < engine->mRows - 1) out.push_back('\n');
+    }
+    engine->unlock();
+    return env->NewStringUTF(out.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetTranscriptText(JNIEnv* env, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* engine = activeEngineLocked();
+    pthread_mutex_unlock(&gGlobalMutex);
+    if (!engine) return env->NewStringUTF("");
+
+    std::string out;
+    out.reserve(16384);
+
+    engine->lock();
+    int sbCount = (engine->mModes & MODE_ALT_SCREEN) ? 0 : engine->mScrollbackCount;
+    for (int i = -sbCount; i < engine->mRows; ++i) {
+        const Row& row = engine->getVisualRow(0, i);
+        int lastNonSpace = -1;
+        for (int c = static_cast<int>(row.cells.size()) - 1; c >= 0; --c) {
+            if (row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
+                !(row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL)) {
+                lastNonSpace = c;
+                break;
+            }
+        }
+        for (int c = 0; c <= lastNonSpace; ++c) {
+            const Cell& cell = row.cells[static_cast<size_t>(c)];
+            if (cell.flags & FLAG_WIDE_TRAIL) continue;
+            appendUtf8(out, cell.codepoint);
+        }
+        if (!row.wrapped && i < engine->mRows - 1) out.push_back('\n');
     }
     engine->unlock();
     return env->NewStringUTF(out.c_str());
