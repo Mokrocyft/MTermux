@@ -1,18 +1,14 @@
 /*
- * Termuxx — All-In-One C++23 Engine (libtermux-core.so)
+ * Termuxx — All-In-One C++23 Engine (libtermuxx-core.so) for Android 17 (API 37)
  *
  * Features:
  * 1. Native C++23 ZIP Decompressor (zlib) + Dual 16-Byte Relocator ("com.termux/files" & "com.termux/cache")
- * 2. Silent Second-Stage Bootstrap Initializer + APT Cache Configurator
- * 3. Logical-Line Reflow Engine on Resize/Pinch-Zoom (unwraps & re-wraps scrollback + screen lines dynamically)
- * 4. Original Termux Logical-Row Text Selection Engine (mSelX1, mSelY1, mSelX2, mSelY2 across scrollback & screen)
- * 5. Modern 2026 TUI Standards:
- *    - Synchronized Output (?2026h / ?2026l tear-free rendering)
- *    - DECSCUSR Cursor Shapes (CSI Ps SP q: Block, Underline, Vertical Beam)
- *    - Sub-parameter SGR (4:0..4:5 undercurl FLAG_UNDERCURL & double-underline, 58;2;r;g;b underline color)
- *    - OSC 52 Base64 System Clipboard Integration (works inside tmux, neovim, helix, ssh)
- *    - XTVERSION (CSI > q), Window/Pixel Size Reporting (CSI 14 t / 18 t)
- * 6. Customizable Extra-Keys Engine (supports any key label, F1-F12, arrows, CTRL+X macros, sticky CTRL/ALT)
+ * 2. Android 17 (minSdk 37 / targetSdk 37) Safer DCL (0500 ELF mode) + SELinux context & /system/bin/linker64 executor
+ * 3. Silent Second-Stage Bootstrap Initializer + APT Cache Configurator
+ * 4. Logical-Line Reflow Engine on Resize/Pinch-Zoom (unwraps & re-wraps scrollback + screen lines dynamically)
+ * 5. ColorOS 17 Native Text Selection Engine (logical coordinates + C++23 handle geometry & touch drag state machine)
+ * 6. Procedural Box-Drawing (U+2500..U+257F) & Block Elements (U+2580..U+259F) packed in C++23
+ * 7. Event-Driven Zero-Idle-CPU PTY Reader (poll(-1) + direct JNI View.postInvalidateOnAnimation wakeup)
  */
 
 #ifndef _GNU_SOURCE
@@ -99,10 +95,10 @@ constexpr int MODE_AUTOWRAP        = 1 << 6;
 constexpr int MODE_SYNC_OUTPUT     = 1 << 7;
 constexpr int MODE_FOCUS_EVENTS    = 1 << 8;
 
-// Pure Dark AMOLED Palette (#000000 background, #E5E9F0 foreground, #264F78 selection highlight)
+// Pure Dark AMOLED Palette + ColorOS 17 Neutral Gray Selection Highlight (#52525A)
 constexpr uint32_t DEFAULT_FG   = 0xFFE5E9F0u;
 constexpr uint32_t DEFAULT_BG   = 0xFF000000u;
-constexpr uint32_t SELECTION_BG = 0xFF264F78u;
+constexpr uint32_t SELECTION_BG = 0xFF52525Au;
 constexpr uint32_t SELECTION_FG = 0xFFFFFFFFu;
 
 // Android KeyEvent constants
@@ -138,6 +134,26 @@ constexpr int AMETA_SHIFT_ON = 1;
 constexpr int AMETA_ALT_ON   = 2;
 constexpr int AMETA_CTRL_ON  = 4096;
 
+// Event-driven JNI UI wakeup state
+static JavaVM* gJvm = nullptr;
+static pthread_mutex_t gViewMutex = PTHREAD_MUTEX_INITIALIZER;
+static jobject gSurfaceView = nullptr;
+static jmethodID gPostInvalidateId = nullptr;
+
+static void notifySurfaceFromNative() noexcept {
+    if (!gJvm) return;
+    pthread_mutex_lock(&gViewMutex);
+    jobject view = gSurfaceView;
+    jmethodID mid = gPostInvalidateId;
+    if (view && mid) {
+        JNIEnv* env = nullptr;
+        if (gJvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK && env) {
+            env->CallVoidMethod(view, mid);
+        }
+    }
+    pthread_mutex_unlock(&gViewMutex);
+}
+
 struct alignas(16) Cell {
     uint32_t codepoint;
     uint32_t fg;
@@ -154,7 +170,8 @@ struct alignas(16) Cell {
     }
 
     bool isDefaultBlank() const noexcept {
-        return codepoint == ' ' && bg == DEFAULT_BG && (flags & (FLAG_INVERSE | FLAG_UNDERLINE | FLAG_UNDERCURL | FLAG_STRIKETHROUGH | FLAG_WIDE_LEAD | FLAG_WIDE_TRAIL)) == 0;
+        return codepoint == ' ' && bg == DEFAULT_BG &&
+               (flags & (FLAG_INVERSE | FLAG_UNDERLINE | FLAG_UNDERCURL | FLAG_STRIKETHROUGH | FLAG_WIDE_LEAD | FLAG_WIDE_TRAIL)) == 0;
     }
 };
 
@@ -177,9 +194,17 @@ struct Row {
     }
 
     void clear(uint32_t fg = DEFAULT_FG, uint32_t bg = DEFAULT_BG, uint16_t flags = 0) noexcept {
+#if defined(__aarch64__)
+        Cell proto{' ', fg, bg, flags, 0};
+        uint32x4_t vec = vld1q_u32(reinterpret_cast<const uint32_t*>(&proto));
+        for (auto& c : cells) {
+            vst1q_u32(reinterpret_cast<uint32_t*>(&c), vec);
+        }
+#else
         for (auto& c : cells) {
             c.reset(fg, bg, flags);
         }
+#endif
         dirty = true;
         wrapped = false;
     }
@@ -284,6 +309,82 @@ static inline uint32_t resolveBgColor(uint32_t fg, uint32_t bg, uint16_t flags) 
     return (flags & FLAG_INVERSE) ? fg : bg;
 }
 
+// ============================================================================
+// C++23 Procedural Box-Drawing (U+2500..U+257F) & Block Elements (U+2580..U+259F)
+// Encodes fractional 1/16th cell rectangles directly into outGlyphs (cp = -1)
+// ============================================================================
+static inline int packRect16(int x0, int y0, int x1, int y1) noexcept {
+    return ((x0 & 0xFF) << 24) | ((y0 & 0xFF) << 16) | ((x1 & 0xFF) << 8) | (y1 & 0xFF);
+}
+
+static bool emitProceduralBoxOrBlockInCpp23(
+    uint32_t cp,
+    int col,
+    uint32_t fg,
+    jint* glPtr,
+    int& glCount) noexcept {
+
+    if (cp < 0x2500 || cp > 0x259F) return false;
+
+    auto pushRect = [&](int x0, int y0, int x1, int y1) {
+        int base = glCount * 4;
+        glPtr[base]     = -1; // Procedural rect marker
+        glPtr[base + 1] = col;
+        glPtr[base + 2] = static_cast<jint>(fg);
+        glPtr[base + 3] = packRect16(x0, y0, x1, y1);
+        glCount++;
+    };
+
+    if (cp >= 0x2580 && cp <= 0x259F) {
+        switch (cp) {
+            case 0x2580: pushRect(0, 0, 16, 8); return true;
+            case 0x2581: pushRect(0, 14, 16, 16); return true;
+            case 0x2582: pushRect(0, 12, 16, 16); return true;
+            case 0x2583: pushRect(0, 10, 16, 16); return true;
+            case 0x2584: pushRect(0, 8, 16, 16); return true;
+            case 0x2585: pushRect(0, 6, 16, 16); return true;
+            case 0x2586: pushRect(0, 4, 16, 16); return true;
+            case 0x2587: pushRect(0, 2, 16, 16); return true;
+            case 0x2588: pushRect(0, 0, 16, 16); return true;
+            case 0x2589: pushRect(0, 0, 14, 16); return true;
+            case 0x258A: pushRect(0, 0, 12, 16); return true;
+            case 0x258B: pushRect(0, 0, 10, 16); return true;
+            case 0x258C: pushRect(0, 0, 8, 16); return true;
+            case 0x258D: pushRect(0, 0, 6, 16); return true;
+            case 0x258E: pushRect(0, 0, 4, 16); return true;
+            case 0x258F: pushRect(0, 0, 2, 16); return true;
+            case 0x2590: pushRect(8, 0, 16, 16); return true;
+            case 0x2594: pushRect(0, 0, 16, 2); return true;
+            case 0x2595: pushRect(14, 0, 16, 16); return true;
+            default: return false;
+        }
+    }
+
+    switch (cp) {
+        case 0x2500: case 0x2501: pushRect(0, 7, 16, 9); return true;
+        case 0x2502: case 0x2503: pushRect(7, 0, 9, 16); return true;
+        case 0x250C: case 0x250F: case 0x256D:
+            pushRect(7, 7, 16, 9); pushRect(7, 7, 9, 16); return true;
+        case 0x2510: case 0x2513: case 0x256E:
+            pushRect(0, 7, 9, 9); pushRect(7, 7, 9, 16); return true;
+        case 0x2514: case 0x2517: case 0x2570:
+            pushRect(7, 7, 16, 9); pushRect(7, 0, 9, 9); return true;
+        case 0x2518: case 0x251B: case 0x256F:
+            pushRect(0, 7, 9, 9); pushRect(7, 0, 9, 9); return true;
+        case 0x251C: case 0x2523:
+            pushRect(7, 0, 9, 16); pushRect(7, 7, 16, 9); return true;
+        case 0x2524: case 0x252B:
+            pushRect(7, 0, 9, 16); pushRect(0, 7, 9, 9); return true;
+        case 0x252C: case 0x2533:
+            pushRect(0, 7, 16, 9); pushRect(7, 7, 9, 16); return true;
+        case 0x2534: case 0x253B:
+            pushRect(0, 7, 16, 9); pushRect(7, 0, 9, 9); return true;
+        case 0x253C: case 0x254B:
+            pushRect(0, 7, 16, 9); pushRect(7, 0, 9, 16); return true;
+        default: return false;
+    }
+}
+
 static void replaceAllTokens16(uint8_t* data, size_t len, const char* oldTok, const char* newTok) noexcept {
     if (!data || len < TOKEN_16_LEN) return;
     uint8_t* cur = data;
@@ -321,7 +422,8 @@ static void writeAllFd(int fd, const void* buf, size_t len) noexcept {
 static void copyFileBinary(const char* srcPath, const char* dstPath, mode_t mode) noexcept {
     int inFd = open(srcPath, O_RDONLY | O_CLOEXEC);
     if (inFd < 0) return;
-    int outFd = open(dstPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    chmod(dstPath, 0700);
+    int outFd = open(dstPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
     if (outFd < 0) {
         close(inFd);
         return;
@@ -375,6 +477,7 @@ static void removeRecursiveNative(const char* path) noexcept {
         }
         rmdir(path);
     } else {
+        chmod(path, 0700);
         unlink(path);
     }
 }
@@ -485,18 +588,22 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
         } else {
             std::string dstFile = std::string(STAGING_PATH) + "/" + entryName;
             mkdirsForFile(dstFile.c_str(), 0700);
-            bool isExec = (entryName.rfind("bin/", 0) == 0) ||
+            bool isElf = (outBuf.size() >= 4 &&
+                          outBuf[0] == 0x7F && outBuf[1] == 'E' && outBuf[2] == 'L' && outBuf[3] == 'F');
+            bool isExec = isElf ||
+                          (entryName.rfind("bin/", 0) == 0) ||
                           (entryName.rfind("libexec", 0) == 0) ||
                           (entryName.rfind("lib/apt/apt-helper", 0) == 0) ||
                           (entryName.rfind("lib/apt/methods", 0) == 0) ||
                           (entryName.rfind("etc/termux/bootstrap/", 0) == 0) ||
                           (entryName.rfind("var/lib/dpkg/info/", 0) == 0);
-            mode_t fileMode = isExec ? 0700 : 0600;
-            int fd = open(dstFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, fileMode);
+            // Android 17 (targetSdk 37) Safer Dynamic Code Loading requires ELF files to be read-only (0500)
+            mode_t finalMode = isElf ? 0500 : (isExec ? 0700 : 0600);
+            int fd = open(dstFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
             if (fd >= 0) {
                 if (!outBuf.empty()) writeAllFd(fd, outBuf.data(), outBuf.size());
                 close(fd);
-                if (isExec) chmod(dstFile.c_str(), 0700);
+                chmod(dstFile.c_str(), finalMode);
             }
         }
     }
@@ -514,9 +621,80 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
     return true;
 }
 
+static const char* resolveExecutable(const char* const* candidates, size_t count) noexcept {
+    for (size_t i = 0; i < count; ++i) {
+        if (access(candidates[i], R_OK) == 0) return candidates[i];
+    }
+    return candidates[count - 1];
+}
+
+// ============================================================================
+// Android 17 (targetSdk 37) SELinux & Safer DCL Execution Initializer
+// ============================================================================
+static bool probeDirectExecveAllowed() noexcept {
+    const char* bashBin = "/data/data/com.termuxx/file/usr/bin/bash";
+    if (access(bashBin, R_OK) != 0) return true;
+    pid_t pid = fork();
+    if (pid < 0) return true;
+    if (pid == 0) {
+        int devNull = open("/dev/null", O_RDWR);
+        if (devNull >= 0) {
+            dup2(devNull, 0);
+            dup2(devNull, 1);
+            dup2(devNull, 2);
+            if (devNull > 2) close(devNull);
+        }
+        setenv("LD_LIBRARY_PATH", LIB_PATH, 1);
+        execl(bashBin, "bash", "-c", "exit 0", nullptr);
+        _exit(errno == EACCES ? 126 : 127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return !(WIFEXITED(status) && WEXITSTATUS(status) == 126);
+}
+
+static void ensureSdk37ExecutableAccess() noexcept {
+    if (probeDirectExecveAllowed()) return;
+
+    static const char* const suBins[] = {
+        "/debug_ramdisk/su",
+        "/sbin/su",
+        "/system/bin/su",
+        "/system/xbin/su",
+        "/data/adb/ksu/bin/su",
+        "/data/adb/ap/bin/su"
+    };
+    const char* suBin = nullptr;
+    for (const char* cand : suBins) {
+        if (access(cand, X_OK) == 0) {
+            suBin = cand;
+            break;
+        }
+    }
+    if (!suBin) return;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        int devNull = open("/dev/null", O_RDWR);
+        if (devNull >= 0) {
+            dup2(devNull, 0);
+            dup2(devNull, 1);
+            dup2(devNull, 2);
+            if (devNull > 2) close(devNull);
+        }
+        execl(suBin, suBin, "-c",
+              "chcon -R u:object_r:system_file:s0 /data/data/com.termuxx/file/usr /data/data/com.termuxx/files 2>/dev/null || true",
+              nullptr);
+        _exit(0);
+    } else if (pid > 0) {
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+}
+
 static void runSecondStageBootstrapSilently(const char* preloadPath) noexcept {
     const char* secondStageScript = "/data/data/com.termuxx/file/usr/etc/termux/bootstrap/termux-bootstrap-second-stage.sh";
-    if (access(secondStageScript, X_OK) != 0) return;
+    if (access(secondStageScript, R_OK) != 0) return;
 
     pid_t pid = fork();
     if (pid == 0) {
@@ -536,7 +714,9 @@ static void runSecondStageBootstrapSilently(const char* preloadPath) noexcept {
             setenv("LD_PRELOAD", preloadPath, 1);
         }
         setenv("ANDROID__BUILD_VERSION_SDK", "37", 1);
-        execl("/data/data/com.termuxx/file/usr/bin/sh", "sh", secondStageScript, nullptr);
+        const char* bashBin = "/data/data/com.termuxx/file/usr/bin/bash";
+        execl(bashBin, "bash", secondStageScript, nullptr);
+        execl("/system/bin/linker64", "linker64", bashBin, secondStageScript, nullptr);
         _exit(0);
     } else if (pid > 0) {
         int status = 0;
@@ -562,15 +742,18 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     if (nativeLibDir && nativeLibDir[0] != '\0') {
         std::string srcSo = std::string(nativeLibDir) + "/libtermuxx-redirect.so";
         if (access(srcSo.c_str(), R_OK) == 0) {
-            copyFileBinary(srcSo.c_str(), dstSo.c_str(), 0755);
+            copyFileBinary(srcSo.c_str(), dstSo.c_str(), 0500);
         }
     }
+
+    ensureSdk37ExecutableAccess();
 
     mkdirsRecursive("/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d", 0700);
     const char* aptConfPath = "/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d/00termuxx";
     const char* aptConfText =
         "Dir::Cache \"/data/data/com.termuxx/cach/apt\";\n"
-        "Dir::Cache::archives \"/data/data/com.termuxx/cach/apt/archives\";\n";
+        "Dir::Cache::archives \"/data/data/com.termuxx/cach/apt/archives\";\n"
+        "DPkg::Post-Invoke { \"su -c 'chcon -R u:object_r:system_file:s0 /data/data/com.termuxx/file/usr' 2>/dev/null || true\"; };\n";
     int afd = open(aptConfPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (afd >= 0) {
         writeAllFd(afd, aptConfText, strlen(aptConfText));
@@ -594,6 +777,7 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
 
     if (justExtracted) {
         runSecondStageBootstrapSilently(dstSo.c_str());
+        ensureSdk37ExecutableAccess();
     }
 
     std::string bashrcPath = std::string(HOME_PATH) + "/.bashrc";
@@ -668,11 +852,13 @@ public:
     int mModes = MODE_AUTOWRAP;
     uint32_t mPalette[256];
 
-    // Original Termux Logical-Row Text Selection State:
-    // mSelY1 / mSelY2 are logical row indices: [0 .. mRows-1] for primary screen, [-mScrollbackCount .. -1] for scrollback
+    // ColorOS 17 Logical-Row Text Selection & Handle Drag State:
     bool mSelActive = false;
     int mSelX1 = -1, mSelY1 = -1;
     int mSelX2 = -1, mSelY2 = -1;
+    int mDragHandle = 0; // 0 = none, 1 = start handle, 2 = end handle
+    float mDragOffsetX = 0.0f;
+    float mDragOffsetY = 0.0f;
 
     enum class State { NORMAL, ESC, CSI, OSC, OSC_ESC, CHARSET };
     State mState = State::NORMAL;
@@ -717,7 +903,8 @@ public:
             mPrimaryGrid.emplace_back(mCols);
             mAltGrid.emplace_back(mCols);
         }
-        mScrollback.resize(static_cast<size_t>(mMaxScrollback), Row(mCols));
+        // Lazy scrollback allocation for minimal initial RAM footprint
+        mScrollback.reserve(256);
     }
 
     ~NeoTerminalEngine() {
@@ -803,16 +990,19 @@ public:
         mSelY1 = logicalY;
         mSelY2 = logicalY;
         mSelActive = true;
+        mDragHandle = 0;
         markAllDirty();
         unlock();
     }
 
     void updateSelectionHandle(bool isStartHandle, int col, int logicalY) noexcept {
         lock();
-        if (!mSelActive) {
-            unlock();
-            return;
-        }
+        updateSelectionHandleLocked(isStartHandle, col, logicalY);
+        unlock();
+    }
+
+    void updateSelectionHandleLocked(bool isStartHandle, int col, int logicalY) noexcept {
+        if (!mSelActive) return;
         int maxSb = (mModes & MODE_ALT_SCREEN) ? 0 : mScrollbackCount;
         col = std::clamp(col, 0, mCols - 1);
         logicalY = std::clamp(logicalY, -maxSb, mRows - 1);
@@ -821,8 +1011,11 @@ public:
         if (isStartHandle) {
             mSelX1 = col;
             mSelY1 = logicalY;
-            if (mSelY1 > mSelY2) mSelY1 = mSelY2;
-            if (mSelY1 == mSelY2 && mSelX1 > mSelX2) mSelX1 = mSelX2;
+            if (mSelY1 > mSelY2 || (mSelY1 == mSelY2 && mSelX1 > mSelX2)) {
+                std::swap(mSelX1, mSelX2);
+                std::swap(mSelY1, mSelY2);
+                if (mDragHandle == 1) mDragHandle = 2;
+            }
             if (mSelX1 > 0 && mSelX1 < static_cast<int>(row.cells.size()) &&
                 (row.cells[static_cast<size_t>(mSelX1)].flags & FLAG_WIDE_TRAIL)) {
                 mSelX1--;
@@ -830,15 +1023,137 @@ public:
         } else {
             mSelX2 = col;
             mSelY2 = logicalY;
-            if (mSelY1 > mSelY2) mSelY2 = mSelY1;
-            if (mSelY1 == mSelY2 && mSelX1 > mSelX2) mSelX2 = mSelX1;
+            if (mSelY2 < mSelY1 || (mSelY1 == mSelY2 && mSelX2 < mSelX1)) {
+                std::swap(mSelX1, mSelX2);
+                std::swap(mSelY1, mSelY2);
+                if (mDragHandle == 2) mDragHandle = 1;
+            }
             if (mSelX2 + 1 < mCols && mSelX2 < static_cast<int>(row.cells.size()) &&
                 (row.cells[static_cast<size_t>(mSelX2)].flags & FLAG_WIDE_LEAD)) {
                 mSelX2++;
             }
         }
         markAllDirty();
-        unlock();
+    }
+
+    // ColorOS 17 Lollipop Selection Geometry & Touch State Machine in C++23:
+    // Start Handle: vertical stem on left edge of mSelX1, circle on TOP of stem (or bottom if rowTop1 < 2*radius)
+    // End Handle:   vertical stem on right edge of mSelX2, circle on BOTTOM of stem
+    bool computeSelectionGeometryLocked(
+        int scrollOffset,
+        float cellW,
+        float cellH,
+        float viewW,
+        float viewH,
+        float radiusPx,
+        float outGeom[14]) const noexcept {
+
+        if (!mSelActive) return false;
+        int clampedOffset = (mModes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
+
+        float x1 = static_cast<float>(mSelX1) * cellW;
+        float top1 = static_cast<float>(mSelY1 + clampedOffset) * cellH;
+        float bot1 = top1 + cellH;
+        float circleY1 = (top1 >= radiusPx * 2.1f) ? (top1 - radiusPx) : (bot1 + radiusPx);
+
+        float x2 = static_cast<float>(mSelX2 + 1) * cellW;
+        float top2 = static_cast<float>(mSelY2 + clampedOffset) * cellH;
+        float bot2 = top2 + cellH;
+        float circleY2 = (bot2 + radiusPx * 2.1f <= viewH) ? (bot2 + radiusPx) : (top2 - radiusPx);
+
+        outGeom[0] = std::clamp(x1, 1.0f, std::max(1.0f, viewW - 1.0f));
+        outGeom[1] = top1;
+        outGeom[2] = bot1;
+        outGeom[3] = outGeom[0];
+        outGeom[4] = circleY1;
+
+        outGeom[5] = std::clamp(x2, 1.0f, std::max(1.0f, viewW - 1.0f));
+        outGeom[6] = top2;
+        outGeom[7] = bot2;
+        outGeom[8] = outGeom[5];
+        outGeom[9] = circleY2;
+
+        float rectLeft = (mSelY1 == mSelY2) ? std::min(x1, x2) : 0.0f;
+        float rectRight = (mSelY1 == mSelY2) ? std::max(x1, x2) : viewW;
+        float rectTop = std::min(top1, circleY1 - radiusPx) - radiusPx * 0.6f;
+        float rectBot = std::max(bot2, circleY2 + radiusPx) + radiusPx * 0.6f;
+
+        outGeom[10] = std::clamp(rectLeft, 0.0f, std::max(1.0f, viewW));
+        outGeom[11] = std::clamp(rectTop, 0.0f, std::max(1.0f, viewH));
+        outGeom[12] = std::clamp(rectRight, outGeom[10] + 1.0f, std::max(outGeom[10] + 1.0f, viewW));
+        outGeom[13] = std::clamp(rectBot, outGeom[11] + 1.0f, std::max(outGeom[11] + 1.0f, viewH));
+        return true;
+    }
+
+    int onSelectionTouchLocked(
+        int action,
+        int scrollOffset,
+        float touchX,
+        float touchY,
+        float cellW,
+        float cellH,
+        float viewW,
+        float viewH,
+        float radiusPx) noexcept {
+
+        if (!mSelActive) return 0;
+
+        float geom[14];
+        computeSelectionGeometryLocked(scrollOffset, cellW, cellH, viewW, viewH, radiusPx, geom);
+
+        if (action == 0) { // ACTION_DOWN
+            float dx1 = touchX - geom[3];
+            float dy1 = touchY - geom[4];
+            float d1Sq = dx1 * dx1 + dy1 * dy1;
+
+            // Also check distance to stem midpoint for easy grabbing
+            float stemMid1Y = 0.5f * (geom[1] + geom[2]);
+            float d1StemSq = (touchX - geom[0]) * (touchX - geom[0]) + (touchY - stemMid1Y) * (touchY - stemMid1Y);
+            d1Sq = std::min(d1Sq, d1StemSq);
+
+            float dx2 = touchX - geom[8];
+            float dy2 = touchY - geom[9];
+            float d2Sq = dx2 * dx2 + dy2 * dy2;
+            float stemMid2Y = 0.5f * (geom[6] + geom[7]);
+            float d2StemSq = (touchX - geom[5]) * (touchX - geom[5]) + (touchY - stemMid2Y) * (touchY - stemMid2Y);
+            d2Sq = std::min(d2Sq, d2StemSq);
+
+            float hitRad = radiusPx * 3.6f;
+            float hitRadSq = hitRad * hitRad;
+
+            if (d1Sq <= hitRadSq || d2Sq <= hitRadSq) {
+                if (d1Sq <= d2Sq) {
+                    mDragHandle = 1;
+                    mDragOffsetX = touchX - (geom[0] + cellW * 0.5f);
+                    mDragOffsetY = touchY - stemMid1Y;
+                } else {
+                    mDragHandle = 2;
+                    mDragOffsetX = touchX - (geom[5] - cellW * 0.5f);
+                    mDragOffsetY = touchY - stemMid2Y;
+                }
+                return 1;
+            }
+            mDragHandle = 0;
+            return 0;
+        } else if (action == 2) { // ACTION_MOVE
+            if (mDragHandle == 0) return 0;
+            int clampedOffset = (mModes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
+            float targetX = touchX - mDragOffsetX;
+            float targetY = touchY - mDragOffsetY;
+
+            int screenCol = std::clamp(static_cast<int>(targetX / cellW), 0, mCols - 1);
+            int screenRow = std::clamp(static_cast<int>(targetY / cellH), 0, mRows - 1);
+            int logicalY = screenRow - clampedOffset;
+
+            updateSelectionHandleLocked(mDragHandle == 1, screenCol, logicalY);
+            return 1;
+        } else if (action == 1 || action == 3) { // ACTION_UP / ACTION_CANCEL
+            if (mDragHandle != 0) {
+                mDragHandle = 0;
+                return 2;
+            }
+        }
+        return 0;
     }
 
     bool stopSelection() noexcept {
@@ -848,6 +1163,7 @@ public:
             return false;
         }
         mSelActive = false;
+        mDragHandle = 0;
         mSelX1 = mSelY1 = mSelX2 = mSelY2 = -1;
         markAllDirty();
         unlock();
@@ -874,7 +1190,6 @@ public:
                 }
             }
             if (y == mSelY2 && lastNonSpace < xEnd && xEnd < static_cast<int>(row.cells.size())) {
-                // Keep explicit trailing selection if on the same single line
                 if (mSelY1 == mSelY2 && lastNonSpace < xStart) lastNonSpace = xEnd;
             }
             for (int c = xStart; c <= lastNonSpace; ++c) {
@@ -904,6 +1219,7 @@ public:
         mState = State::NORMAL;
         mUtf8BytesNeeded = 0;
         mSelActive = false;
+        mDragHandle = 0;
         for (auto& r : mPrimaryGrid) r.clear();
         for (auto& r : mAltGrid) r.clear();
         mFrameDirty.store(true, std::memory_order_release);
@@ -911,6 +1227,7 @@ public:
 
     void reflowPrimaryAndScrollback(int newRows, int newCols) {
         mSelActive = false;
+        mDragHandle = 0;
         int maxActivePrimary = mCursorRow;
         for (int r = mRows - 1; r > mCursorRow; --r) {
             const Row& row = mPrimaryGrid[static_cast<size_t>(r)];
@@ -1021,7 +1338,7 @@ public:
             }
         }
 
-        mScrollback.assign(static_cast<size_t>(mMaxScrollback), Row(newCols));
+        mScrollback.clear();
         mScrollbackHead = 0;
         mScrollbackCount = 0;
 
@@ -1095,7 +1412,11 @@ public:
         if (mModes & MODE_ALT_SCREEN) return;
         int idx = (mScrollbackHead + mScrollbackCount) % mMaxScrollback;
         if (mScrollbackCount < mMaxScrollback) {
-            mScrollback[static_cast<size_t>(idx)] = row;
+            if (static_cast<int>(mScrollback.size()) <= idx) {
+                mScrollback.push_back(row);
+            } else {
+                mScrollback[static_cast<size_t>(idx)] = row;
+            }
             mScrollbackCount++;
         } else {
             mScrollback[static_cast<size_t>(mScrollbackHead)] = row;
@@ -1117,6 +1438,7 @@ public:
                     mSelY2--;
                     if (mSelY1 < -mScrollbackCount) {
                         mSelActive = false;
+                        mDragHandle = 0;
                     }
                 }
             }
@@ -1395,7 +1717,7 @@ public:
         }
 
         if (mCsiPrefix == '>' && finalByte == 'q') {
-            reply += "\x1bP>|Termuxx-C++23(3.0)\x1b\\";
+            reply += "\x1bP>|Termuxx-C++23(4.0)\x1b\\";
             return;
         }
 
@@ -1437,7 +1759,7 @@ public:
                     cur.dirty = true;
                 } else if (mode == 2 || mode == 3) {
                     for (int r = 0; r < mRows; ++r) grid[static_cast<size_t>(r)].clear(mCurFg, mCurBg, 0);
-                    if (mode == 3) { mScrollbackHead = 0; mScrollbackCount = 0; }
+                    if (mode == 3) { mScrollback.clear(); mScrollbackHead = 0; mScrollbackCount = 0; }
                 }
                 break;
             }
@@ -1667,6 +1989,12 @@ public:
     }
 
     void readerLoop() {
+        JNIEnv* threadEnv = nullptr;
+        bool attached = false;
+        if (gJvm && gJvm->AttachCurrentThread(&threadEnv, nullptr) == JNI_OK) {
+            attached = true;
+        }
+
         uint8_t buf[65536];
         std::string reply;
         reply.reserve(64);
@@ -1678,7 +2006,9 @@ public:
             struct pollfd pfd{};
             pfd.fd = fd;
             pfd.events = POLLIN | POLLERR | POLLHUP;
-            int prc = poll(&pfd, 1, 50);
+            // Zero idle wakeups: block indefinitely (-1) unless synchronized output timeout is active
+            int timeoutMs = (mModes & MODE_SYNC_OUTPUT) ? 16 : -1;
+            int prc = poll(&pfd, 1, timeoutMs);
             if (prc < 0) {
                 if (errno == EINTR) continue;
                 break;
@@ -1686,6 +2016,7 @@ public:
             if (prc == 0) {
                 if (mModes & MODE_SYNC_OUTPUT) {
                     mFrameDirty.store(true, std::memory_order_release);
+                    notifySurfaceFromNative();
                 }
                 continue;
             }
@@ -1699,8 +2030,10 @@ public:
                 reply.clear();
                 lock();
                 processStream(buf, static_cast<size_t>(n), reply);
+                bool shouldWake = !(mModes & MODE_SYNC_OUTPUT);
                 unlock();
                 if (!reply.empty()) writeAllFd(fd, reply.data(), reply.size());
+                if (shouldWake) notifySurfaceFromNative();
             }
         }
 
@@ -1728,6 +2061,11 @@ public:
         mModes &= ~MODE_SYNC_OUTPUT;
         processStream(reinterpret_cast<const uint8_t*>(exitMsg), strlen(exitMsg), dummy);
         unlock();
+        notifySurfaceFromNative();
+
+        if (attached && gJvm) {
+            gJvm->DetachCurrentThread();
+        }
     }
 
     void stopSession() noexcept {
@@ -1742,13 +2080,6 @@ public:
         writeAllFd(mPtyFd, data, len);
     }
 };
-
-static const char* resolveExecutable(const char* const* candidates, size_t count) noexcept {
-    for (size_t i = 0; i < count; ++i) {
-        if (access(candidates[i], X_OK) == 0) return candidates[i];
-    }
-    return candidates[count - 1];
-}
 
 static bool startSessionProcess(
     NeoTerminalEngine* engine,
@@ -1767,6 +2098,11 @@ static bool startSessionProcess(
 
     initializeEnvironmentAndAutoUpdater(nativeLibDir, false);
     std::string preloadPath = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
+    std::string termuxExecPreload = std::string(LIB_PATH) + "/libtermux-exec-ld-preload.so";
+    std::string fullPreload = preloadPath;
+    if (access(termuxExecPreload.c_str(), R_OK) == 0) {
+        fullPreload += ":" + termuxExecPreload;
+    }
 
     static const char* const userShells[] = {
         "/data/data/com.termuxx/file/usr/bin/zsh",
@@ -1786,7 +2122,7 @@ static bool startSessionProcess(
 
     const char* userShell = resolveExecutable(userShells, 4);
     const char* loginBin = "/data/data/com.termuxx/file/usr/bin/login";
-    bool hasLogin = (access(loginBin, X_OK) == 0);
+    bool hasLogin = (access(loginBin, R_OK) == 0);
 
     std::vector<std::string> envStrings;
     envStrings.emplace_back("TERM=xterm-256color");
@@ -1800,10 +2136,11 @@ static bool startSessionProcess(
     envStrings.emplace_back("PATH=" + std::string(BIN_PATH) + ":" + std::string(BIN_PATH) + "/applets:/system/bin:/system/xbin:/sbin");
     envStrings.emplace_back("LD_LIBRARY_PATH=" + std::string(LIB_PATH));
     if (access(preloadPath.c_str(), R_OK) == 0) {
-        envStrings.emplace_back("LD_PRELOAD=" + preloadPath);
+        envStrings.emplace_back("LD_PRELOAD=" + fullPreload);
     }
     envStrings.emplace_back("ANDROID_DATA=/data");
     envStrings.emplace_back("ANDROID_ROOT=/system");
+    envStrings.emplace_back("ANDROID__BUILD_VERSION_SDK=37");
     envStrings.emplace_back("TERMUX_VERSION=0.119.0");
     envStrings.emplace_back("SHELL=" + std::string(userShell));
 
@@ -1820,7 +2157,7 @@ static bool startSessionProcess(
             "export TMPDIR=\"" + std::string(TMP_PATH) + "\"; "
             "export TERM=xterm-256color; export COLORTERM=truecolor; ";
         if (access(preloadPath.c_str(), R_OK) == 0) {
-            rootCmd += "export LD_PRELOAD=\"" + preloadPath + "\"; ";
+            rootCmd += "export LD_PRELOAD=\"" + fullPreload + "\"; ";
         }
         rootCmd += "cd \"" + std::string(HOME_PATH) + "\" 2>/dev/null || true; ";
         rootCmd += "exec \"" + std::string(userShell) + "\" -l";
@@ -1902,6 +2239,16 @@ static bool startSessionProcess(
         argv.push_back(nullptr);
 
         execve(execPath.c_str(), argv.data(), environ);
+        // Fallback for Android 17 (targetSdk 37) if direct execve returned EACCES
+        if (!engine->mIsRoot) {
+            char* linkerArgs[] = {
+                const_cast<char*>("/system/bin/linker64"),
+                const_cast<char*>(userShell),
+                const_cast<char*>("-l"),
+                nullptr
+            };
+            execve("/system/bin/linker64", linkerArgs, environ);
+        }
         _exit(127);
     }
 
@@ -2030,8 +2377,8 @@ static void sendCodepointInternal(NeoTerminalEngine* engine, int codepoint, bool
 
 static void* bootstrapWorkerThread(void* /*arg*/) {
     bool extracted = false;
-    if (access("/data/data/com.termuxx/file/usr/bin/bash", X_OK) != 0 &&
-        access("/data/data/com.termuxx/file/usr/bin/apt", X_OK) != 0 &&
+    if (access("/data/data/com.termuxx/file/usr/bin/bash", R_OK) != 0 &&
+        access("/data/data/com.termuxx/file/usr/bin/apt", R_OK) != 0 &&
         blob_size > 0) {
         extracted = extractBootstrapInCpp23(reinterpret_cast<const uint8_t*>(blob), static_cast<size_t>(blob_size));
     }
@@ -2041,12 +2388,36 @@ static void* bootstrapWorkerThread(void* /*arg*/) {
 
     initializeEnvironmentAndAutoUpdater(libDir.c_str(), extracted);
     gBootstrapState.store(2, std::memory_order_release);
+    notifySurfaceFromNative();
     return nullptr;
 }
 
 } // namespace
 
 extern "C" {
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+    gJvm = vm;
+    return JNI_VERSION_1_6;
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeRegisterSurface(JNIEnv* env, jclass /*clazz*/, jobject surface) {
+    pthread_mutex_lock(&gViewMutex);
+    if (gSurfaceView) {
+        env->DeleteGlobalRef(gSurfaceView);
+        gSurfaceView = nullptr;
+        gPostInvalidateId = nullptr;
+    }
+    if (surface) {
+        gSurfaceView = env->NewGlobalRef(surface);
+        jclass cls = env->GetObjectClass(surface);
+        if (cls) {
+            gPostInvalidateId = env->GetMethodID(cls, "postInvalidateOnAnimation", "()V");
+        }
+    }
+    pthread_mutex_unlock(&gViewMutex);
+}
 
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeInitAndPollBootstrap(JNIEnv* env, jclass /*clazz*/, jstring nativeLibDir) {
@@ -2063,7 +2434,7 @@ Java_com_termuxx_app_TermuxActivity_nativeInitAndPollBootstrap(JNIEnv* env, jcla
                     env->ReleaseStringUTFChars(nativeLibDir, utf);
                 }
             }
-            if (access("/data/data/com.termuxx/file/usr/bin/bash", X_OK) == 0) {
+            if (access("/data/data/com.termuxx/file/usr/bin/bash", R_OK) == 0) {
                 initializeEnvironmentAndAutoUpdater(gNativeLibDir.c_str(), false);
                 gBootstrapState.store(2, std::memory_order_release);
                 pthread_mutex_unlock(&gGlobalMutex);
@@ -2083,7 +2454,7 @@ JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeNewSession(
     JNIEnv* /*env*/, jclass /*clazz*/, jboolean asRoot, jint rows, jint cols, jint cellW, jint cellH) {
     pthread_mutex_lock(&gGlobalMutex);
-    auto* engine = new NeoTerminalEngine(rows, cols, 4000, asRoot == JNI_TRUE);
+    auto* engine = new NeoTerminalEngine(rows, cols, 2000, asRoot == JNI_TRUE);
     if (rows > 0 && cols > 0) {
         startSessionProcess(engine, gNativeLibDir.c_str(), rows, cols, cellW, cellH);
     }
@@ -2193,7 +2564,7 @@ Java_com_termuxx_app_TermuxActivity_nativeConsumeOsc52Clipboard(JNIEnv* env, jcl
 }
 
 // ============================================================================
-// Original Termux Native Selection JNI Methods
+// ColorOS 17 Selection JNI Methods (C++23 Handle Geometry & Touch Dragging)
 // ============================================================================
 JNIEXPORT void JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeStartTextSelection(
@@ -2215,6 +2586,58 @@ Java_com_termuxx_app_TermuxActivity_nativeUpdateSelectionHandle(
         eng->updateSelectionHandle(isStartHandle == JNI_TRUE, col, logicalY);
     }
     pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeOnSelectionTouchPx(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jint action,
+    jint scrollOffset,
+    jfloat touchX,
+    jfloat touchY,
+    jfloat cellW,
+    jfloat cellH,
+    jfloat viewW,
+    jfloat viewH,
+    jfloat radiusPx) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    int res = 0;
+    if (eng) {
+        eng->lock();
+        res = eng->onSelectionTouchLocked(action, scrollOffset, touchX, touchY, cellW, cellH, viewW, viewH, radiusPx);
+        eng->unlock();
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+    return res;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetSelectionGeometryPx(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jint scrollOffset,
+    jfloat cellW,
+    jfloat cellH,
+    jfloat viewW,
+    jfloat viewH,
+    jfloat radiusPx,
+    jfloatArray outGeom) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    float geom[14] = {0};
+    bool ok = false;
+    if (eng) {
+        eng->lock();
+        ok = eng->computeSelectionGeometryLocked(scrollOffset, cellW, cellH, viewW, viewH, radiusPx, geom);
+        eng->unlock();
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+    if (ok && outGeom) {
+        env->SetFloatArrayRegion(outGeom, 0, 14, geom);
+    }
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
@@ -2535,12 +2958,16 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
             uint32_t fg = engine->isLogicalCellSelected(logicalY, c)
                 ? SELECTION_FG
                 : resolveFgColor(cell.fg, cell.bg, cell.flags);
-            int base = glCount * 4;
-            glPtr[base]     = static_cast<jint>(cell.codepoint);
-            glPtr[base + 1] = c;
-            glPtr[base + 2] = static_cast<jint>(fg);
-            glPtr[base + 3] = static_cast<jint>(cell.flags);
-            glCount++;
+
+            // Emit procedural Box-Drawing / Block Elements directly from C++23
+            if (!emitProceduralBoxOrBlockInCpp23(cell.codepoint, c, fg, glPtr, glCount)) {
+                int base = glCount * 4;
+                glPtr[base]     = static_cast<jint>(cell.codepoint);
+                glPtr[base + 1] = c;
+                glPtr[base + 2] = static_cast<jint>(fg);
+                glPtr[base + 3] = static_cast<jint>(cell.flags);
+                glCount++;
+            }
         }
     }
 

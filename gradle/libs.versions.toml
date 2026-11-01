@@ -2,11 +2,10 @@
 agp = "9.5.0"
 ndk = "30.0.16248370"
 compileSdk = "37"
-minSdk = "35"
-# targetSdk = 28 preserves SELinux execute permissions in /data/data/com.termuxx/file/usr/bin for apt & pkg
-targetSdk = "28"
-appVersionCode = "300"
-appVersionName = "3.0.0-cxx23"
+minSdk = "37"
+targetSdk = "37"
+appVersionCode = "400"
+appVersionName = "4.0.0-android17-cxx23"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

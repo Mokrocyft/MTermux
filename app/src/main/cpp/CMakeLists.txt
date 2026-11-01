@@ -62,6 +62,7 @@ set(COMMON_LINK_FLAGS
     -Wl,-z,common-page-size=16384
     -Wl,--gc-sections
     -Wl,-O3
+    -Wl,--strip-all
 )
 
 target_link_options(termuxx-core PRIVATE ${COMMON_LINK_FLAGS})

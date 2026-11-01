@@ -2,11 +2,6 @@ package com.termuxx.app
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -18,19 +13,11 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RenderNode
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
-import android.net.wifi.WifiManager
-import android.os.Build
 import android.os.Bundle
-import android.os.IBinder
-import android.os.PowerManager
-import android.os.SystemClock
 import android.text.InputType
 import android.util.TypedValue
 import android.view.ActionMode
-import android.view.Choreographer
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -41,7 +28,6 @@ import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewGroup
-import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
@@ -51,10 +37,10 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import android.widget.PopupWindow
 import android.widget.TextView
 import android.widget.Toast
-import com.termuxx.R
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
@@ -68,6 +54,11 @@ private const val COLOR_TEXT = 0xFFEAEAEA.toInt()
 private const val COLOR_TEXT_DIM = 0xFF8A8A8A.toInt()
 private const val COLOR_ACCENT = 0xFF00E676.toInt()
 private const val COLOR_ROOT = 0xFFFF5252.toInt()
+
+// ColorOS 17 Native Selection Handle Palette (matches system lollipop handles)
+private const val COLOR_HANDLE_STEM = 0xFFD4D4DA.toInt()
+private const val COLOR_HANDLE_RING = 0xFFB0B0B8.toInt()
+private const val COLOR_HANDLE_FILL = 0xFFF8F8FA.toInt()
 
 private const val PREFS_NAME = "termuxx_prefs"
 private const val KEY_EXTRA_KEYS_SPEC = "extra_keys_spec_v2"
@@ -86,27 +77,30 @@ private const val ITEM_PASTE = 2
 private const val ITEM_SELECT_ALL = 3
 private const val ITEM_SHARE = 4
 
-private const val HANDLE_LEFT = 0
-private const val HANDLE_RIGHT = 2
-
 /**
- * Termuxx — Modern Kotlin + C++23 (C++2b) Minimalist Pure Dark AMOLED Terminal.
+ * Termuxx 4.0 — Ultra-Light Android 17 (API 37) Kotlin + C++23 Terminal.
  *
- * Architecture:
- * - Zero Java files: 100% Kotlin UI layer + C++23 native engine (`libtermuxx-core.so` & `libtermuxx-redirect.so`).
- * - Authentic Original Termux Native System Text Selection (`PopupWindow` handles with
- *   `android.R.attr.textSelectHandleWindowStyle` + floating `ActionMode.TYPE_FLOATING` system toolbar).
- * - Real-time logical-line reflow on pinch-to-zoom (`ScaleGestureDetector` -> `NeoTerminalEngine::resize`).
- * - Hardware-accelerated per-row `RenderNode` display list caching for 120Hz/165Hz AMOLED displays.
+ * - Event-driven zero-idle-CPU architecture: C++23 reader thread sleeps in `poll(-1)` when idle
+ *   and wakes `TerminalSurface` directly via JNI `postInvalidateOnAnimation()`.
+ * - ColorOS 17 native text selection handles (top-circle start stem + bottom-circle end stem +
+ *   neutral gray highlight + native `ActionMode.TYPE_FLOATING` system menu) driven by C++23.
+ * - Procedural Box-Drawing & Block Elements packed directly in C++23 (`nativePackRowRender`).
  */
-class TermuxActivity : Activity(), Choreographer.FrameCallback {
+class TermuxActivity : Activity() {
 
     private lateinit var prefs: SharedPreferences
     private lateinit var tabStrip: LinearLayout
     private lateinit var extraKeysRoot: LinearLayout
     internal lateinit var terminalSurface: TerminalSurface
     private val modifierButtons = ArrayList<TextView>(4)
-    private var running = false
+
+    private val backCallback = OnBackInvokedCallback {
+        if (terminalSurface.isSelectingText()) {
+            terminalSurface.stopTextSelection()
+        } else {
+            finish()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -114,30 +108,24 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
 
         window.apply {
-            statusBarColor = COLOR_AMOLED_BG
-            navigationBarColor = COLOR_AMOLED_BG
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                attributes = attributes.apply {
-                    layoutInDisplayCutoutMode =
-                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                }
+            attributes = attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                setDecorFitsSystemWindows(true)
-            }
-            @Suppress("DEPRECATION")
-            setSoftInputMode(
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
-                    WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN
-            )
+            setDecorFitsSystemWindows(true)
         }
 
         requestHighRefreshRate()
-        startForegroundKeepAlive()
+        onBackInvokedDispatcher.registerOnBackInvokedCallback(
+            OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+            backCallback
+        )
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_AMOLED_BG)
+            clipChildren = false
+            clipToPadding = false
         }
 
         // Minimalist Pure Dark AMOLED Header Bar (32dp)
@@ -176,9 +164,10 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         }
         root.addView(topDivider, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
 
-        // Terminal Viewport Container
         val viewport = FrameLayout(this).apply {
             setBackgroundColor(COLOR_AMOLED_BG)
+            clipChildren = false
+            clipToPadding = false
         }
         terminalSurface = TerminalSurface(this)
         viewport.addView(
@@ -190,7 +179,6 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         )
         root.addView(viewport, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        // Minimalist Customizable Extra Keys Container
         extraKeysRoot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_AMOLED_BG)
@@ -205,7 +193,29 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         )
 
         setContentView(root)
+        nativeRegisterSurface(terminalSurface)
         nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        nativeRegisterSurface(terminalSurface)
+        terminalSurface.onActivityResume()
+        terminalSurface.requestFocus()
+    }
+
+    override fun onPause() {
+        terminalSurface.onActivityPause()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        onBackInvokedDispatcher.unregisterOnBackInvokedCallback(backCallback)
+        nativeRegisterSurface(null)
+        if (isFinishing) {
+            nativeDestroyAll()
+        }
+        super.onDestroy()
     }
 
     private fun rebuildExtraKeysBar() {
@@ -227,11 +237,9 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
         )
 
-        val lines = spec.split("\n")
-        for (rawLine in lines) {
+        for (rawLine in spec.split("\n")) {
             val line = rawLine.trim()
             if (line.isEmpty()) continue
-            val tokens = line.split("|")
             val rowLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setBackgroundColor(COLOR_AMOLED_BG)
@@ -239,7 +247,7 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
             }
 
             var added = 0
-            for (rawToken in tokens) {
+            for (rawToken in line.split("|")) {
                 val label = rawToken.trim()
                 if (label.isEmpty()) continue
                 val btn = createExtraKeyButton(label)
@@ -265,10 +273,9 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
             typeface = Typeface.MONOSPACE
             setTextColor(COLOR_TEXT_DIM)
             background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(5))
-            val lp = LinearLayout.LayoutParams(0, dp(32), 1f).apply {
+            layoutParams = LinearLayout.LayoutParams(0, dp(32), 1f).apply {
                 setMargins(dp(1), dp(1), dp(1), dp(1))
             }
-            layoutParams = lp
             setOnClickListener { v ->
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 terminalSurface.stopTextSelection()
@@ -290,8 +297,7 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         }
 
         val hint = TextView(this).apply {
-            text = "Формат: клавиши через | , строки через Enter.\n" +
-                "Поддерживаются: ESC, TAB, CTRL, ALT, ENTER, BKSP, DEL, INS, HOME, END, PGUP, PGDN, ▲, ▼, ◀, ▶, F1..F12, CTRL+C и любые символы."
+            text = "Клавиши через | , строки через Enter (ESC, TAB, CTRL, ALT, ENTER, BKSP, DEL, HOME, END, PGUP, PGDN, ▲, ▼, ◀, ▶, F1..F12, CTRL+C):"
             setTextColor(COLOR_TEXT_DIM)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setPadding(0, 0, 0, dp(8))
@@ -314,14 +320,14 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(10), 0, 0)
         }
-        presetsRow.addView(makePresetChip("1-Row Minimal") { input.setText(DEFAULT_EXTRA_KEYS_SPEC) })
-        presetsRow.addView(makePresetChip("2-Row Extended") { input.setText(EXTENDED_EXTRA_KEYS_SPEC) })
-        presetsRow.addView(makePresetChip("Vim / TMUX") { input.setText(VIM_TMUX_EXTRA_KEYS_SPEC) })
-        presetsRow.addView(makePresetChip("Скрыть панель") { input.setText("") })
+        presetsRow.addView(makePresetChip("1-Row") { input.setText(DEFAULT_EXTRA_KEYS_SPEC) })
+        presetsRow.addView(makePresetChip("2-Row") { input.setText(EXTENDED_EXTRA_KEYS_SPEC) })
+        presetsRow.addView(makePresetChip("Vim/TMUX") { input.setText(VIM_TMUX_EXTRA_KEYS_SPEC) })
+        presetsRow.addView(makePresetChip("Скрыть") { input.setText("") })
         dialogLayout.addView(presetsRow)
 
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Настройка нижней клавиатуры")
+            .setTitle("Нижняя клавиатура")
             .setView(dialogLayout)
             .setPositiveButton("Сохранить") { _, _ ->
                 prefs.edit().putString(KEY_EXTRA_KEYS_SPEC, input.text.toString()).apply()
@@ -346,75 +352,6 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                 setMargins(0, 0, dp(6), 0)
             }
             setOnClickListener { onClick.run() }
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        running = true
-        Choreographer.getInstance().postFrameCallback(this)
-        terminalSurface.requestFocus()
-    }
-
-    override fun onPause() {
-        running = false
-        Choreographer.getInstance().removeFrameCallback(this)
-        terminalSurface.stopTextSelection()
-        super.onPause()
-    }
-
-    override fun onDestroy() {
-        running = false
-        Choreographer.getInstance().removeFrameCallback(this)
-        terminalSurface.stopTextSelection()
-        if (isFinishing) {
-            nativeDestroyAll()
-        }
-        super.onDestroy()
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (terminalSurface.isSelectingText()) {
-            terminalSurface.stopTextSelection()
-            return
-        }
-        @Suppress("DEPRECATION")
-        super.onBackPressed()
-    }
-
-    override fun doFrame(frameTimeNanos: Long) {
-        if (!running) return
-
-        val bootState = nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
-        if (bootState == 2 && nativeGetSessionCount() == 0) {
-            val rows = max(5, terminalSurface.rows)
-            val cols = max(10, terminalSurface.cols)
-            nativeNewSession(
-                false,
-                rows,
-                cols,
-                terminalSurface.cellWidth.roundToInt(),
-                terminalSurface.cellHeight.roundToInt()
-            )
-            rebuildTabs()
-            terminalSurface.invalidateAllRows()
-        }
-
-        val oscClip = nativeConsumeOsc52Clipboard()
-        if (!oscClip.isNullOrEmpty()) {
-            copyToClipboard(oscClip, false)
-        }
-
-        val dirty = nativeConsumeFrameDirty()
-        val blinkTick = terminalSurface.updateCursorBlink(frameTimeNanos)
-
-        if (dirty || blinkTick || bootState != 2) {
-            terminalSurface.invalidateDirtyRows(dirty || bootState != 2)
-        }
-
-        if (running) {
-            Choreographer.getInstance().postFrameCallback(this)
         }
     }
 
@@ -450,7 +387,7 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         terminalSurface.invalidateAllRows()
     }
 
-    private fun closeCurrentSession() {
+    internal fun closeCurrentSession() {
         val active = nativeGetActiveIndex()
         if (active < 0) return
         terminalSurface.stopTextSelection()
@@ -562,43 +499,31 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         ).roundToInt()
     }
 
-    private fun requestHighRefreshRate() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val d = display ?: return
-            var best: android.view.Display.Mode? = null
-            for (m in d.supportedModes) {
-                if (best == null || m.refreshRate > best.refreshRate) {
-                    best = m
-                }
-            }
-            if (best != null) {
-                window.attributes = window.attributes.apply {
-                    preferredDisplayModeId = best.modeId
-                }
-            }
-        }
+    internal fun dpF(v: Float): Float {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            v,
+            resources.displayMetrics
+        )
     }
 
-    private fun startForegroundKeepAlive() {
-        try {
-            val i = Intent(this, KeepAliveService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(i)
-            } else {
-                startService(i)
-            }
-        } catch (_: Throwable) {
+    private fun requestHighRefreshRate() {
+        val d = display ?: return
+        val best = d.supportedModes.maxByOrNull { it.refreshRate } ?: return
+        window.attributes = window.attributes.apply {
+            preferredDisplayModeId = best.modeId
         }
     }
 
     // ========================================================================
-    // High-Frequency 165Hz TUI Surface with Original Termux Native Selection
+    // Event-Driven 165Hz TUI Surface + ColorOS 17 Native Selection Renderer
     // ========================================================================
     inner class TerminalSurface(context: Context) : View(context) {
 
         private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
         private val bgPaint = Paint()
         private val graphicPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val wavePath = Path()
         private val baseTypeface: Typeface
 
@@ -613,19 +538,35 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         private var scrollAccum = 0f
 
         private var cursorBlinkOn = true
-        private var lastBlinkNs = 0L
+        private var activityResumed = false
 
         private val bgRunsBuf = IntArray(512 * 3)
         private val glyphRunsBuf = IntArray(512 * 4)
         private val charBuf = CharArray(2)
+        private val selGeomBuf = FloatArray(14)
 
         private var rowNodes: Array<RenderNode?>? = null
         private var rowNodesValid: BooleanArray? = null
         private var cachedScrollOffset = Int.MIN_VALUE
 
+        private var actionMode: ActionMode? = null
+        private val handleRadiusPx = dpF(6.5f)
+        private val handleInnerRadiusPx = dpF(4.7f)
+        private val handleStemWidthPx = dpF(2.2f)
+
         private val gestureDetector: GestureDetector
         private val scaleDetector: ScaleGestureDetector
-        internal val selectionController: TextSelectionController
+
+        private val blinkRunnable = object : Runnable {
+            override fun run() {
+                if (!activityResumed) return
+                if (scrollOffset == 0 && !nativeIsSelectingText()) {
+                    cursorBlinkOn = !cursorBlinkOn
+                    postInvalidateOnAnimation()
+                }
+                postDelayed(this, 530L)
+            }
+        }
 
         init {
             isFocusable = true
@@ -644,13 +585,11 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
 
             updateMetrics(false)
 
-            selectionController = TextSelectionController(this)
-
             gestureDetector = GestureDetector(
                 context,
                 object : GestureDetector.SimpleOnGestureListener() {
                     override fun onSingleTapUp(e: MotionEvent): Boolean {
-                        if (selectionController.isActive) {
+                        if (nativeIsSelectingText()) {
                             stopTextSelection()
                             return true
                         }
@@ -659,7 +598,7 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                         imm?.showSoftInput(this@TerminalSurface, 0)
 
                         val modes = nativeGetModesMask()
-                        if ((modes and 1) != 0) {
+                        if ((modes and 8) != 0) { // MODE_MOUSE_TRACKING
                             val col = (e.x / cellWidth).toInt() + 1
                             val row = (e.y / cellHeight).toInt() + 1
                             nativeSendMouse(0, col, row, true)
@@ -671,7 +610,11 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                     override fun onLongPress(e: MotionEvent) {
                         if (scaleDetector.isInProgress) return
                         performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                        startTextSelection(e)
+                        val col = (e.x / cellWidth).toInt().coerceIn(0, max(0, cols - 1))
+                        val row = (e.y / cellHeight).toInt().coerceIn(0, max(0, rows - 1))
+                        nativeStartTextSelection(scrollOffset, col, row)
+                        showColorOsFloatingActionMode()
+                        invalidateAllRows()
                     }
 
                     override fun onScroll(
@@ -687,6 +630,7 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                             scrollAccum -= deltaRows * cellHeight
                             val maxSb = nativeGetActiveScrollback()
                             scrollOffset = (scrollOffset - deltaRows).coerceIn(0, maxSb)
+                            actionMode?.invalidateContentRect()
                             invalidateAllRows()
                         }
                         return true
@@ -720,30 +664,106 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
             )
         }
 
-        internal fun getColumnAndRow(event: MotionEvent, adjustForFirstCharacter: Boolean): IntArray {
-            var column = (event.x / cellWidth).toInt()
-            var row = ((event.y - paddingTop) / cellHeight).toInt()
-            if (adjustForFirstCharacter && column > 0) {
-                column--
-            }
-            column = column.coerceIn(0, max(0, cols - 1))
-            row = row.coerceIn(0, max(0, rows - 1))
-            return intArrayOf(column, row)
+        internal fun onActivityResume() {
+            activityResumed = true
+            removeCallbacks(blinkRunnable)
+            postDelayed(blinkRunnable, 530L)
+            postInvalidateOnAnimation()
         }
 
-        internal fun startTextSelection(event: MotionEvent) {
-            selectionController.show(event)
-            invalidateAllRows()
+        internal fun onActivityPause() {
+            activityResumed = false
+            removeCallbacks(blinkRunnable)
+            stopTextSelection()
+        }
+
+        private fun showColorOsFloatingActionMode() {
+            actionMode?.finish()
+            val callback = object : ActionMode.Callback2() {
+                override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                    val show = MenuItem.SHOW_AS_ACTION_IF_ROOM or MenuItem.SHOW_AS_ACTION_WITH_TEXT
+                    menu.add(Menu.NONE, ITEM_COPY, Menu.NONE, "Копировать").setShowAsAction(show)
+                    menu.add(Menu.NONE, ITEM_PASTE, Menu.NONE, "Вставить")
+                        .setEnabled(hasClipboardText())
+                        .setShowAsAction(show)
+                    menu.add(Menu.NONE, ITEM_SELECT_ALL, Menu.NONE, "Выбрать всё").setShowAsAction(show)
+                    menu.add(Menu.NONE, ITEM_SHARE, Menu.NONE, "Поделиться")
+                        .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+                    return true
+                }
+
+                override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
+                    menu.findItem(ITEM_PASTE)?.isEnabled = hasClipboardText()
+                    return true
+                }
+
+                override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+                    when (item.itemId) {
+                        ITEM_COPY -> {
+                            copyToClipboard(nativeGetSelectedText(), true)
+                            stopTextSelection()
+                        }
+                        ITEM_PASTE -> {
+                            stopTextSelection()
+                            pasteFromClipboard()
+                        }
+                        ITEM_SELECT_ALL -> {
+                            nativeSelectAll(scrollOffset)
+                            invalidateAllRows()
+                            actionMode?.invalidateContentRect()
+                        }
+                        ITEM_SHARE -> {
+                            val selected = nativeGetSelectedText()
+                            stopTextSelection()
+                            if (selected.isNotEmpty()) {
+                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, selected)
+                                }
+                                startActivity(Intent.createChooser(sendIntent, "Поделиться текстом"))
+                            }
+                        }
+                    }
+                    return true
+                }
+
+                override fun onDestroyActionMode(mode: ActionMode) {}
+
+                override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
+                    if (nativeGetSelectionGeometryPx(
+                            scrollOffset,
+                            cellWidth,
+                            cellHeight,
+                            width.toFloat(),
+                            height.toFloat(),
+                            handleRadiusPx,
+                            selGeomBuf
+                        )
+                    ) {
+                        outRect.set(
+                            selGeomBuf[10].roundToInt(),
+                            selGeomBuf[11].roundToInt(),
+                            selGeomBuf[12].roundToInt(),
+                            selGeomBuf[13].roundToInt()
+                        )
+                    } else {
+                        outRect.set(0, 0, width, height)
+                    }
+                }
+            }
+            actionMode = startActionMode(callback, ActionMode.TYPE_FLOATING)
         }
 
         internal fun stopTextSelection(): Boolean {
-            if (!selectionController.isActive && !nativeIsSelectingText()) return false
-            val stopped = selectionController.hide()
+            actionMode?.finish()
+            actionMode = null
+            if (!nativeIsSelectingText()) return false
+            val stopped = nativeStopTextSelection()
             invalidateAllRows()
             return stopped
         }
 
-        internal fun isSelectingText(): Boolean = selectionController.isActive
+        internal fun isSelectingText(): Boolean = nativeIsSelectingText()
 
         private fun updateMetrics(forceRebuildCache: Boolean) {
             val px = TypedValue.applyDimension(
@@ -766,38 +786,13 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         internal fun resetScrollAndBlink() {
             scrollOffset = 0
             cursorBlinkOn = true
-            lastBlinkNs = System.nanoTime()
+            removeCallbacks(blinkRunnable)
+            if (activityResumed) postDelayed(blinkRunnable, 530L)
             invalidateAllRows()
-        }
-
-        internal fun updateCursorBlink(nowNs: Long): Boolean {
-            if (nowNs - lastBlinkNs >= 530_000_000L) {
-                lastBlinkNs = nowNs
-                cursorBlinkOn = !cursorBlinkOn
-                return true
-            }
-            return false
         }
 
         internal fun invalidateAllRows() {
             rowNodesValid?.fill(false)
-            postInvalidateOnAnimation()
-        }
-
-        internal fun invalidateDirtyRows(checkEngineDirty: Boolean) {
-            val valid = rowNodesValid
-            if (valid != null && checkEngineDirty) {
-                if (scrollOffset != cachedScrollOffset) {
-                    valid.fill(false)
-                } else {
-                    for (r in 0 until min(rows, valid.size)) {
-                        if (nativeIsRowDirty(r)) {
-                            valid[r] = false
-                        }
-                    }
-                    nativeClearDirtyFlags()
-                }
-            }
             postInvalidateOnAnimation()
         }
 
@@ -828,11 +823,12 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         override fun onDraw(canvas: Canvas) {
             canvas.drawColor(COLOR_AMOLED_BG)
 
-            if (nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir) != 2) {
+            val bootState = nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
+            if (bootState != 2) {
                 textPaint.color = COLOR_ACCENT
                 textPaint.typeface = baseTypeface
                 canvas.drawText(
-                    "⚡ Инициализация среды Termuxx (C++23 + Latest Packages)...",
+                    "⚡ Инициализация среды Termuxx (Android 17 / C++23)...",
                     dp(16).toFloat(),
                     height / 2f,
                     textPaint
@@ -840,48 +836,71 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                 return
             }
 
-            val useRenderNode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && canvas.isHardwareAccelerated
-            val nodes = rowNodes
-            val valid = rowNodesValid
-            if (useRenderNode && (nodes == null || valid == null || nodes.size != rows)) {
-                rowNodes = arrayOfNulls(rows)
-                rowNodesValid = BooleanArray(rows)
+            if (nativeGetSessionCount() == 0) {
+                nativeNewSession(
+                    false,
+                    max(5, rows),
+                    max(10, cols),
+                    cellWidth.roundToInt(),
+                    cellHeight.roundToInt()
+                )
+                rebuildTabs()
+                rowNodesValid?.fill(false)
             }
+
+            val oscClip = nativeConsumeOsc52Clipboard()
+            if (!oscClip.isNullOrEmpty()) {
+                copyToClipboard(oscClip, false)
+            }
+
+            val engineDirty = nativeConsumeFrameDirty()
+            val nodes = rowNodes ?: arrayOfNulls<RenderNode>(rows).also { rowNodes = it }
+            val valid = rowNodesValid ?: BooleanArray(rows).also { rowNodesValid = it }
 
             if (scrollOffset != cachedScrollOffset) {
-                rowNodesValid?.fill(false)
+                valid.fill(false)
                 cachedScrollOffset = scrollOffset
+            } else if (engineDirty) {
+                for (r in 0 until min(rows, valid.size)) {
+                    if (nativeIsRowDirty(r)) {
+                        valid[r] = false
+                    }
+                }
+                nativeClearDirtyFlags()
             }
 
-            for (r in 0 until rows) {
-                val top = r * cellHeight
-                if (useRenderNode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val rNodes = rowNodes!!
-                    val rValid = rowNodesValid!!
-                    var node = rNodes[r]
+            if (canvas.isHardwareAccelerated) {
+                val rowHeightPx = ceil(cellHeight.toDouble()).toInt()
+                for (r in 0 until rows) {
+                    val top = r * cellHeight
+                    var node = nodes[r]
                     if (node == null) {
                         node = RenderNode("row_$r")
-                        rNodes[r] = node
-                        rValid[r] = false
+                        nodes[r] = node
+                        valid[r] = false
                     }
-                    if (!rValid[r] || !node.hasDisplayList()) {
-                        node.setPosition(0, 0, width, ceil(cellHeight.toDouble()).toInt())
+                    if (!valid[r] || !node.hasDisplayList()) {
+                        node.setPosition(0, 0, width, rowHeightPx)
                         val rc = node.beginRecording()
                         drawSingleRow(rc, r, 0f)
                         node.endRecording()
-                        rValid[r] = true
+                        valid[r] = true
                     }
                     canvas.save()
                     canvas.translate(0f, top)
                     canvas.drawRenderNode(node)
                     canvas.restore()
-                } else {
-                    drawSingleRow(canvas, r, top)
+                }
+            } else {
+                for (r in 0 until rows) {
+                    drawSingleRow(canvas, r, r * cellHeight)
                 }
             }
 
+            val selecting = nativeIsSelectingText()
+
             // Draw Cursor (DECSCUSR) when at bottom of scrollback and not selecting text
-            if (scrollOffset == 0 && !selectionController.isActive) {
+            if (scrollOffset == 0 && !selecting) {
                 val cursorState = nativeGetCursorState()
                 if (cursorState >= 0) {
                     val shape = (cursorState ushr 29) and 3
@@ -900,10 +919,59 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                 }
             }
 
-            // Keep native selection handles and floating ActionMode synchronized with viewport
-            if (selectionController.isActive) {
-                selectionController.render()
+            // Draw Native ColorOS 17 Selection Handles (Top-circle left stem + Bottom-circle right stem)
+            if (selecting && nativeGetSelectionGeometryPx(
+                    scrollOffset,
+                    cellWidth,
+                    cellHeight,
+                    width.toFloat(),
+                    height.toFloat(),
+                    handleRadiusPx,
+                    selGeomBuf
+                )
+            ) {
+                drawColorOs17Handle(
+                    canvas,
+                    selGeomBuf[0],
+                    selGeomBuf[1],
+                    selGeomBuf[2],
+                    selGeomBuf[3],
+                    selGeomBuf[4]
+                )
+                drawColorOs17Handle(
+                    canvas,
+                    selGeomBuf[5],
+                    selGeomBuf[6],
+                    selGeomBuf[7],
+                    selGeomBuf[8],
+                    selGeomBuf[9]
+                )
             }
+        }
+
+        private fun drawColorOs17Handle(
+            canvas: Canvas,
+            stemX: Float,
+            stemTopY: Float,
+            stemBotY: Float,
+            circleX: Float,
+            circleY: Float
+        ) {
+            if (stemBotY < -handleRadiusPx * 2f || stemTopY > height + handleRadiusPx * 2f) return
+
+            // Vertical stem along character cell edge
+            handlePaint.style = Paint.Style.STROKE
+            handlePaint.strokeWidth = handleStemWidthPx
+            handlePaint.color = COLOR_HANDLE_STEM
+            canvas.drawLine(stemX, stemTopY, stemX, stemBotY, handlePaint)
+
+            // Outer gray ring + inner white circle (ColorOS 17 Lollipop handle)
+            handlePaint.style = Paint.Style.FILL
+            handlePaint.color = COLOR_HANDLE_RING
+            canvas.drawCircle(circleX, circleY, handleRadiusPx, handlePaint)
+
+            handlePaint.color = COLOR_HANDLE_FILL
+            canvas.drawCircle(circleX, circleY, handleInnerRadiusPx, handlePaint)
         }
 
         private fun drawSingleRow(rc: Canvas, r: Int, top: Float) {
@@ -931,28 +999,44 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                 val flags = glyphRunsBuf[base + 3]
                 val x = col * cellWidth
 
-                if (!drawProceduralBoxOrBlock(rc, cp, x, top, cellWidth, cellHeight, fg)) {
-                    val styleBits = flags and 3
-                    if (styleBits != lastFlags) {
-                        lastFlags = styleBits
-                        val style = when {
-                            (styleBits and 3) == 3 -> Typeface.BOLD_ITALIC
-                            (styleBits and 1) != 0 -> Typeface.BOLD
-                            (styleBits and 2) != 0 -> Typeface.ITALIC
-                            else -> Typeface.NORMAL
-                        }
-                        textPaint.typeface = Typeface.create(baseTypeface, style)
-                    }
-                    textPaint.color = fg
-                    val charCount = Character.toChars(cp, charBuf, 0)
-                    rc.drawText(charBuf, 0, charCount, x, baseY, textPaint)
+                // C++23 packed procedural Box-Drawing / Block Element rectangle
+                if (cp == -1) {
+                    val x0 = (flags ushr 24) and 0xFF
+                    val y0 = (flags ushr 16) and 0xFF
+                    val x1 = (flags ushr 8) and 0xFF
+                    val y1 = flags and 0xFF
+                    graphicPaint.color = fg
+                    graphicPaint.style = Paint.Style.FILL
+                    rc.drawRect(
+                        x + cellWidth * (x0 * 0.0625f),
+                        top + cellHeight * (y0 * 0.0625f),
+                        x + cellWidth * (x1 * 0.0625f),
+                        top + cellHeight * (y1 * 0.0625f),
+                        graphicPaint
+                    )
+                    continue
                 }
 
-                // Underline / Double / Undercurl
-                if ((flags and 4) != 0) {
+                val styleBits = flags and 5 // FLAG_BOLD (1) | FLAG_ITALIC (4)
+                if (styleBits != lastFlags) {
+                    lastFlags = styleBits
+                    val style = when {
+                        (styleBits and 5) == 5 -> Typeface.BOLD_ITALIC
+                        (styleBits and 1) != 0 -> Typeface.BOLD
+                        (styleBits and 4) != 0 -> Typeface.ITALIC
+                        else -> Typeface.NORMAL
+                    }
+                    textPaint.typeface = Typeface.create(baseTypeface, style)
+                }
+                textPaint.color = fg
+                val charCount = Character.toChars(cp, charBuf, 0)
+                rc.drawText(charBuf, 0, charCount, x, baseY, textPaint)
+
+                // Underline (8) / Undercurl (1024) / Double Underline (2048)
+                if ((flags and (8 or 1024 or 2048)) != 0) {
                     graphicPaint.color = fg
                     graphicPaint.strokeWidth = max(1.5f, cellHeight * 0.05f)
-                    if ((flags and 2048) != 0) {
+                    if ((flags and 1024) != 0) {
                         graphicPaint.style = Paint.Style.STROKE
                         wavePath.reset()
                         val wy = bottom - graphicPaint.strokeWidth * 1.5f
@@ -962,7 +1046,7 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                         wavePath.quadTo(x + cellWidth * 0.75f, wy + amp, x + cellWidth, wy)
                         rc.drawPath(wavePath, graphicPaint)
                         graphicPaint.style = Paint.Style.FILL
-                    } else if ((flags and 4096) != 0) {
+                    } else if ((flags and 2048) != 0) {
                         val u1 = bottom - graphicPaint.strokeWidth * 3f
                         val u2 = bottom - graphicPaint.strokeWidth
                         rc.drawLine(x, u1, x + cellWidth, u1, graphicPaint)
@@ -973,8 +1057,8 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
                     }
                 }
 
-                // Strikethrough
-                if ((flags and 64) != 0) {
+                // Strikethrough (128)
+                if ((flags and 128) != 0) {
                     graphicPaint.color = fg
                     graphicPaint.strokeWidth = max(1.5f, cellHeight * 0.05f)
                     val sy = top + cellHeight * 0.52f
@@ -983,101 +1067,32 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
             }
         }
 
-        private fun drawProceduralBoxOrBlock(
-            c: Canvas,
-            cp: Int,
-            x: Float,
-            y: Float,
-            w: Float,
-            h: Float,
-            color: Int
-        ): Boolean {
-            if (cp < 0x2500 || cp > 0x259F) return false
-            graphicPaint.color = color
-            graphicPaint.style = Paint.Style.FILL
-            val cx = x + w * 0.5f
-            val cy = y + h * 0.5f
-            val lw = max(1.5f, w * 0.12f)
-            val hw = lw * 0.5f
-
-            if (cp in 0x2580..0x259F) {
-                when (cp) {
-                    0x2580 -> { c.drawRect(x, y, x + w, cy, graphicPaint); return true }
-                    0x2581 -> { c.drawRect(x, y + h * 0.875f, x + w, y + h, graphicPaint); return true }
-                    0x2582 -> { c.drawRect(x, y + h * 0.75f, x + w, y + h, graphicPaint); return true }
-                    0x2583 -> { c.drawRect(x, y + h * 0.625f, x + w, y + h, graphicPaint); return true }
-                    0x2584 -> { c.drawRect(x, cy, x + w, y + h, graphicPaint); return true }
-                    0x2585 -> { c.drawRect(x, y + h * 0.375f, x + w, y + h, graphicPaint); return true }
-                    0x2586 -> { c.drawRect(x, y + h * 0.25f, x + w, y + h, graphicPaint); return true }
-                    0x2587 -> { c.drawRect(x, y + h * 0.125f, x + w, y + h, graphicPaint); return true }
-                    0x2588 -> { c.drawRect(x, y, x + w, y + h, graphicPaint); return true }
-                    0x2589 -> { c.drawRect(x, y, x + w * 0.875f, y + h, graphicPaint); return true }
-                    0x258A -> { c.drawRect(x, y, x + w * 0.75f, y + h, graphicPaint); return true }
-                    0x258B -> { c.drawRect(x, y, x + w * 0.625f, y + h, graphicPaint); return true }
-                    0x258C -> { c.drawRect(x, y, cx, y + h, graphicPaint); return true }
-                    0x258D -> { c.drawRect(x, y, x + w * 0.375f, y + h, graphicPaint); return true }
-                    0x258E -> { c.drawRect(x, y, x + w * 0.25f, y + h, graphicPaint); return true }
-                    0x258F -> { c.drawRect(x, y, x + w * 0.125f, y + h, graphicPaint); return true }
-                    0x2590 -> { c.drawRect(cx, y, x + w, y + h, graphicPaint); return true }
-                    0x2594 -> { c.drawRect(x, y, x + w, y + h * 0.125f, graphicPaint); return true }
-                    0x2595 -> { c.drawRect(x + w * 0.875f, y, x + w, y + h, graphicPaint); return true }
-                    else -> return false
-                }
-            }
-
-            when (cp) {
-                0x2500, 0x2501 -> { c.drawRect(x, cy - hw, x + w, cy + hw, graphicPaint); return true }
-                0x2502, 0x2503 -> { c.drawRect(cx - hw, y, cx + hw, y + h, graphicPaint); return true }
-                0x250C, 0x250F, 0x256D -> {
-                    c.drawRect(cx - hw, cy - hw, x + w, cy + hw, graphicPaint)
-                    c.drawRect(cx - hw, cy - hw, cx + hw, y + h, graphicPaint)
-                    return true
-                }
-                0x2510, 0x2513, 0x256E -> {
-                    c.drawRect(x, cy - hw, cx + hw, cy + hw, graphicPaint)
-                    c.drawRect(cx - hw, cy - hw, cx + hw, y + h, graphicPaint)
-                    return true
-                }
-                0x2514, 0x2517, 0x2570 -> {
-                    c.drawRect(cx - hw, cy - hw, x + w, cy + hw, graphicPaint)
-                    c.drawRect(cx - hw, y, cx + hw, cy + hw, graphicPaint)
-                    return true
-                }
-                0x2518, 0x251B, 0x256F -> {
-                    c.drawRect(x, cy - hw, cx + hw, cy + hw, graphicPaint)
-                    c.drawRect(cx - hw, y, cx + hw, cy + hw, graphicPaint)
-                    return true
-                }
-                0x251C, 0x2523 -> {
-                    c.drawRect(cx - hw, y, cx + hw, y + h, graphicPaint)
-                    c.drawRect(cx - hw, cy - hw, x + w, cy + hw, graphicPaint)
-                    return true
-                }
-                0x2524, 0x252B -> {
-                    c.drawRect(cx - hw, y, cx + hw, y + h, graphicPaint)
-                    c.drawRect(x, cy - hw, cx + hw, cy + hw, graphicPaint)
-                    return true
-                }
-                0x252C, 0x2533 -> {
-                    c.drawRect(x, cy - hw, x + w, cy + hw, graphicPaint)
-                    c.drawRect(cx - hw, cy - hw, cx + hw, y + h, graphicPaint)
-                    return true
-                }
-                0x2534, 0x253B -> {
-                    c.drawRect(x, cy - hw, x + w, cy + hw, graphicPaint)
-                    c.drawRect(cx - hw, y, cx + hw, cy + hw, graphicPaint)
-                    return true
-                }
-                0x253C, 0x254B -> {
-                    c.drawRect(x, cy - hw, x + w, cy + hw, graphicPaint)
-                    c.drawRect(cx - hw, y, cx + hw, cy + hw, graphicPaint)
-                    return true
-                }
-                else -> return false
-            }
-        }
-
         override fun onTouchEvent(event: MotionEvent): Boolean {
+            // Route handle touch dragging directly through C++23 selection engine
+            if (nativeIsSelectingText() && event.pointerCount == 1) {
+                val dragRes = nativeOnSelectionTouchPx(
+                    event.actionMasked,
+                    scrollOffset,
+                    event.x,
+                    event.y,
+                    cellWidth,
+                    cellHeight,
+                    width.toFloat(),
+                    height.toFloat(),
+                    handleRadiusPx
+                )
+                if (dragRes == 1) {
+                    actionMode?.hide(-1)
+                    invalidateAllRows()
+                    return true
+                } else if (dragRes == 2) {
+                    actionMode?.hide(0)
+                    actionMode?.invalidateContentRect()
+                    invalidateAllRows()
+                    return true
+                }
+            }
+
             scaleDetector.onTouchEvent(event)
             if (!scaleDetector.isInProgress) {
                 gestureDetector.onTouchEvent(event)
@@ -1128,7 +1143,7 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         }
 
         override fun onKeyPreIme(keyCode: Int, event: KeyEvent): Boolean {
-            if (keyCode == KeyEvent.KEYCODE_BACK && selectionController.isActive) {
+            if (keyCode == KeyEvent.KEYCODE_BACK && nativeIsSelectingText()) {
                 if (event.action == KeyEvent.ACTION_UP) {
                     stopTextSelection()
                 }
@@ -1138,7 +1153,7 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         }
 
         override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-            if (selectionController.isActive) {
+            if (nativeIsSelectingText()) {
                 if (keyCode == KeyEvent.KEYCODE_BACK) {
                     stopTextSelection()
                     return true
@@ -1168,438 +1183,6 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
             }
             return res != 0 || super.onKeyDown(keyCode, event)
         }
-
-        override fun onKeyMultiple(keyCode: Int, repeatCount: Int, event: KeyEvent): Boolean {
-            if (keyCode == KeyEvent.KEYCODE_UNKNOWN && event.characters != null) {
-                stopTextSelection()
-                nativeSendText(event.characters, false)
-                resetScrollAndBlink()
-                return true
-            }
-            return super.onKeyMultiple(keyCode, repeatCount, event)
-        }
-
-        override fun onWindowVisibilityChanged(visibility: Int) {
-            super.onWindowVisibilityChanged(visibility)
-            if (visibility != VISIBLE) {
-                stopTextSelection()
-            }
-        }
-    }
-
-    // ========================================================================
-    // Original Termux Native System Selection Controller (PopupWindow + ActionMode.TYPE_FLOATING)
-    // ========================================================================
-    inner class TextSelectionController(private val surface: TerminalSurface) :
-        ViewTreeObserver.OnTouchModeChangeListener {
-
-        private val startHandle = SelectionHandleView(surface, this, HANDLE_LEFT)
-        private val endHandle = SelectionHandleView(surface, this, HANDLE_RIGHT)
-        private val handleHeight = max(startHandle.handleHeight, endHandle.handleHeight)
-        private val selectors = IntArray(4)
-
-        internal var isActive = false
-            private set
-        internal var actionMode: ActionMode? = null
-            private set
-
-        fun show(event: MotionEvent) {
-            val colRow = surface.getColumnAndRow(event, true)
-            nativeStartTextSelection(surface.scrollOffset, colRow[0], colRow[1])
-            nativeGetSelectionSelectors(selectors)
-
-            startHandle.positionAtCursor(selectors[2], selectors[0], true)
-            endHandle.positionAtCursor(selectors[3] + 1, selectors[1], true)
-
-            setupActionMode()
-            surface.viewTreeObserver.addOnTouchModeChangeListener(this)
-            isActive = true
-        }
-
-        fun hide(): Boolean {
-            if (!isActive && !nativeIsSelectingText()) return false
-            startHandle.hide()
-            endHandle.hide()
-            actionMode?.finish()
-            actionMode = null
-            surface.viewTreeObserver.removeOnTouchModeChangeListener(this)
-            isActive = false
-            return nativeStopTextSelection()
-        }
-
-        fun render() {
-            if (!isActive) return
-            nativeGetSelectionSelectors(selectors)
-            startHandle.positionAtCursor(selectors[2], selectors[0], false)
-            endHandle.positionAtCursor(selectors[3] + 1, selectors[1], false)
-            actionMode?.invalidateContentRect()
-        }
-
-        private fun setupActionMode() {
-            val callback = object : ActionMode.Callback2() {
-                override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
-                    val show = MenuItem.SHOW_AS_ACTION_IF_ROOM or MenuItem.SHOW_AS_ACTION_WITH_TEXT
-                    menu.add(Menu.NONE, ITEM_COPY, Menu.NONE, "Копировать").setShowAsAction(show)
-                    menu.add(Menu.NONE, ITEM_PASTE, Menu.NONE, "Вставить")
-                        .setEnabled(hasClipboardText())
-                        .setShowAsAction(show)
-                    menu.add(Menu.NONE, ITEM_SELECT_ALL, Menu.NONE, "Выбрать всё").setShowAsAction(show)
-                    menu.add(Menu.NONE, ITEM_SHARE, Menu.NONE, "Поделиться")
-                        .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
-                    return true
-                }
-
-                override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
-                    menu.findItem(ITEM_PASTE)?.isEnabled = hasClipboardText()
-                    return true
-                }
-
-                override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
-                    if (!isActive) return true
-                    when (item.itemId) {
-                        ITEM_COPY -> {
-                            val selected = nativeGetSelectedText()
-                            copyToClipboard(selected, true)
-                            surface.stopTextSelection()
-                        }
-                        ITEM_PASTE -> {
-                            surface.stopTextSelection()
-                            pasteFromClipboard()
-                        }
-                        ITEM_SELECT_ALL -> {
-                            nativeSelectAll(surface.scrollOffset)
-                            surface.invalidateAllRows()
-                            render()
-                        }
-                        ITEM_SHARE -> {
-                            val selected = nativeGetSelectedText()
-                            surface.stopTextSelection()
-                            if (!selected.isNullOrEmpty()) {
-                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_TEXT, selected)
-                                }
-                                startActivity(Intent.createChooser(sendIntent, "Поделиться текстом"))
-                            }
-                        }
-                    }
-                    return true
-                }
-
-                override fun onDestroyActionMode(mode: ActionMode) {
-                    // Handled explicitly via hide() so handle dragging can temporarily hide/show toolbar
-                }
-
-                override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
-                    nativeGetSelectionSelectors(selectors)
-                    val selY1 = selectors[0]
-                    val selY2 = selectors[1]
-                    val selX1 = selectors[2]
-                    val selX2 = selectors[3]
-
-                    val x1 = (selX1 * surface.cellWidth).roundToInt()
-                    val x2 = ((selX2 + 1) * surface.cellWidth).roundToInt()
-                    val y1 = ((selY1 + surface.scrollOffset) * surface.cellHeight).roundToInt()
-                    val y2 = ((selY2 + 1 + surface.scrollOffset) * surface.cellHeight).roundToInt()
-
-                    val left = min(x1, x2).coerceIn(0, max(1, view.width))
-                    val right = max(x1, x2).coerceIn(left, max(left + 1, view.width))
-                    val top = (y1 + surface.paddingTop).coerceIn(0, max(1, view.height))
-                    val bottom = (y2 + handleHeight + surface.paddingTop).coerceIn(top, max(top + 1, view.height))
-
-                    outRect.set(left, top, right, bottom)
-                }
-            }
-
-            actionMode = surface.startActionMode(callback, ActionMode.TYPE_FLOATING)
-        }
-
-        fun updatePosition(handle: SelectionHandleView, x: Int, y: Int) {
-            nativeGetSelectionSelectors(selectors)
-            var selY1 = selectors[0]
-            var selY2 = selectors[1]
-            var selX1 = selectors[2]
-            var selX2 = selectors[3]
-
-            var row = (y / surface.cellHeight).toInt()
-            row = row.coerceIn(0, surface.rows - 1)
-            val logicalRow = row - surface.scrollOffset
-
-            var col = (x / surface.cellWidth).toInt()
-            col = col.coerceIn(0, surface.cols - 1)
-
-            val isStart = (handle === startHandle)
-            nativeUpdateSelectionHandle(isStart, col, logicalRow)
-            nativeGetSelectionSelectors(selectors)
-
-            selY1 = selectors[0]
-            selY2 = selectors[1]
-            selX1 = selectors[2]
-            selX2 = selectors[3]
-
-            startHandle.positionAtCursor(selX1, selY1, false)
-            endHandle.positionAtCursor(selX2 + 1, selY2, false)
-            actionMode?.invalidateContentRect()
-            surface.invalidateAllRows()
-        }
-
-        override fun onTouchModeChanged(isInTouchMode: Boolean) {
-            if (!isInTouchMode) {
-                surface.stopTextSelection()
-            }
-        }
-    }
-
-    // ========================================================================
-    // Original Termux SelectionHandleView (PopupWindow with textSelectHandleWindowStyle)
-    // ========================================================================
-    inner class SelectionHandleView(
-        private val surface: TerminalSurface,
-        private val controller: TextSelectionController,
-        private val initialOrientation: Int
-    ) : View(surface.context) {
-
-        private var window: PopupWindow? = null
-        private val leftDrawable: Drawable = context.getDrawable(R.drawable.text_select_handle_left_material)
-            ?: ColorDrawable(0)
-        private val rightDrawable: Drawable = context.getDrawable(R.drawable.text_select_handle_right_material)
-            ?: ColorDrawable(0)
-        private var handleDrawable: Drawable = leftDrawable
-
-        private var isDragging = false
-        private val tempCoords = IntArray(2)
-        private var tempRect: Rect? = null
-
-        private var pointX = 0
-        private var pointY = 0
-        private var touchToWindowOffsetX = 0f
-        private var touchToWindowOffsetY = 0f
-        private var hotspotX = 0f
-        private var touchOffsetY = 0f
-        private var lastParentX = 0
-        private var lastParentY = 0
-
-        internal var handleHeight: Int = 0
-            private set
-        private var handleWidth: Int = 0
-        private var orientation: Int = 0
-        private var lastTime = 0L
-
-        init {
-            setOrientation(initialOrientation)
-        }
-
-        private fun initWindow() {
-            if (window == null) {
-                window = PopupWindow(surface.context, null, android.R.attr.textSelectHandleWindowStyle).apply {
-                    isSplitTouchEnabled = true
-                    isClippingEnabled = false
-                    width = ViewGroup.LayoutParams.WRAP_CONTENT
-                    height = ViewGroup.LayoutParams.WRAP_CONTENT
-                    setBackgroundDrawable(null)
-                    animationStyle = 0
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        windowLayoutType = WindowManager.LayoutParams.TYPE_APPLICATION_SUB_PANEL
-                    }
-                    contentView = this@SelectionHandleView
-                }
-            }
-        }
-
-        fun setOrientation(newOrientation: Int) {
-            orientation = newOrientation
-            var w = 0
-            when (newOrientation) {
-                HANDLE_LEFT -> {
-                    handleDrawable = leftDrawable
-                    w = handleDrawable.intrinsicWidth
-                    hotspotX = (w * 3) / 4f
-                }
-                HANDLE_RIGHT -> {
-                    handleDrawable = rightDrawable
-                    w = handleDrawable.intrinsicWidth
-                    hotspotX = w / 4f
-                }
-            }
-            handleHeight = handleDrawable.intrinsicHeight
-            handleWidth = w
-            touchOffsetY = -handleHeight * 0.3f
-            invalidate()
-        }
-
-        fun show() {
-            if (!isPositionVisible()) {
-                hide()
-                return
-            }
-            removeFromParent()
-            initWindow()
-            invalidate()
-
-            val coords = tempCoords
-            surface.getLocationInWindow(coords)
-            coords[0] += pointX
-            coords[1] += pointY
-
-            window?.showAtLocation(surface, Gravity.NO_GRAVITY, coords[0], coords[1])
-        }
-
-        fun hide() {
-            isDragging = false
-            window?.dismiss()
-            removeFromParent()
-            window = null
-        }
-
-        fun removeFromParent() {
-            if (!isShowing) {
-                (parent as? ViewGroup)?.removeView(this)
-            }
-        }
-
-        fun positionAtCursor(cx: Int, logicalCy: Int, forceOrientationCheck: Boolean) {
-            val x = (cx * surface.cellWidth).roundToInt()
-            val y = ((logicalCy + 1 + surface.scrollOffset) * surface.cellHeight).roundToInt()
-            moveTo(x, y, forceOrientationCheck)
-        }
-
-        private fun moveTo(x: Int, y: Int, forceOrientationCheck: Boolean) {
-            val oldHotspotX = hotspotX
-            checkChangedOrientation(x, forceOrientationCheck)
-            pointX = (x - if (isShowing) oldHotspotX else hotspotX).roundToInt()
-            pointY = y + surface.paddingTop
-
-            if (isPositionVisible()) {
-                var coords: IntArray? = null
-                if (isShowing) {
-                    coords = tempCoords
-                    surface.getLocationInWindow(coords)
-                    val x1 = coords[0] + pointX
-                    val y1 = coords[1] + pointY
-                    window?.update(x1, y1, width, height)
-                } else {
-                    show()
-                }
-
-                if (isDragging) {
-                    if (coords == null) {
-                        coords = tempCoords
-                        surface.getLocationInWindow(coords)
-                    }
-                    if (coords[0] != lastParentX || coords[1] != lastParentY) {
-                        touchToWindowOffsetX += (coords[0] - lastParentX).toFloat()
-                        touchToWindowOffsetY += (coords[1] - lastParentY).toFloat()
-                        lastParentX = coords[0]
-                        lastParentY = coords[1]
-                    }
-                }
-            } else {
-                hide()
-            }
-        }
-
-        fun changeOrientation(newOrientation: Int) {
-            if (orientation != newOrientation) {
-                setOrientation(newOrientation)
-            }
-        }
-
-        private fun checkChangedOrientation(posX: Int, force: Boolean) {
-            if (!isDragging && !force) return
-            val millis = SystemClock.currentThreadTimeMillis()
-            if (millis - lastTime < 50 && !force) return
-            lastTime = millis
-
-            val left = surface.left
-            val right = surface.width
-            val top = surface.top
-            val bottom = surface.height
-
-            val rect = tempRect ?: Rect().also { tempRect = it }
-            rect.set(left, top, right, bottom)
-            if (!surface.getGlobalVisibleRect(rect)) return
-
-            if (posX - handleWidth < rect.left) {
-                changeOrientation(HANDLE_RIGHT)
-            } else if (posX + handleWidth > rect.right) {
-                changeOrientation(HANDLE_LEFT)
-            } else {
-                changeOrientation(initialOrientation)
-            }
-        }
-
-        private fun isPositionVisible(): Boolean {
-            if (isDragging) return true
-            val left = 0
-            val right = surface.width
-            val top = 0
-            val bottom = surface.height
-
-            val rect = tempRect ?: Rect().also { tempRect = it }
-            rect.set(left + surface.paddingLeft, top + surface.paddingTop, right, bottom)
-
-            val coords = tempCoords
-            surface.getLocationInWindow(coords)
-            val posX = coords[0] + pointX + hotspotX.toInt()
-            val posY = coords[1] + pointY
-
-            // Convert window-local bounds
-            val winLeft = coords[0]
-            val winTop = coords[1]
-            val winRight = coords[0] + right
-            val winBottom = coords[1] + bottom
-
-            return posX in winLeft..winRight && posY in winTop..winBottom
-        }
-
-        override fun onDraw(c: Canvas) {
-            val width = handleDrawable.intrinsicWidth
-            val height = handleDrawable.intrinsicHeight
-            handleDrawable.setBounds(0, 0, width, height)
-            handleDrawable.draw(c)
-        }
-
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            setMeasuredDimension(handleDrawable.intrinsicWidth, handleDrawable.intrinsicHeight)
-        }
-
-        override fun onTouchEvent(event: MotionEvent): Boolean {
-            surface.getLocationOnScreen(tempCoords)
-            val parentScreenX = tempCoords[0]
-            val parentScreenY = tempCoords[1]
-            val rawX = event.rawX
-            val rawY = event.rawY
-
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    touchToWindowOffsetX = rawX - (parentScreenX + pointX)
-                    touchToWindowOffsetY = rawY - (parentScreenY + pointY)
-                    lastParentX = parentScreenX
-                    lastParentY = parentScreenY
-                    isDragging = true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val newPosX = rawX - touchToWindowOffsetX - parentScreenX
-                    val newPosY = rawY - touchToWindowOffsetY - parentScreenY + touchOffsetY
-
-                    controller.actionMode?.hide(-1)
-                    controller.updatePosition(
-                        this,
-                        (newPosX + hotspotX).roundToInt(),
-                        newPosY.roundToInt()
-                    )
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    isDragging = false
-                    controller.actionMode?.hide(0)
-                    controller.actionMode?.invalidateContentRect()
-                }
-            }
-            return true
-        }
-
-        val isShowing: Boolean
-            get() = window?.isShowing == true
     }
 
     companion object {
@@ -1611,6 +1194,7 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
             }
         }
 
+        @JvmStatic external fun nativeRegisterSurface(surface: View?)
         @JvmStatic external fun nativeInitAndPollBootstrap(nativeLibDir: String): Int
         @JvmStatic external fun nativeNewSession(asRoot: Boolean, rows: Int, cols: Int, cellW: Int, cellH: Int): Int
         @JvmStatic external fun nativeSwitchSession(index: Int)
@@ -1641,93 +1225,30 @@ class TermuxActivity : Activity(), Choreographer.FrameCallback {
         @JvmStatic external fun nativeGetTranscriptText(): String
         @JvmStatic external fun nativeStartTextSelection(scrollOffset: Int, screenCol: Int, screenRow: Int)
         @JvmStatic external fun nativeUpdateSelectionHandle(isStartHandle: Boolean, col: Int, logicalY: Int)
+        @JvmStatic external fun nativeOnSelectionTouchPx(
+            action: Int,
+            scrollOffset: Int,
+            touchX: Float,
+            touchY: Float,
+            cellW: Float,
+            cellH: Float,
+            viewW: Float,
+            viewH: Float,
+            radiusPx: Float
+        ): Int
+        @JvmStatic external fun nativeGetSelectionGeometryPx(
+            scrollOffset: Int,
+            cellW: Float,
+            cellH: Float,
+            viewW: Float,
+            viewH: Float,
+            radiusPx: Float,
+            outGeom: FloatArray
+        ): Boolean
         @JvmStatic external fun nativeStopTextSelection(): Boolean
         @JvmStatic external fun nativeIsSelectingText(): Boolean
         @JvmStatic external fun nativeSelectAll(scrollOffset: Int)
         @JvmStatic external fun nativeGetSelectionSelectors(outSelectors: IntArray)
         @JvmStatic external fun nativeGetSelectedText(): String
     }
-}
-
-// ========================================================================
-// Minimal Keep-Alive Foreground Service (WakeLock + WifiLock)
-// ========================================================================
-class KeepAliveService : Service() {
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
-
-    override fun onCreate() {
-        super.onCreate()
-        val chId = "termuxx_session_channel"
-        val nm = getSystemService(NOTIFICATION_SERVICE) as? NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && nm != null) {
-            val ch = NotificationChannel(chId, "Termuxx Core", NotificationManager.IMPORTANCE_LOW).apply {
-                setShowBadge(false)
-            }
-            nm.createNotificationChannel(ch)
-        }
-
-        val pi = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, TermuxActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        val nb = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, chId)
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-        }
-
-        nb.setContentTitle("Termuxx (Kotlin + C++23)")
-            .setContentText("Active terminal sessions running")
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentIntent(pi)
-            .setOngoing(true)
-
-        try {
-            startForeground(1, nb.build())
-        } catch (_: Throwable) {
-        }
-
-        try {
-            val pm = getSystemService(POWER_SERVICE) as? PowerManager
-            if (pm != null) {
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Termuxx::CoreLock").apply {
-                    setReferenceCounted(false)
-                    acquire()
-                }
-            }
-            val wm = applicationContext.getSystemService(WIFI_SERVICE) as? WifiManager
-            if (wm != null) {
-                @Suppress("DEPRECATION")
-                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                } else {
-                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
-                }
-                wifiLock = wm.createWifiLock(mode, "Termuxx::WifiLock").apply {
-                    setReferenceCounted(false)
-                    acquire()
-                }
-            }
-        } catch (_: Throwable) {
-        }
-    }
-
-    override fun onDestroy() {
-        try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-        } catch (_: Throwable) {
-        }
-        try {
-            if (wifiLock?.isHeld == true) wifiLock?.release()
-        } catch (_: Throwable) {
-        }
-        super.onDestroy()
-    }
-
-    override fun onBind(intent: Intent?): IBinder? = null
 }
