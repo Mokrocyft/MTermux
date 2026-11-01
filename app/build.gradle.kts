@@ -93,7 +93,7 @@ android {
 }
 
 dependencies {
-    // Zero external Java libraries — 100% pure Android framework + C++23 native core!
+    // Zero external Java libraries — 100% pure Kotlin + Android framework + C++23 native core!
 }
 
 abstract class DownloadLatestBootstrapTask : DefaultTask() {
@@ -205,7 +205,12 @@ tasks.withType<JavaCompile>().configureEach {
 }
 
 tasks.configureEach {
-    if (name.startsWith("configureCMake") || name.startsWith("buildCMake") || name.startsWith("externalNativeBuild") || name.startsWith("merge")) {
+    if (name.startsWith("compile") && name.endsWith("Kotlin") ||
+        name.startsWith("configureCMake") ||
+        name.startsWith("buildCMake") ||
+        name.startsWith("externalNativeBuild") ||
+        name.startsWith("merge")
+    ) {
         dependsOn(downloadBootstraps, downloadJetBrainsMono)
     }
 }

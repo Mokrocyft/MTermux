@@ -5,14 +5,14 @@
  * 1. Native C++23 ZIP Decompressor (zlib) + Dual 16-Byte Relocator ("com.termux/files" & "com.termux/cache")
  * 2. Silent Second-Stage Bootstrap Initializer + APT Cache Configurator
  * 3. Logical-Line Reflow Engine on Resize/Pinch-Zoom (unwraps & re-wraps scrollback + screen lines dynamically)
- * 4. Modern 2026 TUI Standards:
+ * 4. Original Termux Logical-Row Text Selection Engine (mSelX1, mSelY1, mSelX2, mSelY2 across scrollback & screen)
+ * 5. Modern 2026 TUI Standards:
  *    - Synchronized Output (?2026h / ?2026l tear-free rendering)
  *    - DECSCUSR Cursor Shapes (CSI Ps SP q: Block, Underline, Vertical Beam)
  *    - Sub-parameter SGR (4:0..4:5 undercurl FLAG_UNDERCURL & double-underline, 58;2;r;g;b underline color)
  *    - OSC 52 Base64 System Clipboard Integration (works inside tmux, neovim, helix, ssh)
  *    - XTVERSION (CSI > q), Window/Pixel Size Reporting (CSI 14 t / 18 t)
- * 5. Customizable Extra-Keys Engine (supports any key label, F1-F12, arrows, CTRL+X macros, sticky CTRL/ALT)
- * 6. Native Viewport Text Exporter for Android System Text Selection
+ * 6. Customizable Extra-Keys Engine (supports any key label, F1-F12, arrows, CTRL+X macros, sticky CTRL/ALT)
  */
 
 #ifndef _GNU_SOURCE
@@ -99,9 +99,11 @@ constexpr int MODE_AUTOWRAP        = 1 << 6;
 constexpr int MODE_SYNC_OUTPUT     = 1 << 7;
 constexpr int MODE_FOCUS_EVENTS    = 1 << 8;
 
-// Pure Dark AMOLED Palette (#000000 background, #E5E9F0 foreground)
-constexpr uint32_t DEFAULT_FG = 0xFFE5E9F0u;
-constexpr uint32_t DEFAULT_BG = 0xFF000000u;
+// Pure Dark AMOLED Palette (#000000 background, #E5E9F0 foreground, #264F78 selection highlight)
+constexpr uint32_t DEFAULT_FG   = 0xFFE5E9F0u;
+constexpr uint32_t DEFAULT_BG   = 0xFF000000u;
+constexpr uint32_t SELECTION_BG = 0xFF264F78u;
+constexpr uint32_t SELECTION_FG = 0xFFFFFFFFu;
 
 // Android KeyEvent constants
 constexpr int AKEYCODE_ENTER        = 66;
@@ -621,6 +623,16 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     unlink("/data/data/com.termuxx/file/usr/etc/motd");
 }
 
+static bool isWordChar(uint32_t cp) noexcept {
+    if (cp <= 0x20) return false;
+    if (cp < 0x7F) {
+        const char ch = static_cast<char>(cp);
+        return isalnum(static_cast<unsigned char>(ch)) ||
+               ch == '_' || ch == '-' || ch == '.' || ch == '/' || ch == ':' || ch == '~' || ch == '+' || ch == '@' || ch == '?' || ch == '=' || ch == '&';
+    }
+    return true;
+}
+
 class NeoTerminalEngine {
 public:
     mutable pthread_mutex_t mMutex;
@@ -656,12 +668,18 @@ public:
     int mModes = MODE_AUTOWRAP;
     uint32_t mPalette[256];
 
+    // Original Termux Logical-Row Text Selection State:
+    // mSelY1 / mSelY2 are logical row indices: [0 .. mRows-1] for primary screen, [-mScrollbackCount .. -1] for scrollback
+    bool mSelActive = false;
+    int mSelX1 = -1, mSelY1 = -1;
+    int mSelX2 = -1, mSelY2 = -1;
+
     enum class State { NORMAL, ESC, CSI, OSC, OSC_ESC, CHARSET };
     State mState = State::NORMAL;
     char mCsiPrefix = 0;
     char mCsiIntermediate = 0;
     std::vector<int> mCsiParams;
-    std::vector<bool> mCsiColonSubparam; // true if parameter was preceded by ':' (e.g. 4:3 undercurl)
+    std::vector<bool> mCsiColonSubparam;
     bool mNextParamIsSub = false;
     int mCurParam = -1;
     std::string mOscBuffer;
@@ -741,6 +759,136 @@ public:
         mFrameDirty.store(true, std::memory_order_release);
     }
 
+    const Row& getRowByLogicalY(int logicalY) const noexcept {
+        const auto& grid = (mModes & MODE_ALT_SCREEN) ? mAltGrid : mPrimaryGrid;
+        if ((mModes & MODE_ALT_SCREEN) || logicalY >= 0 || mScrollbackCount == 0) {
+            int r = std::clamp(logicalY, 0, mRows - 1);
+            return grid[static_cast<size_t>(r)];
+        }
+        int sbLogical = std::clamp(mScrollbackCount + logicalY, 0, mScrollbackCount - 1);
+        int sbPhysical = (mScrollbackHead + sbLogical) % mMaxScrollback;
+        return mScrollback[static_cast<size_t>(sbPhysical)];
+    }
+
+    const Row& getVisualRow(int scrollOffset, int screenRow) const noexcept {
+        int clampedOffset = (mModes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
+        return getRowByLogicalY(screenRow - clampedOffset);
+    }
+
+    bool isLogicalCellSelected(int logicalY, int col) const noexcept {
+        if (!mSelActive) return false;
+        if (logicalY < mSelY1 || logicalY > mSelY2) return false;
+        if (mSelY1 == mSelY2) return col >= mSelX1 && col <= mSelX2;
+        if (logicalY == mSelY1) return col >= mSelX1;
+        if (logicalY == mSelY2) return col <= mSelX2;
+        return true;
+    }
+
+    void startSelectionAt(int scrollOffset, int screenCol, int screenRow) noexcept {
+        lock();
+        int clampedOffset = (mModes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
+        int logicalY = std::clamp(screenRow, 0, mRows - 1) - clampedOffset;
+        int col = std::clamp(screenCol, 0, mCols - 1);
+
+        const Row& row = getRowByLogicalY(logicalY);
+        int x1 = col;
+        int x2 = col;
+        if (col < static_cast<int>(row.cells.size()) && isWordChar(row.cells[static_cast<size_t>(col)].codepoint)) {
+            while (x1 > 0 && isWordChar(row.cells[static_cast<size_t>(x1 - 1)].codepoint)) x1--;
+            while (x2 + 1 < static_cast<int>(row.cells.size()) && isWordChar(row.cells[static_cast<size_t>(x2 + 1)].codepoint)) x2++;
+        }
+
+        mSelX1 = x1;
+        mSelX2 = x2;
+        mSelY1 = logicalY;
+        mSelY2 = logicalY;
+        mSelActive = true;
+        markAllDirty();
+        unlock();
+    }
+
+    void updateSelectionHandle(bool isStartHandle, int col, int logicalY) noexcept {
+        lock();
+        if (!mSelActive) {
+            unlock();
+            return;
+        }
+        int maxSb = (mModes & MODE_ALT_SCREEN) ? 0 : mScrollbackCount;
+        col = std::clamp(col, 0, mCols - 1);
+        logicalY = std::clamp(logicalY, -maxSb, mRows - 1);
+
+        const Row& row = getRowByLogicalY(logicalY);
+        if (isStartHandle) {
+            mSelX1 = col;
+            mSelY1 = logicalY;
+            if (mSelY1 > mSelY2) mSelY1 = mSelY2;
+            if (mSelY1 == mSelY2 && mSelX1 > mSelX2) mSelX1 = mSelX2;
+            if (mSelX1 > 0 && mSelX1 < static_cast<int>(row.cells.size()) &&
+                (row.cells[static_cast<size_t>(mSelX1)].flags & FLAG_WIDE_TRAIL)) {
+                mSelX1--;
+            }
+        } else {
+            mSelX2 = col;
+            mSelY2 = logicalY;
+            if (mSelY1 > mSelY2) mSelY2 = mSelY1;
+            if (mSelY1 == mSelY2 && mSelX1 > mSelX2) mSelX2 = mSelX1;
+            if (mSelX2 + 1 < mCols && mSelX2 < static_cast<int>(row.cells.size()) &&
+                (row.cells[static_cast<size_t>(mSelX2)].flags & FLAG_WIDE_LEAD)) {
+                mSelX2++;
+            }
+        }
+        markAllDirty();
+        unlock();
+    }
+
+    bool stopSelection() noexcept {
+        lock();
+        if (!mSelActive) {
+            unlock();
+            return false;
+        }
+        mSelActive = false;
+        mSelX1 = mSelY1 = mSelX2 = mSelY2 = -1;
+        markAllDirty();
+        unlock();
+        return true;
+    }
+
+    std::string extractSelectedText() const {
+        if (!mSelActive) return "";
+        std::string out;
+        out.reserve(4096);
+
+        for (int y = mSelY1; y <= mSelY2; ++y) {
+            const Row& row = getRowByLogicalY(y);
+            int xStart = (y == mSelY1) ? std::max(0, mSelX1) : 0;
+            int xEnd   = (y == mSelY2) ? std::min<int>(mCols - 1, mSelX2) : (mCols - 1);
+
+            int lastNonSpace = xStart - 1;
+            for (int c = xEnd; c >= xStart; --c) {
+                if (c < static_cast<int>(row.cells.size()) &&
+                    row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
+                    !(row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL)) {
+                    lastNonSpace = c;
+                    break;
+                }
+            }
+            if (y == mSelY2 && lastNonSpace < xEnd && xEnd < static_cast<int>(row.cells.size())) {
+                // Keep explicit trailing selection if on the same single line
+                if (mSelY1 == mSelY2 && lastNonSpace < xStart) lastNonSpace = xEnd;
+            }
+            for (int c = xStart; c <= lastNonSpace; ++c) {
+                const Cell& cell = row.cells[static_cast<size_t>(c)];
+                if (cell.flags & FLAG_WIDE_TRAIL) continue;
+                appendUtf8(out, cell.codepoint);
+            }
+            if (y < mSelY2 && !row.wrapped) {
+                out.push_back('\n');
+            }
+        }
+        return out;
+    }
+
     void reset() noexcept {
         mCurFg = DEFAULT_FG;
         mCurBg = DEFAULT_BG;
@@ -755,18 +903,14 @@ public:
         mModes = MODE_AUTOWRAP;
         mState = State::NORMAL;
         mUtf8BytesNeeded = 0;
+        mSelActive = false;
         for (auto& r : mPrimaryGrid) r.clear();
         for (auto& r : mAltGrid) r.clear();
         mFrameDirty.store(true, std::memory_order_release);
     }
 
-    /*
-     * Dynamic Logical-Line Reflow Engine:
-     * When zooming in or out (newCols != mCols), reconstructs logical lines across
-     * mScrollback and mPrimaryGrid by joining soft-wrapped rows (row.wrapped == true)
-     * and re-wraps them to newCols while tracking the exact cursor position!
-     */
     void reflowPrimaryAndScrollback(int newRows, int newCols) {
+        mSelActive = false;
         int maxActivePrimary = mCursorRow;
         for (int r = mRows - 1; r > mCursorRow; --r) {
             const Row& row = mPrimaryGrid[static_cast<size_t>(r)];
@@ -856,7 +1000,7 @@ public:
                 while (pos < totalCells && dstCol < newCols) {
                     const Cell& cell = logicalLine[pos];
                     if ((cell.flags & FLAG_WIDE_LEAD) && dstCol == newCols - 1) {
-                        break; // Wrap wide char to start of next slice
+                        break;
                     }
                     if (cursorOffsetInLogical >= 0 && !cursorMapped && static_cast<size_t>(cursorOffsetInLogical) == pos) {
                         newCursorGlobalRow = static_cast<int>(outRows.size());
@@ -877,7 +1021,6 @@ public:
             }
         }
 
-        // Rebuild mScrollback and mPrimaryGrid from outRows
         mScrollback.assign(static_cast<size_t>(mMaxScrollback), Row(newCols));
         mScrollbackHead = 0;
         mScrollbackCount = 0;
@@ -969,6 +1112,13 @@ public:
         for (int n = 0; n < count; ++n) {
             if (top == 0 && !(mModes & MODE_ALT_SCREEN)) {
                 pushScrollbackRow(grid[0]);
+                if (mSelActive) {
+                    mSelY1--;
+                    mSelY2--;
+                    if (mSelY1 < -mScrollbackCount) {
+                        mSelActive = false;
+                    }
+                }
             }
             for (int r = top; r < bottom; ++r) {
                 grid[static_cast<size_t>(r)] = std::move(grid[static_cast<size_t>(r + 1)]);
@@ -1104,7 +1254,6 @@ public:
             } else if (p == 3) {
                 mCurFlags |= FLAG_ITALIC;
             } else if (p == 4) {
-                // Check for modern subparameter 4:x (0=off, 1=single, 2=double, 3=undercurl)
                 if (i + 1 < mCsiParams.size() && i + 1 < mCsiColonSubparam.size() && mCsiColonSubparam[i + 1]) {
                     int sub = mCsiParams[++i];
                     mCurFlags &= ~(FLAG_UNDERLINE | FLAG_UNDERCURL | FLAG_DOUBLE_UNDERLINE);
@@ -1163,7 +1312,6 @@ public:
                         else if (isBg) mCurBg = mPalette[idx];
                         i += 2;
                     } else if (mode == 2 && i + 4 < mCsiParams.size()) {
-                        // Handle optional colorspace ID in colon-separated 38:2:cs:R:G:B
                         size_t rIdx = i + 2;
                         if (i + 5 < mCsiParams.size() && i + 2 < mCsiColonSubparam.size() && mCsiColonSubparam[i + 2]) {
                             rIdx = i + 3;
@@ -1215,7 +1363,7 @@ public:
             case 1006:
             case 1016: if (enabled) mModes |= MODE_MOUSE_SGR; else mModes &= ~MODE_MOUSE_SGR; break;
             case 2004: if (enabled) mModes |= MODE_BRACKETED_PASTE; else mModes &= ~MODE_BRACKETED_PASTE; break;
-            case 2026: // Synchronized Output (BSU / ESU)
+            case 2026:
                 if (enabled) {
                     mModes |= MODE_SYNC_OUTPUT;
                 } else {
@@ -1238,16 +1386,14 @@ public:
         };
         auto& grid = activeGrid();
 
-        // DECSCUSR: CSI Ps SP q (Set Cursor Style)
         if (mCsiIntermediate == ' ' && finalByte == 'q') {
             int style = param(0, 1);
-            if (style <= 2) mCursorShape = 0;      // Block
-            else if (style <= 4) mCursorShape = 1; // Underline
-            else if (style <= 6) mCursorShape = 2; // Vertical Beam/Bar
+            if (style <= 2) mCursorShape = 0;
+            else if (style <= 4) mCursorShape = 1;
+            else if (style <= 6) mCursorShape = 2;
             return;
         }
 
-        // XTVERSION: CSI > q
         if (mCsiPrefix == '>' && finalByte == 'q') {
             reply += "\x1bP>|Termuxx-C++23(3.0)\x1b\\";
             return;
@@ -1354,7 +1500,7 @@ public:
                 }
                 break;
             }
-            case 't': { // XTWINOPS: Window size reporting for modern TUIs (yazi, btop, kitty protocol)
+            case 't': {
                 int op = param(0, 0);
                 char buf[64];
                 if (op == 14) {
@@ -1385,7 +1531,6 @@ public:
             mWindowTitle = mOscBuffer.substr(semi + 1);
             mTitleChanged = true;
         } else if (code == 52) {
-            // OSC 52 ; c ; <base64>
             size_t secondSemi = mOscBuffer.find(';', semi + 1);
             if (secondSemi != std::string::npos) {
                 mOsc52Clipboard = decodeBase64(mOscBuffer.substr(secondSemi + 1));
@@ -1516,23 +1661,6 @@ public:
         }
     }
 
-    const Row& getVisualRow(int scrollOffset, int screenRow) const noexcept {
-        const auto& grid = (mModes & MODE_ALT_SCREEN) ? mAltGrid : mPrimaryGrid;
-        if ((mModes & MODE_ALT_SCREEN) || scrollOffset <= 0 || mScrollbackCount == 0) {
-            int r = std::clamp(screenRow, 0, mRows - 1);
-            return grid[static_cast<size_t>(r)];
-        }
-        int clampedOffset = std::min(scrollOffset, mScrollbackCount);
-        int virtualIndex = screenRow - clampedOffset;
-        if (virtualIndex < 0) {
-            int sbLogical = mScrollbackCount + virtualIndex;
-            int sbPhysical = (mScrollbackHead + sbLogical) % mMaxScrollback;
-            return mScrollback[static_cast<size_t>(sbPhysical)];
-        }
-        int r = std::clamp(virtualIndex, 0, mRows - 1);
-        return grid[static_cast<size_t>(r)];
-    }
-
     static void* readerThreadEntry(void* arg) {
         static_cast<NeoTerminalEngine*>(arg)->readerLoop();
         return nullptr;
@@ -1556,7 +1684,6 @@ public:
                 break;
             }
             if (prc == 0) {
-                // Safety flush if synchronized output (?2026h) was left open by TUI
                 if (mModes & MODE_SYNC_OUTPUT) {
                     mFrameDirty.store(true, std::memory_order_release);
                 }
@@ -1858,7 +1985,7 @@ static bool sendKeyCodeInternal(NeoTerminalEngine* engine, int keyCode, int meta
             break;
         case AKEYCODE_PAGE_DOWN:
             if (mod > 1) { snprintf(buf, sizeof(buf), "\x1b[6;%d~", mod); seq = buf; }
-            else seq = appCursor ? "\x1b[6~" : "\x1b[6~";
+            else seq = "\x1b[6~";
             break;
         case AKEYCODE_F1:  seq = "\x1bOP"; break;
         case AKEYCODE_F2:  seq = "\x1bOQ"; break;
@@ -2065,11 +2192,100 @@ Java_com_termuxx_app_TermuxActivity_nativeConsumeOsc52Clipboard(JNIEnv* env, jcl
     return env->NewStringUTF(clip.c_str());
 }
 
-/**
- * C++23 Universal Customizable Extra-Key Dispatcher:
- * Supports any key name configured by the user (ESC, TAB, CTRL, ALT, ▲/UP, ▼/DOWN, ◀/LEFT, ▶/RIGHT,
- * HOME, END, PGUP, PGDN, BKSP, DEL, INS, ENTER, F1..F12, CTRL+C, CTRL+D, CTRL+Z, CTRL+L, or any symbol).
- */
+// ============================================================================
+// Original Termux Native Selection JNI Methods
+// ============================================================================
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeStartTextSelection(
+    JNIEnv* /*env*/, jclass /*clazz*/, jint scrollOffset, jint screenCol, jint screenRow) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    if (eng) {
+        eng->startSelectionAt(scrollOffset, screenCol, screenRow);
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeUpdateSelectionHandle(
+    JNIEnv* /*env*/, jclass /*clazz*/, jboolean isStartHandle, jint col, jint logicalY) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    if (eng) {
+        eng->updateSelectionHandle(isStartHandle == JNI_TRUE, col, logicalY);
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeStopTextSelection(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    bool stopped = eng && eng->stopSelection();
+    pthread_mutex_unlock(&gGlobalMutex);
+    return stopped ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeIsSelectingText(JNIEnv* /*env*/, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    bool active = eng && eng->mSelActive;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return active ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSelectAll(JNIEnv* /*env*/, jclass /*clazz*/, jint scrollOffset) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    if (eng) {
+        eng->lock();
+        int clampedOffset = (eng->mModes & MODE_ALT_SCREEN) ? 0 : std::clamp<int>(scrollOffset, 0, eng->mScrollbackCount);
+        eng->mSelActive = true;
+        eng->mSelY1 = -clampedOffset;
+        eng->mSelX1 = 0;
+        eng->mSelY2 = eng->mRows - 1 - clampedOffset;
+        eng->mSelX2 = eng->mCols - 1;
+        eng->markAllDirty();
+        eng->unlock();
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetSelectionSelectors(JNIEnv* env, jclass /*clazz*/, jintArray outSelectors) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* eng = activeEngineLocked();
+    jint vals[4] = {-1, -1, -1, -1};
+    if (eng && eng->mSelActive) {
+        vals[0] = eng->mSelY1;
+        vals[1] = eng->mSelY2;
+        vals[2] = eng->mSelX1;
+        vals[3] = eng->mSelX2;
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
+    if (outSelectors) {
+        env->SetIntArrayRegion(outSelectors, 0, 4, vals);
+    }
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetSelectedText(JNIEnv* env, jclass /*clazz*/) {
+    pthread_mutex_lock(&gGlobalMutex);
+    NeoTerminalEngine* engine = activeEngineLocked();
+    pthread_mutex_unlock(&gGlobalMutex);
+    if (!engine) return env->NewStringUTF("");
+
+    engine->lock();
+    std::string out = engine->extractSelectedText();
+    engine->unlock();
+    return env->NewStringUTF(out.c_str());
+}
+
+// ============================================================================
+// Universal Customizable Extra-Key & Input JNI Methods
+// ============================================================================
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeDispatchCustomKey(JNIEnv* env, jclass /*clazz*/, jstring keyLabel) {
     if (!keyLabel) return 0;
@@ -2276,7 +2492,9 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     if (!engine) return 0;
 
     engine->lock();
-    const Row& row = engine->getVisualRow(scrollOffset, screenRow);
+    int clampedOffset = (engine->mModes & MODE_ALT_SCREEN) ? 0 : std::clamp<int>(scrollOffset, 0, engine->mScrollbackCount);
+    int logicalY = screenRow - clampedOffset;
+    const Row& row = engine->getRowByLogicalY(logicalY);
     int cols = std::min<int>(engine->mCols, static_cast<int>(row.cells.size()));
 
     auto* bgPtr = static_cast<jint*>(env->GetPrimitiveArrayCritical(outBgRuns, nullptr));
@@ -2286,14 +2504,17 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     int glCount = 0;
 
     if (bgPtr && glPtr) {
+        auto cellBgAt = [&](int c) -> uint32_t {
+            if (engine->isLogicalCellSelected(logicalY, c)) return SELECTION_BG;
+            const Cell& cell = row.cells[static_cast<size_t>(c)];
+            return resolveBgColor(cell.fg, cell.bg, cell.flags);
+        };
+
         int runStart = 0;
         while (runStart < cols) {
-            const Cell& c0 = row.cells[static_cast<size_t>(runStart)];
-            uint32_t bg = resolveBgColor(c0.fg, c0.bg, c0.flags);
+            uint32_t bg = cellBgAt(runStart);
             int runEnd = runStart + 1;
-            while (runEnd < cols) {
-                const Cell& c1 = row.cells[static_cast<size_t>(runEnd)];
-                if (resolveBgColor(c1.fg, c1.bg, c1.flags) != bg) break;
+            while (runEnd < cols && cellBgAt(runEnd) == bg) {
                 runEnd++;
             }
             if (bg != DEFAULT_BG) {
@@ -2311,7 +2532,9 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
             if (cell.codepoint <= ' ' || (cell.flags & (FLAG_INVISIBLE | FLAG_WIDE_TRAIL)) != 0) {
                 continue;
             }
-            uint32_t fg = resolveFgColor(cell.fg, cell.bg, cell.flags);
+            uint32_t fg = engine->isLogicalCellSelected(logicalY, c)
+                ? SELECTION_FG
+                : resolveFgColor(cell.fg, cell.bg, cell.flags);
             int base = glCount * 4;
             glPtr[base]     = static_cast<jint>(cell.codepoint);
             glPtr[base + 1] = c;
@@ -2349,41 +2572,6 @@ Java_com_termuxx_app_TermuxActivity_nativeGetModesMask(JNIEnv* /*env*/, jclass /
     int m = eng ? eng->mModes : 0;
     pthread_mutex_unlock(&gGlobalMutex);
     return m;
-}
-
-/**
- * Exports the visible viewport rows as a rectangular string for Android's Native System Text Selection.
- */
-JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetViewportSelectionText(
-    JNIEnv* env, jclass /*clazz*/, jint scrollOffset) {
-    pthread_mutex_lock(&gGlobalMutex);
-    NeoTerminalEngine* engine = activeEngineLocked();
-    pthread_mutex_unlock(&gGlobalMutex);
-    if (!engine) return env->NewStringUTF("");
-
-    std::string out;
-    engine->lock();
-    out.reserve(static_cast<size_t>(engine->mRows * (engine->mCols + 1)));
-    for (int r = 0; r < engine->mRows; ++r) {
-        const Row& row = engine->getVisualRow(scrollOffset, r);
-        int lastNonSpace = -1;
-        for (int c = static_cast<int>(row.cells.size()) - 1; c >= 0; --c) {
-            if (row.cells[static_cast<size_t>(c)].codepoint != ' ' &&
-                !(row.cells[static_cast<size_t>(c)].flags & FLAG_WIDE_TRAIL)) {
-                lastNonSpace = c;
-                break;
-            }
-        }
-        for (int c = 0; c <= lastNonSpace; ++c) {
-            const Cell& cell = row.cells[static_cast<size_t>(c)];
-            if (cell.flags & FLAG_WIDE_TRAIL) continue;
-            appendUtf8(out, cell.codepoint);
-        }
-        if (r < engine->mRows - 1) out.push_back('\n');
-    }
-    engine->unlock();
-    return env->NewStringUTF(out.c_str());
 }
 
 JNIEXPORT jstring JNICALL
