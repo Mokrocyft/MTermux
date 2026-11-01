@@ -136,6 +136,7 @@ constexpr int AMETA_CTRL_ON  = 4096;
 
 // Event-driven JNI UI wakeup state
 static JavaVM* gJvm = nullptr;
+static int gDefaultCursorShape = 0;
 static pthread_mutex_t gViewMutex = PTHREAD_MUTEX_INITIALIZER;
 static jobject gSurfaceView = nullptr;
 static jmethodID gPostInvalidateId = nullptr;
@@ -598,7 +599,7 @@ static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noex
                           (entryName.rfind("etc/termux/bootstrap/", 0) == 0) ||
                           (entryName.rfind("var/lib/dpkg/info/", 0) == 0);
             // Android 17 (targetSdk 37) Safer Dynamic Code Loading requires ELF files to be read-only (0500)
-            mode_t finalMode = isElf ? 0500 : (isExec ? 0700 : 0600);
+            mode_t finalMode = isExec ? 0700 : 0600;
             int fd = open(dstFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
             if (fd >= 0) {
                 if (!outBuf.empty()) writeAllFd(fd, outBuf.data(), outBuf.size());
@@ -629,73 +630,61 @@ static const char* resolveExecutable(const char* const* candidates, size_t count
 }
 
 // ============================================================================
-// Android 17 (targetSdk 37) SELinux & Safer DCL Execution Initializer
+// Android 17 (targetSdk 37) Environment & Unified Preload Initializer
 // ============================================================================
-static bool probeDirectExecveAllowed() noexcept {
-    const char* bashBin = "/data/data/com.termuxx/file/usr/bin/bash";
-    if (access(bashBin, R_OK) != 0) return true;
-    pid_t pid = fork();
-    if (pid < 0) return true;
-    if (pid == 0) {
-        int devNull = open("/dev/null", O_RDWR);
-        if (devNull >= 0) {
-            dup2(devNull, 0);
-            dup2(devNull, 1);
-            dup2(devNull, 2);
-            if (devNull > 2) close(devNull);
+static void ensureExecutablePermissionsInDir(const char* dirPath) noexcept {
+    DIR* d = opendir(dirPath);
+    if (!d) return;
+    struct dirent* de;
+    while ((de = readdir(d)) != nullptr) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+        std::string full = std::string(dirPath) + "/" + de->d_name;
+        struct stat st{};
+        if (lstat(full.c_str(), &st) == 0) {
+            if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+                chmod(full.c_str(), 0700);
+                ensureExecutablePermissionsInDir(full.c_str());
+            } else if (S_ISREG(st.st_mode)) {
+                chmod(full.c_str(), 0700);
+            }
         }
-        setenv("LD_LIBRARY_PATH", LIB_PATH, 1);
-        execl(bashBin, "bash", "-c", "exit 0", nullptr);
-        _exit(errno == EACCES ? 126 : 127);
     }
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    return !(WIFEXITED(status) && WEXITSTATUS(status) == 126);
+    closedir(d);
 }
 
-static void ensureSdk37ExecutableAccess() noexcept {
-    if (probeDirectExecveAllowed()) return;
-
-    static const char* const suBins[] = {
-        "/debug_ramdisk/su",
-        "/sbin/su",
-        "/system/bin/su",
-        "/system/xbin/su",
-        "/data/adb/ksu/bin/su",
-        "/data/adb/ap/bin/su"
-    };
-    const char* suBin = nullptr;
-    for (const char* cand : suBins) {
-        if (access(cand, X_OK) == 0) {
-            suBin = cand;
-            break;
+static void installUnifiedRedirectLibrary(const char* nativeLibDir) noexcept {
+    std::string dstSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
+    if (nativeLibDir && nativeLibDir[0] != '\0') {
+        std::string srcSo = std::string(nativeLibDir) + "/libtermuxx-redirect.so";
+        if (access(srcSo.c_str(), R_OK) == 0) {
+            copyFileBinary(srcSo.c_str(), dstSo.c_str(), 0700);
         }
     }
-    if (!suBin) return;
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        int devNull = open("/dev/null", O_RDWR);
-        if (devNull >= 0) {
-            dup2(devNull, 0);
-            dup2(devNull, 1);
-            dup2(devNull, 2);
-            if (devNull > 2) close(devNull);
+    if (access(dstSo.c_str(), R_OK) == 0) {
+        chmod(dstSo.c_str(), 0700);
+        // Unify termux-exec preload targets to point to libtermuxx-redirect.so
+        // so there is never a two-library RTLD_NEXT conflict during apt's execv() calls
+        static const char* const execAliases[] = {
+            "/data/data/com.termuxx/file/usr/lib/libtermux-exec.so",
+            "/data/data/com.termuxx/file/usr/lib/libtermux-exec-ld-preload.so",
+            "/data/data/com.termuxx/file/usr/lib/libtermux-exec-direct-ld-preload.so",
+            "/data/data/com.termuxx/file/usr/lib/libtermux-exec-nosandbox-ld-preload.so"
+        };
+        for (const char* aliasPath : execAliases) {
+            unlink(aliasPath);
+            symlink("libtermuxx-redirect.so", aliasPath);
         }
-        execl(suBin, suBin, "-c",
-              "chcon -R u:object_r:system_file:s0 /data/data/com.termuxx/file/usr /data/data/com.termuxx/files 2>/dev/null || true",
-              nullptr);
-        _exit(0);
-    } else if (pid > 0) {
-        int status = 0;
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     }
 }
 
 static void runSecondStageBootstrapSilently(const char* preloadPath) noexcept {
     const char* secondStageScript = "/data/data/com.termuxx/file/usr/etc/termux/bootstrap/termux-bootstrap-second-stage.sh";
+    const char* lockPath = "/data/data/com.termuxx/file/usr/etc/termux/bootstrap/termux-bootstrap-second-stage.sh.lock";
+    struct stat lst{};
+    if (lstat(lockPath, &lst) == 0) return;
     if (access(secondStageScript, R_OK) != 0) return;
 
+    chmod(secondStageScript, 0700);
     pid_t pid = fork();
     if (pid == 0) {
         int devNull = open("/dev/null", O_RDWR);
@@ -722,9 +711,11 @@ static void runSecondStageBootstrapSilently(const char* preloadPath) noexcept {
         int status = 0;
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     }
+    // Ensure lock symlink exists so login never triggers fallback second stage in terminal
+    symlink("termux-bootstrap-second-stage.sh", lockPath);
 }
 
-static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool justExtracted) noexcept {
+static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool /*justExtracted*/) noexcept {
     mkdirsRecursive(APP_ROOT_PATH, 0700);
     mkdirsRecursive(FILES_REAL_PATH, 0700);
     mkdirsRecursive(FILES_LINK_PATH, 0700);
@@ -738,22 +729,18 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     unlink("/data/data/com.termuxx/files/home");
     symlink(HOME_PATH, "/data/data/com.termuxx/files/home");
 
-    std::string dstSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
-    if (nativeLibDir && nativeLibDir[0] != '\0') {
-        std::string srcSo = std::string(nativeLibDir) + "/libtermuxx-redirect.so";
-        if (access(srcSo.c_str(), R_OK) == 0) {
-            copyFileBinary(srcSo.c_str(), dstSo.c_str(), 0500);
-        }
-    }
+    ensureExecutablePermissionsInDir(BIN_PATH);
+    ensureExecutablePermissionsInDir("/data/data/com.termuxx/file/usr/libexec");
+    ensureExecutablePermissionsInDir("/data/data/com.termuxx/file/usr/lib/apt");
 
-    ensureSdk37ExecutableAccess();
+    installUnifiedRedirectLibrary(nativeLibDir);
+    std::string dstSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
 
     mkdirsRecursive("/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d", 0700);
     const char* aptConfPath = "/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d/00termuxx";
     const char* aptConfText =
         "Dir::Cache \"/data/data/com.termuxx/cach/apt\";\n"
-        "Dir::Cache::archives \"/data/data/com.termuxx/cach/apt/archives\";\n"
-        "DPkg::Post-Invoke { \"su -c 'chcon -R u:object_r:system_file:s0 /data/data/com.termuxx/file/usr' 2>/dev/null || true\"; };\n";
+        "Dir::Cache::archives \"/data/data/com.termuxx/cach/apt/archives\";\n";
     int afd = open(aptConfPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (afd >= 0) {
         writeAllFd(afd, aptConfText, strlen(aptConfText));
@@ -764,10 +751,7 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     const char* profPath = "/data/data/com.termuxx/file/usr/etc/profile.d/99-termuxx-preload.sh";
     const char* profText =
         "if [ -f \"/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so\" ]; then\n"
-        "  case \":$LD_PRELOAD:\" in\n"
-        "    *\":/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so:\"*) ;;\n"
-        "    *) export LD_PRELOAD=\"/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so${LD_PRELOAD:+:$LD_PRELOAD}\" ;;\n"
-        "  esac\n"
+        "  export LD_PRELOAD=\"/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so\"\n"
         "fi\n";
     int pfd = open(profPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (pfd >= 0) {
@@ -775,10 +759,10 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         close(pfd);
     }
 
-    if (justExtracted) {
-        runSecondStageBootstrapSilently(dstSo.c_str());
-        ensureSdk37ExecutableAccess();
-    }
+    // Run second stage silently if its .lock symlink does not exist yet
+    runSecondStageBootstrapSilently(dstSo.c_str());
+    // Re-assert unified preload symlink after termux-exec.postinst
+    installUnifiedRedirectLibrary(nativeLibDir);
 
     std::string bashrcPath = std::string(HOME_PATH) + "/.bashrc";
     const char* rcText =
@@ -790,14 +774,11 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
         "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
         "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
-        "  case \":$LD_PRELOAD:\" in\n"
-        "    *\":$PREFIX/lib/libtermuxx-redirect.so:\"*) ;;\n"
-        "    *) export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so${LD_PRELOAD:+:$LD_PRELOAD}\" ;;\n"
-        "  esac\n"
+        "  export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so\"\n"
         "fi\n"
         "alias ll='ls -lah --color=auto'\n"
         "alias update='pkg update -y && pkg upgrade -y'\n"
-        "PS1='\\[\\e[1;37m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
+        "PS1='\\[\\e[1;38;2;168;199;250m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
     int fd = open(bashrcPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         writeAllFd(fd, rcText, strlen(rcText));
@@ -834,7 +815,7 @@ public:
 
     int mCursorRow = 0;
     int mCursorCol = 0;
-    int mCursorShape = 0; // 0 = Block, 1 = Underline, 2 = Bar/Beam (DECSCUSR)
+    int mCursorShape = gDefaultCursorShape; // 0 = Block, 1 = Underline, 2 = Bar/Beam (DECSCUSR)
     bool mCursorVisible = true;
     bool mPendingWrap = false;
 
@@ -1210,7 +1191,7 @@ public:
         mCurFlags = 0;
         mCursorRow = 0;
         mCursorCol = 0;
-        mCursorShape = 0;
+        mCursorShape = gDefaultCursorShape;
         mCursorVisible = true;
         mPendingWrap = false;
         mScrollTop = 0;
@@ -1710,7 +1691,7 @@ public:
 
         if (mCsiIntermediate == ' ' && finalByte == 'q') {
             int style = param(0, 1);
-            if (style <= 2) mCursorShape = 0;
+            if (style <= 2) mCursorShape = gDefaultCursorShape;
             else if (style <= 4) mCursorShape = 1;
             else if (style <= 6) mCursorShape = 2;
             return;
@@ -2098,11 +2079,7 @@ static bool startSessionProcess(
 
     initializeEnvironmentAndAutoUpdater(nativeLibDir, false);
     std::string preloadPath = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
-    std::string termuxExecPreload = std::string(LIB_PATH) + "/libtermux-exec-ld-preload.so";
     std::string fullPreload = preloadPath;
-    if (access(termuxExecPreload.c_str(), R_OK) == 0) {
-        fullPreload += ":" + termuxExecPreload;
-    }
 
     static const char* const userShells[] = {
         "/data/data/com.termuxx/file/usr/bin/zsh",
@@ -2976,6 +2953,17 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     engine->unlock();
 
     return (bgCount << 16) | (glCount & 0xFFFF);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSetDefaultCursorShape(JNIEnv* /*env*/, jclass /*clazz*/, jint shape) {
+    pthread_mutex_lock(&gGlobalMutex);
+    gDefaultCursorShape = std::clamp<int>(shape, 0, 2);
+    for (auto* eng : gSessions) {
+        eng->mCursorShape = gDefaultCursorShape;
+        eng->markAllDirty();
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
 }
 
 JNIEXPORT jint JNICALL
