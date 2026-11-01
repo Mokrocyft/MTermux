@@ -1,5 +1,6 @@
 package com.termuxx.app
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Notification
@@ -12,6 +13,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -50,6 +52,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import android.window.OnBackInvokedCallback
@@ -61,13 +64,18 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+// Material 3 Expressive Dark AMOLED Palette (Zero Green — Pure Material Dark + Blue/Coral Accents)
 private const val COLOR_AMOLED_BG = 0xFF000000.toInt()
-private const val COLOR_SURFACE = 0xFF080808.toInt()
-private const val COLOR_BORDER = 0xFF161616.toInt()
-private const val COLOR_TEXT = 0xFFEAEAEA.toInt()
-private const val COLOR_TEXT_DIM = 0xFF8A8A8A.toInt()
-private const val COLOR_ACCENT = 0xFF00E676.toInt()
-private const val COLOR_ROOT = 0xFFFF5252.toInt()
+private const val COLOR_HEADER_BG = 0xFF0A0D12.toInt()
+private const val COLOR_SURFACE = 0xFF12151C.toInt()
+private const val COLOR_SURFACE_PRESSED = 0xFF1E2636.toInt()
+private const val COLOR_BORDER = 0xFF222834.toInt()
+private const val COLOR_TEXT = 0xFFE2E8F0.toInt()
+private const val COLOR_TEXT_DIM = 0xFF94A3B8.toInt()
+private const val COLOR_ACCENT = 0xFFA8C7FA.toInt()
+private const val COLOR_ACCENT_CONTAINER = 0xFF16243A.toInt()
+private const val COLOR_ROOT = 0xFFFFB4AB.toInt()
+private const val COLOR_ROOT_CONTAINER = 0xFF3B1616.toInt()
 
 // ColorOS 17 Native Selection Handle Palette (matches system lollipop handles)
 private const val COLOR_HANDLE_STEM = 0xFFD4D4DA.toInt()
@@ -76,6 +84,7 @@ private const val COLOR_HANDLE_FILL = 0xFFF8F8FA.toInt()
 
 private const val PREFS_NAME = "termuxx_prefs"
 private const val KEY_EXTRA_KEYS_SPEC = "extra_keys_spec_v2"
+private const val REQ_POST_NOTIFICATIONS = 1001
 
 private const val DEFAULT_EXTRA_KEYS_SPEC =
     "ESC|TAB|CTRL|ALT|-|/|▲|▼|◀|▶"
@@ -94,7 +103,9 @@ private const val ITEM_SHARE = 4
 /**
  * Termuxx 4.0 — Ultra-Light Android 17 (API 37) Kotlin + C++23 Terminal.
  *
- * - Minimalist Pure Dark AMOLED styling (#000000 / #080808 / #161616 / #00E676 / #FF5252).
+ * - Material 3 Dark AMOLED styling (#000000 / #0A0D12 / #12151C / #222834 / #A8C7FA / #FFB4AB).
+ * - Pinned Top Session & Action Bar (strictly clipped viewport so canvas never overdraws header).
+ * - Bottom Extra Keys Bar with Button Hold (continuous key auto-repeat on hold + sticky CTRL/ALT lock on hold).
  * - Event-driven zero-idle-CPU architecture: C++23 reader thread sleeps in `poll(-1)` when idle
  *   and wakes `TerminalSurface` directly via JNI `postInvalidateOnAnimation()`.
  * - ColorOS 17 native text selection handles (top-circle start stem + bottom-circle end stem +
@@ -104,10 +115,16 @@ private const val ITEM_SHARE = 4
 class TermuxActivity : Activity() {
 
     private lateinit var prefs: SharedPreferences
+    private lateinit var rootLayout: LinearLayout
+    private lateinit var headerBar: LinearLayout
     private lateinit var tabStrip: LinearLayout
     private lateinit var extraKeysRoot: LinearLayout
     internal lateinit var terminalSurface: TerminalSurface
     private val modifierButtons = ArrayList<TextView>(4)
+
+    // Sticky hold-lock states for CTRL / ALT when held down on the bottom bar
+    private var ctrlLocked = false
+    private var altLocked = false
 
     private val backCallback = OnBackInvokedCallback {
         if (terminalSurface.isSelectingText()) {
@@ -131,29 +148,28 @@ class TermuxActivity : Activity() {
         }
 
         requestHighRefreshRate()
-        startForegroundKeepAlive()
         onBackInvokedDispatcher.registerOnBackInvokedCallback(
             OnBackInvokedDispatcher.PRIORITY_DEFAULT,
             backCallback
         )
 
-        val root = LinearLayout(this).apply {
+        // Keep clipChildren = true and clipToPadding = true so child views never overdraw headerBar
+        rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_AMOLED_BG)
-            clipChildren = false
-            clipToPadding = false
         }
 
-        // Minimalist Pure Dark AMOLED Header Bar (32dp)
-        val headerBar = LinearLayout(this).apply {
+        // 1. Top Material 3 Session Tab & Action Bar (38dp height, always visible below status bar)
+        headerBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(COLOR_AMOLED_BG)
-            setPadding(dp(6), dp(2), dp(6), dp(2))
+            setBackgroundColor(COLOR_HEADER_BG)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
         }
 
         val tabScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
         }
         tabStrip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -162,28 +178,36 @@ class TermuxActivity : Activity() {
         tabScroll.addView(tabStrip)
         headerBar.addView(
             tabScroll,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
         )
 
         headerBar.addView(makeHeaderButton("+") { createSession(false) })
-        headerBar.addView(makeHeaderButton("#") { createSession(true) })
+        headerBar.addView(
+            makeHeaderButton(
+                label = "#",
+                onClick = { createSession(true) },
+                onLongClick = { terminalSurface.showTranscriptCopyDialog() }
+            )
+        )
         headerBar.addView(makeHeaderButton("⚙") { showExtraKeysSettingsDialog() })
         headerBar.addView(makeHeaderButton("✕") { closeCurrentSession() })
 
-        root.addView(
+        rootLayout.addView(
             headerBar,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32))
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38))
         )
 
         val topDivider = View(this).apply {
             setBackgroundColor(COLOR_BORDER)
         }
-        root.addView(topDivider, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+        rootLayout.addView(
+            topDivider,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, max(1, dp(1)))
+        )
 
+        // 2. Main Terminal Viewport (strictly clipped to its bounds so headerBar is never covered)
         val viewport = FrameLayout(this).apply {
             setBackgroundColor(COLOR_AMOLED_BG)
-            clipChildren = false
-            clipToPadding = false
         }
         terminalSurface = TerminalSurface(this)
         viewport.addView(
@@ -193,14 +217,18 @@ class TermuxActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
-        root.addView(viewport, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        rootLayout.addView(
+            viewport,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        )
 
+        // 3. Bottom Material 3 Extra Keys Bar with Hold / Auto-Repeat / Sticky Modifier Lock
         extraKeysRoot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(COLOR_AMOLED_BG)
+            setBackgroundColor(COLOR_HEADER_BG)
         }
         rebuildExtraKeysBar()
-        root.addView(
+        rootLayout.addView(
             extraKeysRoot,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -208,17 +236,59 @@ class TermuxActivity : Activity() {
             )
         )
 
-        setContentView(root)
+        setContentView(rootLayout)
 
-        window.decorView.setOnApplyWindowInsetsListener { _, insets ->
-            val sysBars = insets.getInsets(WindowInsets.Type.systemBars())
+        // Apply systemBars, displayCutout, and IME insets directly on rootLayout
+        rootLayout.setOnApplyWindowInsetsListener { v, insets ->
+            val sysBars = insets.getInsets(
+                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+            )
             val ime = insets.getInsets(WindowInsets.Type.ime())
-            root.setPadding(sysBars.left, sysBars.top, sysBars.right, max(sysBars.bottom, ime.bottom))
+            v.setPadding(
+                sysBars.left,
+                sysBars.top,
+                sysBars.right,
+                max(sysBars.bottom, ime.bottom)
+            )
             insets
         }
+        rootLayout.post { rootLayout.requestApplyInsets() }
 
+        rebuildTabs()
         nativeRegisterSurface(terminalSurface)
         nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
+
+        // Request POST_NOTIFICATIONS non-blockingly and start KeepAliveService
+        rootLayout.postDelayed({
+            ensureNotificationsAndKeepAlive()
+        }, 350L)
+    }
+
+    private fun ensureNotificationsAndKeepAlive() {
+        try {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    REQ_POST_NOTIFICATIONS
+                )
+            } else {
+                startForegroundKeepAlive()
+            }
+        } catch (_: Throwable) {
+            startForegroundKeepAlive()
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_POST_NOTIFICATIONS) {
+            startForegroundKeepAlive()
+            terminalSurface.postInvalidateOnAnimation()
+        }
     }
 
     override fun onResume() {
@@ -262,7 +332,7 @@ class TermuxActivity : Activity() {
         }
         extraKeysRoot.addView(
             divider,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, max(1, dp(1)))
         )
 
         for (rawLine in spec.split("\n")) {
@@ -270,19 +340,29 @@ class TermuxActivity : Activity() {
             if (line.isEmpty()) continue
             val rowLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setBackgroundColor(COLOR_AMOLED_BG)
-                setPadding(dp(2), dp(2), dp(2), dp(2))
+                setBackgroundColor(COLOR_HEADER_BG)
+                setPadding(dp(3), dp(3), dp(3), dp(3))
             }
 
+            val delimiter = if (line.contains("|")) "|" else ","
             var added = 0
-            for (rawToken in line.split("|")) {
-                val label = rawToken.trim()
-                if (label.isEmpty()) continue
-                val btn = createExtraKeyButton(label)
-                if (label == "CTRL" || label == "ALT") {
+            for (rawToken in line.split(delimiter)) {
+                val rawLabel = rawToken.trim()
+                if (rawLabel.isEmpty()) continue
+                val displayLabel = when (rawLabel.uppercase()) {
+                    "UP" -> "▲"
+                    "DOWN" -> "▼"
+                    "LEFT" -> "◀"
+                    "RIGHT" -> "▶"
+                    else -> rawLabel
+                }
+                val btn = createExtraKeyButton(displayLabel)
+                if (displayLabel == "CTRL" || displayLabel == "ALT") {
                     modifierButtons.add(btn)
                 }
-                rowLayout.addView(btn, LinearLayout.LayoutParams(0, dp(32), 1f))
+                rowLayout.addView(btn, LinearLayout.LayoutParams(0, dp(34), 1f).apply {
+                    setMargins(dp(1), dp(1), dp(1), dp(1))
+                })
                 added++
             }
             if (added > 0) {
@@ -292,24 +372,130 @@ class TermuxActivity : Activity() {
         syncModifierButtons(nativeGetModifierMask())
     }
 
+    /**
+     * Dispatches an extra key from the bottom panel while respecting sticky-locked CTRL / ALT
+     * modifiers activated by holding down CTRL or ALT.
+     */
+    internal fun dispatchExtraKeyWithHoldSupport(label: String) {
+        terminalSurface.stopTextSelection()
+        if (ctrlLocked && (nativeGetModifierMask() and 1) == 0) {
+            nativeDispatchCustomKey("CTRL")
+        }
+        if (altLocked && (nativeGetModifierMask() and 2) == 0) {
+            nativeDispatchCustomKey("ALT")
+        }
+        var mask = nativeDispatchCustomKey(label)
+        if (ctrlLocked && (mask and 1) == 0) {
+            mask = nativeDispatchCustomKey("CTRL")
+        }
+        if (altLocked && (mask and 2) == 0) {
+            mask = nativeDispatchCustomKey("ALT")
+        }
+        syncModifierButtons(mask)
+        terminalSurface.resetScrollAndBlink()
+    }
+
+    internal fun rearmLockedModifiersIfNeeded() {
+        var mask = nativeGetModifierMask()
+        if (ctrlLocked && (mask and 1) == 0) {
+            mask = nativeDispatchCustomKey("CTRL")
+        }
+        if (altLocked && (mask and 2) == 0) {
+            mask = nativeDispatchCustomKey("ALT")
+        }
+        syncModifierButtons(mask)
+    }
+
     private fun createExtraKeyButton(label: String): TextView {
+        val isModifier = (label == "CTRL" || label == "ALT")
         return TextView(this).apply {
             text = label
             tag = label
             gravity = Gravity.CENTER
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.MONOSPACE
-            setTextColor(COLOR_TEXT_DIM)
-            background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(5))
-            layoutParams = LinearLayout.LayoutParams(0, dp(32), 1f).apply {
-                setMargins(dp(1), dp(1), dp(1), dp(1))
+            setTextColor(COLOR_TEXT)
+            background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(6))
+
+            var holdTriggered = false
+            val repeatRunnable = object : Runnable {
+                override fun run() {
+                    if (!isPressed) return
+                    holdTriggered = true
+                    if (isModifier) {
+                        // Holding CTRL or ALT locks the modifier (Sticky Lock mode)
+                        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        if (label == "CTRL") {
+                            ctrlLocked = !ctrlLocked
+                            if (ctrlLocked && (nativeGetModifierMask() and 1) == 0) {
+                                nativeDispatchCustomKey("CTRL")
+                            } else if (!ctrlLocked && (nativeGetModifierMask() and 1) != 0) {
+                                nativeDispatchCustomKey("CTRL")
+                            }
+                        } else if (label == "ALT") {
+                            altLocked = !altLocked
+                            if (altLocked && (nativeGetModifierMask() and 2) == 0) {
+                                nativeDispatchCustomKey("ALT")
+                            } else if (!altLocked && (nativeGetModifierMask() and 2) != 0) {
+                                nativeDispatchCustomKey("ALT")
+                            }
+                        }
+                        syncModifierButtons(nativeGetModifierMask())
+                    } else {
+                        // Holding any action/arrow/symbol key auto-repeats it smoothly every 50ms
+                        performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        dispatchExtraKeyWithHoldSupport(label)
+                        postDelayed(this, 50L)
+                    }
+                }
             }
-            setOnClickListener { v ->
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                terminalSurface.stopTextSelection()
-                val mask = nativeDispatchCustomKey(label)
-                syncModifierButtons(mask)
-                terminalSurface.resetScrollAndBlink()
+
+            setOnTouchListener { v, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        v.isPressed = true
+                        holdTriggered = false
+                        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        if (!isModifier) {
+                            v.background = pillBg(COLOR_SURFACE_PRESSED, COLOR_ACCENT, dp(6))
+                            (v as TextView).setTextColor(COLOR_ACCENT)
+                            dispatchExtraKeyWithHoldSupport(label)
+                            v.postDelayed(repeatRunnable, 350L)
+                        } else {
+                            v.postDelayed(repeatRunnable, 320L)
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        v.removeCallbacks(repeatRunnable)
+                        val wasPressed = v.isPressed
+                        v.isPressed = false
+                        if (isModifier) {
+                            if (wasPressed && !holdTriggered && event.actionMasked == MotionEvent.ACTION_UP) {
+                                // Short tap on CTRL / ALT: unlock if locked, otherwise toggle one-shot latch
+                                if (label == "CTRL" && ctrlLocked) {
+                                    ctrlLocked = false
+                                    if ((nativeGetModifierMask() and 1) != 0) {
+                                        nativeDispatchCustomKey("CTRL")
+                                    }
+                                } else if (label == "ALT" && altLocked) {
+                                    altLocked = false
+                                    if ((nativeGetModifierMask() and 2) != 0) {
+                                        nativeDispatchCustomKey("ALT")
+                                    }
+                                } else {
+                                    nativeDispatchCustomKey(label)
+                                }
+                            }
+                            syncModifierButtons(nativeGetModifierMask())
+                        } else {
+                            v.background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(6))
+                            (v as TextView).setTextColor(COLOR_TEXT)
+                        }
+                        true
+                    }
+                    else -> false
+                }
             }
         }
     }
@@ -321,12 +507,13 @@ class TermuxActivity : Activity() {
         val dialogLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(12), dp(16), dp(8))
-            setBackgroundColor(0xFF0A0A0A.toInt())
+            setBackgroundColor(COLOR_HEADER_BG)
         }
 
         val hint = TextView(this).apply {
-            text = "Формат: клавиши через | , строки через Enter.\n" +
-                "Поддерживаются: ESC, TAB, CTRL, ALT, ENTER, BKSP, DEL, INS, HOME, END, PGUP, PGDN, ▲, ▼, ◀, ▶, F1..F12, CTRL+C и любые символы."
+            text = "Формат: клавиши через | (или ,), строки через Enter.\n" +
+                "Удержание клавиши — автоповтор, удержание CTRL/ALT — фиксация (Lock).\n" +
+                "Доступны: ESC, TAB, CTRL, ALT, ENTER, BKSP, DEL, INS, HOME, END, PGUP, PGDN, ▲, ▼, ◀, ▶, F1..F12, CTRL+C и любые символы."
             setTextColor(COLOR_TEXT_DIM)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setPadding(0, 0, 0, dp(8))
@@ -338,7 +525,7 @@ class TermuxActivity : Activity() {
             setTextColor(COLOR_TEXT)
             typeface = Typeface.MONOSPACE
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            setBackgroundColor(0xFF121212.toInt())
+            background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(6))
             setPadding(dp(10), dp(8), dp(10), dp(8))
             minLines = 2
             maxLines = 4
@@ -370,10 +557,10 @@ class TermuxActivity : Activity() {
     private fun makePresetChip(title: String, onClick: Runnable): TextView {
         return TextView(this).apply {
             text = title
-            setTextColor(COLOR_TEXT)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            setTextColor(COLOR_ACCENT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
             setPadding(dp(8), dp(5), dp(8), dp(5))
-            background = pillBg(0xFF141414.toInt(), COLOR_BORDER, dp(6))
+            background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(6))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -385,17 +572,26 @@ class TermuxActivity : Activity() {
     }
 
     internal fun syncModifierButtons(mask: Int) {
-        val ctrl = (mask and 1) != 0
-        val alt = (mask and 2) != 0
+        val ctrl = ctrlLocked || (mask and 1) != 0
+        val alt = altLocked || (mask and 2) != 0
         for (btn in modifierButtons) {
             val tag = btn.tag as? String ?: continue
-            val active = (tag == "CTRL" && ctrl) || (tag == "ALT" && alt)
-            btn.setTextColor(if (active) COLOR_AMOLED_BG else COLOR_TEXT_DIM)
-            btn.background = pillBg(
-                if (active) COLOR_ACCENT else COLOR_SURFACE,
-                if (active) COLOR_ACCENT else COLOR_BORDER,
-                dp(5)
-            )
+            val isLocked = (tag == "CTRL" && ctrlLocked) || (tag == "ALT" && altLocked)
+            val isActive = (tag == "CTRL" && ctrl) || (tag == "ALT" && alt)
+            when {
+                isLocked -> {
+                    btn.setTextColor(COLOR_AMOLED_BG)
+                    btn.background = pillBg(COLOR_ACCENT, COLOR_ACCENT, dp(6))
+                }
+                isActive -> {
+                    btn.setTextColor(COLOR_ACCENT)
+                    btn.background = pillBg(COLOR_ACCENT_CONTAINER, COLOR_ACCENT, dp(6))
+                }
+                else -> {
+                    btn.setTextColor(COLOR_TEXT)
+                    btn.background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(6))
+                }
+            }
         }
     }
 
@@ -418,7 +614,10 @@ class TermuxActivity : Activity() {
 
     internal fun closeCurrentSession() {
         val active = nativeGetActiveIndex()
-        if (active < 0) return
+        if (active < 0) {
+            finish()
+            return
+        }
         terminalSurface.stopTextSelection()
         val rem = nativeCloseSession(active)
         if (rem <= 0) {
@@ -431,37 +630,42 @@ class TermuxActivity : Activity() {
 
     internal fun rebuildTabs() {
         tabStrip.removeAllViews()
-        val count = nativeGetSessionCount()
-        val active = nativeGetActiveIndex()
+        val rawCount = nativeGetSessionCount()
+        val count = max(1, rawCount)
+        val active = if (rawCount > 0) nativeGetActiveIndex() else 0
         for (i in 0 until count) {
             val idx = i
-            val isRoot = nativeIsSessionRoot(i)
+            val isRoot = if (rawCount > 0) nativeIsSessionRoot(i) else false
             val isSelected = i == active
 
             val tab = TextView(this).apply {
                 text = (if (isRoot) "# " else "$ ") + (i + 1)
                 typeface = Typeface.MONOSPACE
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                setPadding(dp(10), dp(3), dp(10), dp(3))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setPadding(dp(11), dp(4), dp(11), dp(4))
                 val accent = if (isRoot) COLOR_ROOT else COLOR_ACCENT
+                val activeFill = if (isRoot) COLOR_ROOT_CONTAINER else COLOR_ACCENT_CONTAINER
                 setTextColor(if (isSelected) accent else COLOR_TEXT_DIM)
                 background = pillBg(
-                    if (isSelected) 0xFF0E0E0E.toInt() else COLOR_AMOLED_BG,
+                    if (isSelected) activeFill else COLOR_SURFACE,
                     if (isSelected) accent else COLOR_BORDER,
-                    dp(6)
+                    dp(7)
                 )
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    setMargins(0, 0, dp(4), 0)
+                    setMargins(0, 0, dp(5), 0)
                 }
                 setOnClickListener {
-                    terminalSurface.stopTextSelection()
-                    nativeSwitchSession(idx)
-                    terminalSurface.syncSize()
-                    rebuildTabs()
-                    terminalSurface.invalidateAllRows()
+                    if (nativeGetSessionCount() > idx) {
+                        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        terminalSurface.stopTextSelection()
+                        nativeSwitchSession(idx)
+                        terminalSurface.syncSize()
+                        rebuildTabs()
+                        terminalSurface.invalidateAllRows()
+                    }
                 }
             }
             tabStrip.addView(tab)
@@ -484,6 +688,7 @@ class TermuxActivity : Activity() {
         val text = clip.getItemAt(0).coerceToText(this)
         if (!text.isNullOrEmpty()) {
             nativeSendText(text.toString(), true)
+            rearmLockedModifiersIfNeeded()
             terminalSurface.resetScrollAndBlink()
         }
     }
@@ -494,20 +699,31 @@ class TermuxActivity : Activity() {
         return clip.itemCount > 0 && !clip.getItemAt(0).coerceToText(this).isNullOrEmpty()
     }
 
-    private fun makeHeaderButton(label: String, action: Runnable): TextView {
+    private fun makeHeaderButton(
+        label: String,
+        onClick: () -> Unit,
+        onLongClick: (() -> Unit)? = null
+    ): TextView {
         return TextView(this).apply {
             text = label
             gravity = Gravity.CENTER
             typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            setTextColor(COLOR_TEXT_DIM)
-            background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(6))
-            layoutParams = LinearLayout.LayoutParams(dp(28), dp(24)).apply {
-                setMargins(dp(3), 0, 0, 0)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextColor(COLOR_TEXT)
+            background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(7))
+            layoutParams = LinearLayout.LayoutParams(dp(32), dp(28)).apply {
+                setMargins(dp(4), 0, 0, 0)
             }
             setOnClickListener { v ->
                 v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                action.run()
+                onClick()
+            }
+            if (onLongClick != null) {
+                setOnLongClickListener { v ->
+                    v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    onLongClick()
+                    true
+                }
             }
         }
     }
@@ -515,8 +731,8 @@ class TermuxActivity : Activity() {
     private fun pillBg(fill: Int, stroke: Int, radiusPx: Int): GradientDrawable {
         return GradientDrawable().apply {
             setColor(fill)
-            setCornerRadius(radiusPx.toFloat())
-            setStroke(1, stroke)
+            cornerRadius = radiusPx.toFloat()
+            setStroke(max(1, dp(1)), stroke)
         }
     }
 
@@ -721,6 +937,32 @@ class TermuxActivity : Activity() {
             stopTextSelection()
         }
 
+        internal fun showTranscriptCopyDialog() {
+            val fullText = nativeGetTranscriptText()
+            val tv = TextView(context).apply {
+                text = fullText.ifEmpty { "Буфер терминала пуст." }
+                setTextIsSelectable(true)
+                typeface = Typeface.MONOSPACE
+                setTextColor(COLOR_TEXT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+            }
+            val scroll = ScrollView(context).apply {
+                addView(tv)
+            }
+            AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("История сессии")
+                .setView(scroll)
+                .setPositiveButton("Копировать всё") { _, _ ->
+                    copyToClipboard(fullText, true)
+                }
+                .setNeutralButton("Вставить") { _, _ ->
+                    pasteFromClipboard()
+                }
+                .setNegativeButton("Закрыть", null)
+                .show()
+        }
+
         private fun showColorOsFloatingActionMode() {
             actionMode?.finish()
             val callback = object : ActionMode.Callback2() {
@@ -865,7 +1107,9 @@ class TermuxActivity : Activity() {
         }
 
         override fun onDraw(canvas: Canvas) {
-            canvas.drawColor(COLOR_AMOLED_BG)
+            // Paint background strictly within TerminalSurface bounds so headerBar above is never overdrawn
+            bgPaint.color = COLOR_AMOLED_BG
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
 
             val bootState = nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
             if (bootState != 2) {
@@ -877,7 +1121,7 @@ class TermuxActivity : Activity() {
                     height / 2f,
                     textPaint
                 )
-                postInvalidateDelayed(50L)
+                postInvalidateDelayed(40L)
                 return
             }
 
@@ -944,7 +1188,7 @@ class TermuxActivity : Activity() {
 
             val selecting = nativeIsSelectingText()
 
-            // Draw Cursor (DECSCUSR) when at bottom of scrollback and not selecting text
+            // Draw Cursor (DECSCUSR) in Material 3 Primary Blue (#A8C7FA)
             if (scrollOffset == 0 && !selecting) {
                 val cursorState = nativeGetCursorState()
                 if (cursorState >= 0) {
@@ -954,7 +1198,7 @@ class TermuxActivity : Activity() {
                     if (cRow in 0 until rows && cCol in 0 until cols) {
                         val cx = cCol * cellWidth
                         val cy = cRow * cellHeight
-                        bgPaint.color = if (cursorBlinkOn) 0xCC00E676.toInt() else 0x4400E676
+                        bgPaint.color = if (cursorBlinkOn) 0xCCA8C7FA.toInt() else 0x44A8C7FA
                         when (shape) {
                             1 -> canvas.drawRect(cx, cy + cellHeight - dp(2), cx + cellWidth, cy + cellHeight, bgPaint)
                             2 -> canvas.drawRect(cx, cy, cx + dp(2), cy + cellHeight, bgPaint)
@@ -1189,7 +1433,7 @@ class TermuxActivity : Activity() {
                     } else if (committed.isNotEmpty()) {
                         nativeSendText(committed, false)
                     }
-                    syncModifierButtons(nativeGetModifierMask())
+                    rearmLockedModifiersIfNeeded()
                     resetScrollAndBlink()
                     editableBuf.clear()
                     return true
@@ -1200,7 +1444,7 @@ class TermuxActivity : Activity() {
                     stopTextSelection()
                     applyComposingDiff(composing)
                     lastComposing = composing
-                    syncModifierButtons(nativeGetModifierMask())
+                    rearmLockedModifiersIfNeeded()
                     resetScrollAndBlink()
                     return true
                 }
@@ -1223,6 +1467,7 @@ class TermuxActivity : Activity() {
                     for (i in 0 until afterLength) {
                         nativeSendKeyEvent(KeyEvent.KEYCODE_FORWARD_DEL, 0, 0)
                     }
+                    rearmLockedModifiersIfNeeded()
                     resetScrollAndBlink()
                     return true
                 }
@@ -1268,7 +1513,7 @@ class TermuxActivity : Activity() {
 
             val unicode = event.getUnicodeChar(event.metaState and KeyEvent.META_CTRL_MASK.inv())
             val res = nativeSendKeyEvent(keyCode, unicode, event.metaState)
-            syncModifierButtons(nativeGetModifierMask())
+            rearmLockedModifiersIfNeeded()
             resetScrollAndBlink()
 
             if (res == 2) {

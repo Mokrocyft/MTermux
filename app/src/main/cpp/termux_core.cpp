@@ -847,26 +847,24 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     installUnifiedRedirectLibrary(nativeLibDir);
 
     std::string bashrcPath = std::string(HOME_PATH) + "/.bashrc";
-    if (access(bashrcPath.c_str(), F_OK) != 0) {
-        const char* rcText =
-            "export TERM=xterm-256color\n"
-            "export COLORTERM=truecolor\n"
-            "export PREFIX=/data/data/com.termuxx/file/usr\n"
-            "export HOME=/data/data/com.termuxx/file/home\n"
-            "export TMPDIR=/data/data/com.termuxx/file/usr/tmp\n"
-            "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
-            "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
-            "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
-            "  export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so\"\n"
-            "fi\n"
-            "alias ll='ls -lah --color=auto'\n"
-            "alias update='pkg update -y && pkg upgrade -y'\n"
-            "PS1='\\[\\e[1;37m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
-        int fd = open(bashrcPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        if (fd >= 0) {
-            writeAllFd(fd, rcText, strlen(rcText));
-            close(fd);
-        }
+    const char* rcText =
+        "export TERM=xterm-256color\n"
+        "export COLORTERM=truecolor\n"
+        "export PREFIX=/data/data/com.termuxx/file/usr\n"
+        "export HOME=/data/data/com.termuxx/file/home\n"
+        "export TMPDIR=/data/data/com.termuxx/file/usr/tmp\n"
+        "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
+        "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
+        "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
+        "  export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so\"\n"
+        "fi\n"
+        "alias ll='ls -lah --color=auto'\n"
+        "alias update='pkg update -y && pkg upgrade -y'\n"
+        "PS1='\\[\\e[1;38;2;168;199;250m\\]\\w\\[\\e[0m\\] \\[\\e[1;90m\\]›\\[\\e[0m\\] '\n";
+    int fd = open(bashrcPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+        writeAllFd(fd, rcText, strlen(rcText));
+        close(fd);
     }
 
     unlink("/data/data/com.termuxx/file/usr/etc/motd");
