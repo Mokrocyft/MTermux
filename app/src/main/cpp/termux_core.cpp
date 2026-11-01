@@ -148,8 +148,18 @@ static void notifySurfaceFromNative() noexcept {
     jmethodID mid = gPostInvalidateId;
     if (view && mid) {
         JNIEnv* env = nullptr;
-        if (gJvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK && env) {
+        int status = gJvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+        bool attachedHere = false;
+        if (status != JNI_OK || !env) {
+            if (gJvm->AttachCurrentThread(&env, nullptr) == JNI_OK && env) {
+                attachedHere = true;
+            }
+        }
+        if (env) {
             env->CallVoidMethod(view, mid);
+        }
+        if (attachedHere) {
+            gJvm->DetachCurrentThread();
         }
     }
     pthread_mutex_unlock(&gViewMutex);
@@ -677,14 +687,36 @@ static void installUnifiedRedirectLibrary(const char* nativeLibDir) noexcept {
     }
 }
 
-static void runSecondStageBootstrapSilently(const char* preloadPath) noexcept {
-    const char* secondStageScript = "/data/data/com.termuxx/file/usr/etc/termux/bootstrap/termux-bootstrap-second-stage.sh";
-    const char* lockPath = "/data/data/com.termuxx/file/usr/etc/termux/bootstrap/termux-bootstrap-second-stage.sh.lock";
-    struct stat lst{};
-    if (lstat(lockPath, &lst) == 0) return;
-    if (access(secondStageScript, R_OK) != 0) return;
+static void installBuiltInSudoWrapper() noexcept {
+    const char* sudoPath = "/data/data/com.termuxx/file/usr/bin/sudo";
+    if (access(sudoPath, X_OK) == 0) return;
+    const char* sudoScript =
+        "#!/data/data/com.termuxx/file/usr/bin/sh\n"
+        "for s in /debug_ramdisk/su /sbin/su /system/bin/su /system/xbin/su /data/adb/ksu/bin/su /data/adb/ap/bin/su; do\n"
+        "  if [ -x \"$s\" ]; then SU_BIN=\"$s\"; break; fi\n"
+        "done\n"
+        "if [ -z \"$SU_BIN\" ]; then SU_BIN=su; fi\n"
+        "if [ $# -eq 0 ] || [ \"$1\" = \"-s\" ] || [ \"$1\" = \"-i\" ]; then\n"
+        "  exec \"$SU_BIN\" -c \"export PATH=/data/data/com.termuxx/file/usr/bin:/data/data/com.termuxx/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; export LD_LIBRARY_PATH=/data/data/com.termuxx/file/usr/lib; export PREFIX=/data/data/com.termuxx/file/usr; export HOME=/data/data/com.termuxx/file/home; export TMPDIR=/data/data/com.termuxx/file/usr/tmp; export LD_PRELOAD=/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so; exec /data/data/com.termuxx/file/usr/bin/bash -l\"\n"
+        "fi\n"
+        "CMD=\"\"\n"
+        "for arg in \"$@\"; do\n"
+        "  ESCAPED=$(printf \"%s\" \"$arg\" | sed \"s/'/'\\\\\\\\''/g\")\n"
+        "  CMD=\"$CMD '$ESCAPED'\"\n"
+        "done\n"
+        "exec \"$SU_BIN\" -c \"export PATH=/data/data/com.termuxx/file/usr/bin:/data/data/com.termuxx/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; export LD_LIBRARY_PATH=/data/data/com.termuxx/file/usr/lib; export PREFIX=/data/data/com.termuxx/file/usr; export HOME=/data/data/com.termuxx/file/home; export TMPDIR=/data/data/com.termuxx/file/usr/tmp; export LD_PRELOAD=/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so; eval $CMD\"\n";
+    int fd = open(sudoPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
+    if (fd >= 0) {
+        writeAllFd(fd, sudoScript, strlen(sudoScript));
+        close(fd);
+        chmod(sudoPath, 0700);
+    }
+}
 
-    chmod(secondStageScript, 0700);
+static void runSecondStageBootstrapSilently(const char* preloadPath) noexcept {
+    const char* bashBin = "/data/data/com.termuxx/file/usr/bin/bash";
+    if (access(bashBin, R_OK) != 0) return;
+
     pid_t pid = fork();
     if (pid == 0) {
         int devNull = open("/dev/null", O_RDWR);
@@ -703,16 +735,15 @@ static void runSecondStageBootstrapSilently(const char* preloadPath) noexcept {
             setenv("LD_PRELOAD", preloadPath, 1);
         }
         setenv("ANDROID__BUILD_VERSION_SDK", "37", 1);
-        const char* bashBin = "/data/data/com.termuxx/file/usr/bin/bash";
-        execl(bashBin, "bash", secondStageScript, nullptr);
-        execl("/system/bin/linker64", "linker64", bashBin, secondStageScript, nullptr);
+        if (chdir(HOME_PATH) != 0) (void)chdir("/");
+        // Run bash -l (login shell) so /etc/profile executes termux-bootstrap-second-stage.sh silently
+        execl(bashBin, "-bash", "-l", "-c", "true", nullptr);
+        execl("/system/bin/linker64", "linker64", bashBin, "-l", "-c", "true", nullptr);
         _exit(0);
     } else if (pid > 0) {
         int status = 0;
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     }
-    // Ensure lock symlink exists so login never triggers fallback second stage in terminal
-    symlink("termux-bootstrap-second-stage.sh", lockPath);
 }
 
 static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool /*justExtracted*/) noexcept {
@@ -734,6 +765,7 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool /
     ensureExecutablePermissionsInDir("/data/data/com.termuxx/file/usr/lib/apt");
 
     installUnifiedRedirectLibrary(nativeLibDir);
+    installBuiltInSudoWrapper();
     std::string dstSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
 
     mkdirsRecursive("/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d", 0700);

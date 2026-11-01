@@ -1,22 +1,29 @@
 package com.termuxx.app
 
-import android.animation.ValueAnimator
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.Rect
-import android.graphics.RenderNode
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.IBinder
+import android.text.Editable
 import android.text.InputType
+import android.text.Selection
+import android.text.SpannableStringBuilder
 import android.util.TypedValue
 import android.view.ActionMode
 import android.view.GestureDetector
@@ -30,9 +37,6 @@ import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
-import android.view.WindowInsetsAnimation
-import android.view.WindowManager
-import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -44,203 +48,181 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import android.window.OnBackInvokedCallback
-import android.window.OnBackInvokedDispatcher
+import com.termuxx.R
 import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-private const val COLOR_AMOLED_BG = 0xFF000000.toInt()
-private const val COLOR_SURFACE = 0xFF0C0E12.toInt()
-private const val COLOR_BORDER = 0xFF1F242D.toInt()
-private const val COLOR_TEXT = 0xFFE3E8EF.toInt()
-private const val COLOR_TEXT_DIM = 0xFF949ECA.toInt()
-private const val COLOR_ROOT = 0xFFF28B82.toInt() // Material 3 Dark Error
+/**
+ * Lightweight Foreground Service so Android App Info shows notification permission
+ * and ColorOS 17 / Android 17 keeps active terminal sessions alive in background.
+ */
+class KeepAliveService : Service() {
+    companion object {
+        private const val CHANNEL_ID = "termuxx_session_channel"
+        private const val NOTIFICATION_ID = 1337
+    }
 
-// Material 3 Dark Accent Presets
-private const val ACCENT_MATERIAL_BLUE = 0xFFA8C7FA.toInt()   // Material 3 Primary Blue
-private const val ACCENT_MATERIAL_MONET = 0xFFD0BCFF.toInt()  // Material 3 Lavender/Purple
-private const val ACCENT_MATERIAL_CYAN = 0xFF78D9EC.toInt()   // Material 3 Cyan/Teal
-private const val ACCENT_MATERIAL_MINT = 0xFF81C995.toInt()   // Material 3 Sage/Mint
+    override fun onCreate() {
+        super.onCreate()
+        createChannel()
+    }
 
-// ColorOS 17 Native Selection Handle Palette
-private const val COLOR_HANDLE_STEM = 0xFFD4D4DA.toInt()
-private const val COLOR_HANDLE_RING = 0xFFB0B0B8.toInt()
-private const val COLOR_HANDLE_FILL = 0xFFF8F8FA.toInt()
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val launchIntent = Intent(this, TermuxActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            launchIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val notification = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("Termux C++23")
+            .setContentText("Терминальная сессия активна")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
+        try {
+            startForeground(NOTIFICATION_ID, notification)
+        } catch (_: Throwable) {
+        }
+        return START_NOT_STICKY
+    }
 
-// Cursor Blink Modes
-private const val BLINK_SMOOTH = 0
-private const val BLINK_CLASSIC = 1
-private const val BLINK_STEADY = 2
+    override fun onBind(intent: Intent?): IBinder? = null
 
-private const val PREFS_NAME = "termuxx_prefs"
-private const val KEY_EXTRA_KEYS_SPEC = "extra_keys_spec_v2"
-private const val KEY_CURSOR_BLINK_MODE = "cursor_blink_mode"
-private const val KEY_CURSOR_SHAPE = "cursor_shape"
-private const val KEY_MATERIAL_ACCENT = "material_accent_color"
-
-private const val DEFAULT_EXTRA_KEYS_SPEC =
-    "ESC|TAB|CTRL|ALT|-|/|▲|▼|◀|▶"
-
-private const val EXTENDED_EXTRA_KEYS_SPEC =
-    "ESC|/|\\|-|HOME|▲|END|PGUP\nTAB|CTRL|ALT|_|◀|▼|▶|PGDN"
-
-private const val VIM_TMUX_EXTRA_KEYS_SPEC =
-    "ESC|:|CTRL|ALT|\"|%|h|j|k|l"
-
-private const val ITEM_COPY = 1
-private const val ITEM_PASTE = 2
-private const val ITEM_SELECT_ALL = 3
-private const val ITEM_SHARE = 4
+    private fun createChannel() {
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Termux Active Sessions",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Keeps C++23 PTY shell sessions running in background"
+            setShowBadge(false)
+        }
+        nm.createNotificationChannel(channel)
+    }
+}
 
 /**
- * Termuxx — Android 17 (API 37) Material 3 Dark AMOLED Kotlin + C++23 Terminal.
+ * TermuxX Modern Edition — Pure Kotlin + C++23 Single-Activity Architecture
+ * Targeted exclusively for Android 17 "CinnamonBun" (API 37) / ColorOS 17 (aarch64-v8a).
  */
 class TermuxActivity : Activity() {
 
-    private lateinit var prefs: SharedPreferences
-    private lateinit var rootLayout: LinearLayout
-    private lateinit var tabStrip: LinearLayout
-    private lateinit var extraKeysRoot: LinearLayout
-    internal lateinit var terminalSurface: TerminalSurface
-    private val modifierButtons = ArrayList<TextView>(4)
-    private val headerButtons = ArrayList<TextView>(4)
-
-    internal var accentColor: Int = ACCENT_MATERIAL_BLUE
-    internal var cursorBlinkMode: Int = BLINK_SMOOTH
-    internal var cursorShapePref: Int = 0
-
-    private val backCallback = OnBackInvokedCallback {
-        if (terminalSurface.isSelectingText()) {
-            terminalSurface.stopTextSelection()
-        } else {
-            finish()
+    companion object {
+        init {
+            System.loadLibrary("termuxx-core")
         }
+
+        private const val PREFS_NAME = "termuxx_modern_prefs"
+        private const val PREF_EXTRA_KEYS = "extra_keys_csv"
+        private const val PREF_FONT_SIZE = "font_size_sp"
+        private const val DEFAULT_EXTRA_KEYS = "ESC,TAB,CTRL,ALT,-,/,|,UP,DOWN,LEFT,RIGHT"
+        private const val REQ_POST_NOTIFICATIONS = 1001
+
+        // Material 3 Expressive Dark AMOLED Palette
+        private const val COLOR_AMOLED_BG = 0xFF000000.toInt()
+        private const val COLOR_HEADER_BG = 0xFF0E131F.toInt()
+        private const val COLOR_SURFACE_PILL = 0xFF1A2234.toInt()
+        private const val COLOR_ACCENT_PRIMARY = 0xFF6366F1.toInt()
+        private const val COLOR_ACCENT_ACTIVE = 0xFF38BDF8.toInt()
+        private const val COLOR_TEXT_PRIMARY = 0xFFE2E8F0.toInt()
+        private const val COLOR_TEXT_MUTED = 0xFF94A3B8.toInt()
+        private const val COLOR_SELECTION_BG = 0x6638BDF8
+
+        // JNI Bridge to C++23 Core Engine (libtermuxx-core.so)
+        @JvmStatic external fun nativeInitEngine(dataDir: String, nativeLibDir: String)
+        @JvmStatic external fun nativeBindSurface(surface: Any?)
+        @JvmStatic external fun nativeGetBootstrapState(): Int
+        @JvmStatic external fun nativeGetBootstrapError(): String
+        @JvmStatic external fun nativeCreateSession(rows: Int, cols: Int): Int
+        @JvmStatic external fun nativeSwitchSession(index: Int)
+        @JvmStatic external fun nativeCloseSession(index: Int): Int
+        @JvmStatic external fun nativeGetSessionCount(): Int
+        @JvmStatic external fun nativeGetActiveSession(): Int
+        @JvmStatic external fun nativeResizePty(rows: Int, cols: Int)
+        @JvmStatic external fun nativeSendText(text: String)
+        @JvmStatic external fun nativeSendKey(keyCode: Int, ctrl: Boolean, alt: Boolean)
+        @JvmStatic external fun nativePollOutput(): Boolean
+        @JvmStatic external fun nativeFetchDirtyRows(
+            packedAttrs: LongArray,
+            rowTextOut: Array<String>,
+            metaOut: IntArray
+        ): Int
+        @JvmStatic external fun nativeGetRowText(row: Int): String
+        @JvmStatic external fun nativeGetTranscriptText(): String
+        @JvmStatic external fun nativeGetSelectedText(r1: Int, c1: Int, r2: Int, c2: Int): String
+        @JvmStatic external fun nativeScrollViewport(deltaLines: Int): Int
+        @JvmStatic external fun nativeResetScroll()
+        @JvmStatic external fun nativeGetAlternateScreen(): Boolean
+        @JvmStatic external fun nativeSetCtrlMod(active: Boolean)
+        @JvmStatic external fun nativeSetAltMod(active: Boolean)
+        @JvmStatic external fun nativeGetCtrlMod(): Boolean
+        @JvmStatic external fun nativeGetAltMod(): Boolean
     }
+
+    private lateinit var rootLayout: LinearLayout
+    private lateinit var headerBar: LinearLayout
+    private lateinit var tabContainer: LinearLayout
+    private lateinit var terminalSurface: TerminalSurface
+    private lateinit var extraKeysBar: LinearLayout
+
+    private var ctrlLatched = false
+    private var altLatched = false
+    private var ctrlBtnRef: TextView? = null
+    private var altBtnRef: TextView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        accentColor = prefs.getInt(KEY_MATERIAL_ACCENT, ACCENT_MATERIAL_BLUE)
-        cursorBlinkMode = prefs.getInt(KEY_CURSOR_BLINK_MODE, BLINK_SMOOTH)
-        cursorShapePref = prefs.getInt(KEY_CURSOR_SHAPE, 0)
-        nativeSetDefaultCursorShape(cursorShapePref)
+        // Launch non-blocking C++23 background bootstrap check/extraction immediately
+        nativeInitEngine(applicationInfo.dataDir, applicationInfo.nativeLibraryDir)
 
-        window.apply {
-            attributes = attributes.apply {
-                layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            }
-            setDecorFitsSystemWindows(false)
-        }
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val initialSp = prefs.getFloat(PREF_FONT_SIZE, 13.5f).coerceIn(7.0f, 30.0f)
 
-        requestHighRefreshRate()
-        onBackInvokedDispatcher.registerOnBackInvokedCallback(
-            OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-            backCallback
-        )
-
+        // Root vertical layout (strictly clipped so children never overdraw the top tab bar)
         rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_AMOLED_BG)
-            clipChildren = false
-            clipToPadding = false
-        }
-
-        // Android 17 Edge-to-Edge + IME Keyboard Insets Handler:
-        // Keeps top header bar below statusBar/cutout and lifts bottom Extra-Keys bar above IME keyboard!
-        rootLayout.setOnApplyWindowInsetsListener { v, windowInsets ->
-            val insets = windowInsets.getInsets(
-                WindowInsets.Type.systemBars() or
-                    WindowInsets.Type.displayCutout() or
-                    WindowInsets.Type.ime()
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
             )
-            if (v.paddingLeft != insets.left ||
-                v.paddingTop != insets.top ||
-                v.paddingRight != insets.right ||
-                v.paddingBottom != insets.bottom
-            ) {
-                v.setPadding(insets.left, insets.top, insets.right, insets.bottom)
-                terminalSurface.post { terminalSurface.syncSize() }
-            }
-            WindowInsets.CONSUMED
         }
 
-        rootLayout.setWindowInsetsAnimationCallback(
-            object : WindowInsetsAnimation.Callback(DISPATCH_MODE_STOP) {
-                override fun onProgress(
-                    insets: WindowInsets,
-                    runningAnimations: MutableList<WindowInsetsAnimation>
-                ): WindowInsets {
-                    val combined = insets.getInsets(
-                        WindowInsets.Type.systemBars() or
-                            WindowInsets.Type.displayCutout() or
-                            WindowInsets.Type.ime()
-                    )
-                    rootLayout.setPadding(
-                        combined.left,
-                        combined.top,
-                        combined.right,
-                        combined.bottom
-                    )
-                    return insets
-                }
-
-                override fun onEnd(animation: WindowInsetsAnimation) {
-                    terminalSurface.post { terminalSurface.syncSize() }
-                }
-            }
-        )
-
-        // Top Header Bar with Session Tabs & Controls (38dp)
-        val headerBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(COLOR_AMOLED_BG)
-            setPadding(dp(8), dp(4), dp(8), dp(4))
-        }
-
-        val tabScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-        }
-        tabStrip = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        tabScroll.addView(tabStrip)
-        headerBar.addView(
-            tabScroll,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        )
-
-        headerButtons.clear()
-        headerBar.addView(makeHeaderButton("+") { createSession(false) })
-        headerBar.addView(makeHeaderButton("#") { createSession(true) })
-        headerBar.addView(makeHeaderButton("⚙") { showSettingsDialog() })
-        headerBar.addView(makeHeaderButton("✕") { closeCurrentSession() })
-
+        // 1. Top Session Tab & Action Header Bar (44dp height, always pinned below status bar)
+        headerBar = buildHeaderBar()
         rootLayout.addView(
             headerBar,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38))
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44))
         )
 
-        val topDivider = View(this).apply {
-            setBackgroundColor(COLOR_BORDER)
+        // 1px subtle separator below the header bar so the top bar stands out cleanly
+        val divider = View(this).apply {
+            setBackgroundColor(0xFF263147.toInt())
         }
         rootLayout.addView(
-            topDivider,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
+            divider,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, max(1, dp(1)))
         )
 
+        // 2. Main Terminal Viewport
         val viewport = FrameLayout(this).apply {
             setBackgroundColor(COLOR_AMOLED_BG)
-            clipChildren = false
-            clipToPadding = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1.0f
+            )
         }
-        terminalSurface = TerminalSurface(this)
+        terminalSurface = TerminalSurface(this, initialSp)
         viewport.addView(
             terminalSurface,
             FrameLayout.LayoutParams(
@@ -248,1175 +230,788 @@ class TermuxActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
-        rootLayout.addView(
-            viewport,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-        )
+        rootLayout.addView(viewport)
 
-        extraKeysRoot = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(COLOR_AMOLED_BG)
+        // 3. Bottom Extra Keys Bar (44dp height)
+        extraKeysBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(COLOR_HEADER_BG)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(5), dp(6), dp(5))
         }
-        rebuildExtraKeysBar()
+        val extraScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setBackgroundColor(COLOR_HEADER_BG)
+            addView(extraKeysBar)
+        }
         rootLayout.addView(
-            extraKeysRoot,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
+            extraScroll,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44))
         )
 
         setContentView(rootLayout)
-        nativeRegisterSurface(terminalSurface)
-        nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
+
+        // Apply system bars & IME insets cleanly so headerBar sits right below status bar
+        window.decorView.setOnApplyWindowInsetsListener { v, insets ->
+            val sysBars = insets.getInsets(WindowInsets.Type.systemBars())
+            val ime = insets.getInsets(WindowInsets.Type.ime())
+            val bottomInset = max(sysBars.bottom, ime.bottom)
+            rootLayout.setPadding(sysBars.left, sysBars.top, sysBars.right, bottomInset)
+            insets
+        }
+
+        rebuildExtraKeys()
+        rebuildTabs()
+        nativeBindSurface(terminalSurface)
+        terminalSurface.requestFocus()
+
+        // Request notification permission non-blockingly after UI is attached
+        rootLayout.postDelayed({
+            ensureNotificationsAndService()
+        }, 400L)
+    }
+
+    private fun ensureNotificationsAndService() {
+        try {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_POST_NOTIFICATIONS)
+            } else {
+                startKeepAliveService()
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_POST_NOTIFICATIONS) {
+            startKeepAliveService()
+            terminalSurface.postInvalidateOnAnimation()
+        }
+    }
+
+    private fun startKeepAliveService() {
+        try {
+            startForegroundService(Intent(this, KeepAliveService::class.java))
+        } catch (_: Throwable) {
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        nativeRegisterSurface(terminalSurface)
-        terminalSurface.onActivityResume()
+        nativeBindSurface(terminalSurface)
         terminalSurface.requestFocus()
-    }
-
-    override fun onPause() {
-        terminalSurface.onActivityPause()
-        super.onPause()
+        terminalSurface.postInvalidateOnAnimation()
     }
 
     override fun onDestroy() {
-        onBackInvokedDispatcher.unregisterOnBackInvokedCallback(backCallback)
-        nativeRegisterSurface(null)
-        if (isFinishing) {
-            nativeDestroyAll()
+        nativeBindSurface(null)
+        try {
+            stopService(Intent(this, KeepAliveService::class.java))
+        } catch (_: Throwable) {
         }
         super.onDestroy()
     }
 
-    internal fun accentContainerColor(color: Int = accentColor): Int {
-        val r = ((color ushr 16) and 0xFF) / 5
-        val g = ((color ushr 8) and 0xFF) / 5
-        val b = (color and 0xFF) / 5
-        return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-    }
+    private fun buildHeaderBar(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(COLOR_HEADER_BG)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(4), dp(8), dp(4))
 
-    private fun rebuildExtraKeysBar() {
-        extraKeysRoot.removeAllViews()
-        modifierButtons.clear()
-
-        val spec = prefs.getString(KEY_EXTRA_KEYS_SPEC, DEFAULT_EXTRA_KEYS_SPEC)?.trim().orEmpty()
-        if (spec.isEmpty()) {
-            extraKeysRoot.visibility = View.GONE
-            return
-        }
-        extraKeysRoot.visibility = View.VISIBLE
-
-        val divider = View(this).apply {
-            setBackgroundColor(COLOR_BORDER)
-        }
-        extraKeysRoot.addView(
-            divider,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
-        )
-
-        for (rawLine in spec.split("\n")) {
-            val line = rawLine.trim()
-            if (line.isEmpty()) continue
-            val rowLayout = LinearLayout(this).apply {
+            tabContainer = LinearLayout(this@TermuxActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setBackgroundColor(COLOR_AMOLED_BG)
-                setPadding(dp(2), dp(2), dp(2), dp(2))
+                gravity = Gravity.CENTER_VERTICAL
             }
+            val tabScroll = HorizontalScrollView(this@TermuxActivity).apply {
+                isHorizontalScrollBarEnabled = false
+                overScrollMode = View.OVER_SCROLL_NEVER
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                addView(tabContainer)
+            }
+            addView(tabScroll)
 
-            var added = 0
-            for (rawToken in line.split("|")) {
-                val label = rawToken.trim()
-                if (label.isEmpty()) continue
-                val btn = createExtraKeyButton(label)
-                if (label == "CTRL" || label == "ALT") {
-                    modifierButtons.add(btn)
+            // [+] New PTY Session Button
+            addView(makeHeaderButton("+") {
+                if (nativeGetBootstrapState() == 2 && nativeGetSessionCount() < 8) {
+                    nativeCreateSession(terminalSurface.gridRows, terminalSurface.gridCols)
+                    rebuildTabs()
+                    terminalSurface.invalidateFullGrid()
                 }
-                rowLayout.addView(btn, LinearLayout.LayoutParams(0, dp(34), 1f))
-                added++
-            }
-            if (added > 0) {
-                extraKeysRoot.addView(rowLayout)
-            }
+            })
+
+            // [#] Copy All / Select Transcript Button
+            addView(makeHeaderButton("#") {
+                terminalSurface.showTranscriptCopyDialog()
+            })
+
+            // [⚙] Customize Extra Keys Button
+            addView(makeHeaderButton("⚙") {
+                showCustomizeExtraKeysDialog()
+            })
+
+            // [✕] Close Current Session Button
+            addView(makeHeaderButton("✕") {
+                if (nativeGetSessionCount() > 1) {
+                    nativeCloseSession(nativeGetActiveSession())
+                    rebuildTabs()
+                    terminalSurface.invalidateFullGrid()
+                } else {
+                    finish()
+                }
+            })
         }
-        syncModifierButtons(nativeGetModifierMask())
     }
 
-    private fun dispatchExtraKey(label: String) {
-        terminalSurface.stopTextSelection()
-        val mask = nativeDispatchCustomKey(label)
-        syncModifierButtons(mask)
-        terminalSurface.resetScrollAndBlink()
-    }
-
-    private fun createExtraKeyButton(label: String): TextView {
-        val isModifier = (label == "CTRL" || label == "ALT")
+    private fun makeHeaderButton(symbol: String, onClick: () -> Unit): TextView {
         return TextView(this).apply {
-            text = label
-            tag = label
+            text = symbol
+            setTextColor(COLOR_TEXT_PRIMARY)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-            typeface = Typeface.MONOSPACE
-            setTextColor(COLOR_TEXT)
-            background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(6))
-            layoutParams = LinearLayout.LayoutParams(0, dp(34), 1f).apply {
-                setMargins(dp(1), dp(1), dp(1), dp(1))
+            background = pillDrawable(COLOR_SURFACE_PILL, dp(8).toFloat())
+            val lp = LinearLayout.LayoutParams(dp(36), dp(32)).apply {
+                marginStart = dp(5)
             }
-
-            if (isModifier) {
-                setOnClickListener { v ->
-                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    dispatchExtraKey(label)
-                }
-            } else {
-                // Hold-to-repeat support for arrows (▲, ▼, ◀, ▶), BKSP, DEL, PGUP, PGDN, etc.
-                val repeatRunnable = object : Runnable {
-                    override fun run() {
-                        if (!isPressed) return
-                        dispatchExtraKey(label)
-                        postDelayed(this, 42L)
-                    }
-                }
-                setOnTouchListener { v, event ->
-                    when (event.actionMasked) {
-                        MotionEvent.ACTION_DOWN -> {
-                            v.isPressed = true
-                            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                            v.background = pillBg(accentContainerColor(), accentColor, dp(6))
-                            (v as TextView).setTextColor(accentColor)
-                            dispatchExtraKey(label)
-                            v.removeCallbacks(repeatRunnable)
-                            v.postDelayed(repeatRunnable, 320L)
-                            true
-                        }
-                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                            v.isPressed = false
-                            v.removeCallbacks(repeatRunnable)
-                            v.background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(6))
-                            (v as TextView).setTextColor(COLOR_TEXT)
-                            true
-                        }
-                        else -> false
-                    }
-                }
+            layoutParams = lp
+            setOnClickListener {
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                onClick()
             }
         }
     }
 
-    private fun showSettingsDialog() {
-        val currentSpec = prefs.getString(KEY_EXTRA_KEYS_SPEC, DEFAULT_EXTRA_KEYS_SPEC)
-            ?: DEFAULT_EXTRA_KEYS_SPEC
-        var tempBlinkMode = cursorBlinkMode
-        var tempShape = cursorShapePref
-        var tempAccent = accentColor
-
-        val scroll = ScrollView(this)
-        val dialogLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(8))
-            setBackgroundColor(0xFF0A0C10.toInt())
-        }
-        scroll.addView(dialogLayout)
-
-        // 1. Cursor Blink Mode Section
-        dialogLayout.addView(makeSectionTitle("Режим мигания курсора"))
-        val blinkRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(4), 0, dp(10))
-        }
-        val blinkChips = ArrayList<TextView>(3)
-        fun refreshBlinkChips() {
-            for (i in blinkChips.indices) {
-                val active = (i == tempBlinkMode)
-                blinkChips[i].setTextColor(if (active) tempAccent else COLOR_TEXT)
-                blinkChips[i].background = pillBg(
-                    if (active) accentContainerColor(tempAccent) else COLOR_SURFACE,
-                    if (active) tempAccent else COLOR_BORDER,
-                    dp(6)
+    fun rebuildTabs() {
+        tabContainer.removeAllViews()
+        val count = max(1, nativeGetSessionCount())
+        val active = nativeGetActiveSession()
+        for (i in 0 until count) {
+            val isSelected = (i == active)
+            val chip = TextView(this).apply {
+                text = "$ ${i + 1}"
+                setTextColor(if (isSelected) 0xFFFFFFFF.toInt() else COLOR_TEXT_MUTED)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                typeface = Typeface.MONOSPACE
+                gravity = Gravity.CENTER
+                setPadding(dp(12), dp(4), dp(12), dp(4))
+                background = pillDrawable(
+                    if (isSelected) COLOR_ACCENT_PRIMARY else COLOR_SURFACE_PILL,
+                    dp(8).toFloat()
                 )
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(30)
+                ).apply {
+                    marginEnd = dp(6)
+                }
+                setOnClickListener {
+                    if (nativeGetSessionCount() > i) {
+                        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        nativeSwitchSession(i)
+                        rebuildTabs()
+                        terminalSurface.invalidateFullGrid()
+                    }
+                }
             }
+            tabContainer.addView(chip)
         }
-        val blinkLabels = arrayOf("Плавный (Fade)", "Обычный", "Не мигать")
-        for (i in blinkLabels.indices) {
-            val chip = makeOptionChip(blinkLabels[i]) {
-                tempBlinkMode = i
-                refreshBlinkChips()
-            }
-            blinkChips.add(chip)
-            blinkRow.addView(chip)
-        }
-        dialogLayout.addView(blinkRow)
+    }
 
-        // 2. Cursor Shape Section
-        dialogLayout.addView(makeSectionTitle("Форма курсора"))
-        val shapeRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(4), 0, dp(10))
-        }
-        val shapeChips = ArrayList<TextView>(3)
-        fun refreshShapeChips() {
-            for (i in shapeChips.indices) {
-                val active = (i == tempShape)
-                shapeChips[i].setTextColor(if (active) tempAccent else COLOR_TEXT)
-                shapeChips[i].background = pillBg(
-                    if (active) accentContainerColor(tempAccent) else COLOR_SURFACE,
-                    if (active) tempAccent else COLOR_BORDER,
-                    dp(6)
-                )
-            }
-        }
-        val shapeLabels = arrayOf("Блок (█)", "Линия (_)", "Луч (▏)")
-        for (i in shapeLabels.indices) {
-            val chip = makeOptionChip(shapeLabels[i]) {
-                tempShape = i
-                refreshShapeChips()
-            }
-            shapeChips.add(chip)
-            shapeRow.addView(chip)
-        }
-        dialogLayout.addView(shapeRow)
+    private fun rebuildExtraKeys() {
+        extraKeysBar.removeAllViews()
+        ctrlBtnRef = null
+        altBtnRef = null
 
-        // 3. Material You Theme Accent Section
-        dialogLayout.addView(makeSectionTitle("Цвет акцента Material 3"))
-        val accentRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(4), 0, dp(10))
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val rawCsv = prefs.getString(PREF_EXTRA_KEYS, DEFAULT_EXTRA_KEYS) ?: DEFAULT_EXTRA_KEYS
+        val tokens = rawCsv.split(",").map { it.trim().uppercase() }.filter { it.isNotEmpty() }
+
+        for (token in tokens) {
+            val label = when (token) {
+                "UP" -> "▲"
+                "DOWN" -> "▼"
+                "LEFT" -> "◀"
+                "RIGHT" -> "▶"
+                "PGUP" -> "PgUp"
+                "PGDN" -> "PgDn"
+                else -> token
+            }
+
+            val btn = TextView(this).apply {
+                text = label
+                setTextColor(COLOR_TEXT_PRIMARY)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                typeface = Typeface.MONOSPACE
+                gravity = Gravity.CENTER
+                setPadding(dp(12), 0, dp(12), 0)
+                background = pillDrawable(COLOR_SURFACE_PILL, dp(7).toFloat())
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(32)
+                ).apply {
+                    marginEnd = dp(5)
+                }
+                setOnClickListener {
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    handleExtraKeyTap(token)
+                }
+            }
+
+            if (token == "CTRL") ctrlBtnRef = btn
+            if (token == "ALT") altBtnRef = btn
+            extraKeysBar.addView(btn)
         }
-        val accentOptions = arrayOf(
-            "Blue" to ACCENT_MATERIAL_BLUE,
-            "Monet" to ACCENT_MATERIAL_MONET,
-            "Cyan" to ACCENT_MATERIAL_CYAN,
-            "Mint" to ACCENT_MATERIAL_MINT
+        updateModifierPills()
+    }
+
+    private fun updateModifierPills() {
+        ctrlBtnRef?.background = pillDrawable(
+            if (ctrlLatched) COLOR_ACCENT_ACTIVE else COLOR_SURFACE_PILL,
+            dp(7).toFloat()
         )
-        val accentChips = ArrayList<TextView>(4)
-        fun refreshAccentChips() {
-            for (i in accentOptions.indices) {
-                val c = accentOptions[i].second
-                val active = (c == tempAccent)
-                accentChips[i].setTextColor(c)
-                accentChips[i].background = pillBg(
-                    if (active) accentContainerColor(c) else COLOR_SURFACE,
-                    if (active) c else COLOR_BORDER,
-                    dp(6)
-                )
-            }
-            refreshBlinkChips()
-            refreshShapeChips()
-        }
-        for (opt in accentOptions) {
-            val chip = makeOptionChip(opt.first) {
-                tempAccent = opt.second
-                refreshAccentChips()
-            }
-            accentChips.add(chip)
-            accentRow.addView(chip)
-        }
-        refreshAccentChips()
-        dialogLayout.addView(accentRow)
+        ctrlBtnRef?.setTextColor(if (ctrlLatched) 0xFF000000.toInt() else COLOR_TEXT_PRIMARY)
 
-        // 4. Extra-Keys Layout Section
-        dialogLayout.addView(
-            makeSectionTitle("Нижняя клавиатура (клавиши через | , строки через Enter)")
+        altBtnRef?.background = pillDrawable(
+            if (altLatched) COLOR_ACCENT_ACTIVE else COLOR_SURFACE_PILL,
+            dp(7).toFloat()
         )
-        val input = EditText(this).apply {
-            setText(currentSpec)
-            setTextColor(COLOR_TEXT)
+        altBtnRef?.setTextColor(if (altLatched) 0xFF000000.toInt() else COLOR_TEXT_PRIMARY)
+    }
+
+    fun consumeModifiers() {
+        if (ctrlLatched || altLatched) {
+            ctrlLatched = false
+            altLatched = false
+            nativeSetCtrlMod(false)
+            nativeSetAltMod(false)
+            updateModifierPills()
+        }
+    }
+
+    private fun handleExtraKeyTap(token: String) {
+        when (token) {
+            "CTRL" -> {
+                ctrlLatched = !ctrlLatched
+                nativeSetCtrlMod(ctrlLatched)
+                updateModifierPills()
+            }
+            "ALT" -> {
+                altLatched = !altLatched
+                nativeSetAltMod(altLatched)
+                updateModifierPills()
+            }
+            "ESC" -> {
+                nativeSendKey(KeyEvent.KEYCODE_ESCAPE, ctrlLatched, altLatched)
+                consumeModifiers()
+            }
+            "TAB" -> {
+                nativeSendKey(KeyEvent.KEYCODE_TAB, ctrlLatched, altLatched)
+                consumeModifiers()
+            }
+            "UP" -> {
+                nativeSendKey(KeyEvent.KEYCODE_DPAD_UP, ctrlLatched, altLatched)
+                consumeModifiers()
+            }
+            "DOWN" -> {
+                nativeSendKey(KeyEvent.KEYCODE_DPAD_DOWN, ctrlLatched, altLatched)
+                consumeModifiers()
+            }
+            "LEFT" -> {
+                nativeSendKey(KeyEvent.KEYCODE_DPAD_LEFT, ctrlLatched, altLatched)
+                consumeModifiers()
+            }
+            "RIGHT" -> {
+                nativeSendKey(KeyEvent.KEYCODE_DPAD_RIGHT, ctrlLatched, altLatched)
+                consumeModifiers()
+            }
+            "HOME" -> {
+                nativeSendKey(KeyEvent.KEYCODE_MOVE_HOME, ctrlLatched, altLatched)
+                consumeModifiers()
+            }
+            "END" -> {
+                nativeSendKey(KeyEvent.KEYCODE_MOVE_END, ctrlLatched, altLatched)
+                consumeModifiers()
+            }
+            "PGUP" -> {
+                nativeSendKey(KeyEvent.KEYCODE_PAGE_UP, ctrlLatched, altLatched)
+                consumeModifiers()
+            }
+            "PGDN" -> {
+                nativeSendKey(KeyEvent.KEYCODE_PAGE_DOWN, ctrlLatched, altLatched)
+                consumeModifiers()
+            }
+            else -> {
+                nativeSendText(token)
+                consumeModifiers()
+            }
+        }
+        terminalSurface.postInvalidateOnAnimation()
+    }
+
+    private fun showCustomizeExtraKeysDialog() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val current = prefs.getString(PREF_EXTRA_KEYS, DEFAULT_EXTRA_KEYS) ?: DEFAULT_EXTRA_KEYS
+        val edit = EditText(this).apply {
+            setText(current)
+            setTextColor(COLOR_TEXT_PRIMARY)
+            setHintTextColor(COLOR_TEXT_MUTED)
             typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setBackgroundColor(0xFF12151C.toInt())
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            minLines = 2
-            maxLines = 4
+            setPadding(dp(16), dp(14), dp(16), dp(14))
         }
-        dialogLayout.addView(input)
-
-        val presetsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(8), 0, 0)
-        }
-        presetsRow.addView(makeOptionChip("1-Row") { input.setText(DEFAULT_EXTRA_KEYS_SPEC) })
-        presetsRow.addView(makeOptionChip("2-Row") { input.setText(EXTENDED_EXTRA_KEYS_SPEC) })
-        presetsRow.addView(makeOptionChip("Vim/TMUX") { input.setText(VIM_TMUX_EXTRA_KEYS_SPEC) })
-        presetsRow.addView(makeOptionChip("Скрыть") { input.setText("") })
-        dialogLayout.addView(presetsRow)
-
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Настройки Termuxx")
-            .setView(scroll)
+            .setTitle("Настройка панели клавиш")
+            .setMessage("Укажите клавиши через запятую (ESC, TAB, CTRL, ALT, UP, DOWN, LEFT, RIGHT, HOME, END, PGUP, PGDN, -, /, |, ~):")
+            .setView(edit)
             .setPositiveButton("Сохранить") { _, _ ->
-                cursorBlinkMode = tempBlinkMode
-                cursorShapePref = tempShape
-                accentColor = tempAccent
-                nativeSetDefaultCursorShape(cursorShapePref)
-
-                prefs.edit()
-                    .putInt(KEY_CURSOR_BLINK_MODE, cursorBlinkMode)
-                    .putInt(KEY_CURSOR_SHAPE, cursorShapePref)
-                    .putInt(KEY_MATERIAL_ACCENT, accentColor)
-                    .putString(KEY_EXTRA_KEYS_SPEC, input.text.toString())
-                    .apply()
-
-                rebuildTabs()
-                rebuildExtraKeysBar()
-                terminalSurface.updateCursorAnimatorState()
-                terminalSurface.post { terminalSurface.syncSize() }
+                prefs.edit().putString(PREF_EXTRA_KEYS, edit.text.toString()).apply()
+                rebuildExtraKeys()
+            }
+            .setNeutralButton("Сброс") { _, _ ->
+                prefs.edit().putString(PREF_EXTRA_KEYS, DEFAULT_EXTRA_KEYS).apply()
+                rebuildExtraKeys()
             }
             .setNegativeButton("Отмена", null)
             .show()
     }
 
-    private fun makeSectionTitle(title: String): TextView {
-        return TextView(this).apply {
-            text = title
-            setTextColor(COLOR_TEXT_DIM)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-            setPadding(0, dp(4), 0, dp(2))
-        }
-    }
-
-    private fun makeOptionChip(title: String, onClick: Runnable): TextView {
-        return TextView(this).apply {
-            text = title
-            setTextColor(COLOR_TEXT)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
-            setPadding(dp(9), dp(6), dp(9), dp(6))
-            background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(6))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                setMargins(0, 0, dp(6), 0)
-            }
-            setOnClickListener { onClick.run() }
-        }
-    }
-
-    internal fun syncModifierButtons(mask: Int) {
-        val ctrl = (mask and 1) != 0
-        val alt = (mask and 2) != 0
-        for (btn in modifierButtons) {
-            val tag = btn.tag as? String ?: continue
-            val active = (tag == "CTRL" && ctrl) || (tag == "ALT" && alt)
-            btn.setTextColor(if (active) accentColor else COLOR_TEXT)
-            btn.background = pillBg(
-                if (active) accentContainerColor() else COLOR_SURFACE,
-                if (active) accentColor else COLOR_BORDER,
-                dp(6)
-            )
-        }
-    }
-
-    internal fun createSession(asRoot: Boolean) {
-        if (nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir) != 2) return
-        terminalSurface.stopTextSelection()
-        val rows = max(5, terminalSurface.rows)
-        val cols = max(10, terminalSurface.cols)
-        nativeNewSession(
-            asRoot,
-            rows,
-            cols,
-            terminalSurface.cellWidth.roundToInt(),
-            terminalSurface.cellHeight.roundToInt()
-        )
-        nativeSetDefaultCursorShape(cursorShapePref)
-        rebuildTabs()
-        terminalSurface.resetScrollAndBlink()
-        terminalSurface.invalidateAllRows()
-    }
-
-    internal fun closeCurrentSession() {
-        val active = nativeGetActiveIndex()
-        if (active < 0) return
-        terminalSurface.stopTextSelection()
-        val rem = nativeCloseSession(active)
-        if (rem <= 0) {
-            finish()
-        } else {
-            rebuildTabs()
-            terminalSurface.invalidateAllRows()
-        }
-    }
-
-    internal fun rebuildTabs() {
-        tabStrip.removeAllViews()
-        val count = nativeGetSessionCount()
-        val active = nativeGetActiveIndex()
-        for (i in 0 until count) {
-            val idx = i
-            val isRoot = nativeIsSessionRoot(i)
-            val isSelected = i == active
-            val tabAccent = if (isRoot) COLOR_ROOT else accentColor
-
-            val tab = TextView(this).apply {
-                text = (if (isRoot) "# " else "$ ") + (i + 1)
-                typeface = Typeface.MONOSPACE
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                setPadding(dp(12), dp(4), dp(12), dp(4))
-                setTextColor(if (isSelected) tabAccent else COLOR_TEXT_DIM)
-                background = pillBg(
-                    if (isSelected) accentContainerColor(tabAccent) else COLOR_SURFACE,
-                    if (isSelected) tabAccent else COLOR_BORDER,
-                    dp(8)
-                )
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    setMargins(0, 0, dp(6), 0)
-                }
-                setOnClickListener {
-                    terminalSurface.stopTextSelection()
-                    nativeSwitchSession(idx)
-                    terminalSurface.syncSize()
-                    rebuildTabs()
-                    terminalSurface.invalidateAllRows()
-                }
-            }
-            tabStrip.addView(tab)
-        }
-    }
-
-    internal fun copyToClipboard(text: String?, showToast: Boolean) {
-        if (text.isNullOrEmpty()) return
-        val cm = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-        cm.setPrimaryClip(ClipData.newPlainText("Termuxx", text))
-        if (showToast) {
-            Toast.makeText(this, "Скопировано (${text.length} симв.)", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    internal fun pasteFromClipboard() {
-        val cm = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-        val clip = cm.primaryClip ?: return
-        if (clip.itemCount == 0) return
-        val text = clip.getItemAt(0).coerceToText(this)
-        if (!text.isNullOrEmpty()) {
-            nativeSendText(text.toString(), true)
-            terminalSurface.resetScrollAndBlink()
-        }
-    }
-
-    internal fun hasClipboardText(): Boolean {
-        val cm = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager ?: return false
-        val clip = cm.primaryClip ?: return false
-        return clip.itemCount > 0 && !clip.getItemAt(0).coerceToText(this).isNullOrEmpty()
-    }
-
-    private fun makeHeaderButton(label: String, action: Runnable): TextView {
-        return TextView(this).apply {
-            text = label
-            gravity = Gravity.CENTER
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setTextColor(COLOR_TEXT)
-            background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(8))
-            layoutParams = LinearLayout.LayoutParams(dp(32), dp(28)).apply {
-                setMargins(dp(4), 0, 0, 0)
-            }
-            setOnClickListener { v ->
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                action.run()
-            }
-        }
-    }
-
-    private fun pillBg(fill: Int, stroke: Int, radiusPx: Int): GradientDrawable {
+    private fun pillDrawable(color: Int, radiusPx: Float): GradientDrawable {
         return GradientDrawable().apply {
-            setColor(fill)
-            setCornerRadius(radiusPx.toFloat())
-            setStroke(1, stroke)
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radiusPx
+            setColor(color)
         }
     }
 
-    internal fun dp(v: Int): Int {
+    private fun dp(value: Int): Int {
         return TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_DIP,
-            v.toFloat(),
+            value.toFloat(),
             resources.displayMetrics
         ).roundToInt()
     }
 
-    internal fun dpF(v: Float): Float {
-        return TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP,
-            v,
-            resources.displayMetrics
-        )
-    }
+    /**
+     * Zero-Allocation Hardware-Accelerated Terminal View with Native Android FLOATING ActionMode
+     */
+    inner class TerminalSurface(context: Context, initialSp: Float) : View(context) {
 
-    private fun requestHighRefreshRate() {
-        val d = display ?: return
-        val best = d.supportedModes.maxByOrNull { it.refreshRate } ?: return
-        window.attributes = window.attributes.apply {
-            preferredDisplayModeId = best.modeId
+        var fontSizeSp: Float = initialSp
+            private set
+
+        var charWidthPx: Float = 18f
+            private set
+        var charHeightPx: Int = 36
+            private set
+        var charBaselinePx: Int = 28
+            private set
+
+        var gridRows: Int = 24
+            private set
+        var gridCols: Int = 80
+            private set
+
+        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+            typeface = Typeface.MONOSPACE
         }
-    }
-
-    // ========================================================================
-    // Event-Driven 165Hz TUI Surface + Smooth Material Cursor + ColorOS 17 Selection
-    // ========================================================================
-    inner class TerminalSurface(context: Context) : View(context) {
-
-        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
-        private val bgPaint = Paint()
-        private val graphicPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val wavePath = Path()
-        private val baseTypeface: Typeface
-
-        internal var cellWidth = 18f
-        internal var cellHeight = 36f
-        private var cellBaseline = 28f
-        private var fontScale = 1.0f
-
-        internal var rows = 24
-        internal var cols = 80
-        internal var scrollOffset = 0
-        private var scrollAccum = 0f
-
-        private var cursorAlpha = 0.88f
-        private var cursorBlinkOn = true
-        private var activityResumed = false
-
-        private val bgRunsBuf = IntArray(512 * 3)
-        private val glyphRunsBuf = IntArray(512 * 4)
-        private val charBuf = CharArray(2)
-        private val selGeomBuf = FloatArray(14)
-
-        private var rowNodes: Array<RenderNode?>? = null
-        private var rowNodesValid: BooleanArray? = null
-        private var cachedScrollOffset = Int.MIN_VALUE
-
-        private var actionMode: ActionMode? = null
-        private val handleRadiusPx = dpF(6.5f)
-        private val handleInnerRadiusPx = dpF(4.7f)
-        private val handleStemWidthPx = dpF(2.2f)
-
-        private val gestureDetector: GestureDetector
-        private val scaleDetector: ScaleGestureDetector
-
-        // Smooth Material Cursor Fade Animator (only invalidates cursor cell bounds)
-        private val smoothCursorAnimator = ValueAnimator.ofFloat(0.14f, 0.92f).apply {
-            duration = 680L
-            repeatMode = ValueAnimator.REVERSE
-            repeatCount = ValueAnimator.INFINITE
-            interpolator = AccelerateDecelerateInterpolator()
-            addUpdateListener { anim ->
-                cursorAlpha = anim.animatedValue as Float
-                invalidateCursorCellOnly()
-            }
+        private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
         }
 
-        private val classicBlinkRunnable = object : Runnable {
-            override fun run() {
-                if (!activityResumed || cursorBlinkMode != BLINK_CLASSIC) return
-                if (scrollOffset == 0 && !nativeIsSelectingText()) {
-                    cursorBlinkOn = !cursorBlinkOn
-                    cursorAlpha = if (cursorBlinkOn) 0.90f else 0.16f
-                    invalidateCursorCellOnly()
+        // Pre-allocated JNI transfer buffers (Zero GC pressure in onDraw)
+        private val maxGridRows = 250
+        private val maxGridCols = 400
+        private val jniAttrsBuffer = LongArray(maxGridRows * maxGridCols)
+        private val jniRowStrings = Array(maxGridRows) { "" }
+        private val jniMeta = IntArray(8) // [rows, cols, curR, curC, curVis, scrollOff, bootState]
+
+        // Local cached display rows for ultra-fast drawing
+        private val cachedRowStrings = Array(maxGridRows) { "" }
+        private val cachedRowFg = IntArray(maxGridRows) { COLOR_TEXT_PRIMARY }
+        private val cachedRowBg = IntArray(maxGridRows) { COLOR_AMOLED_BG }
+        private var cachedCursorR = 0
+        private var cachedCursorC = 0
+        private var cachedCursorVis = true
+        private var sessionSpawned = false
+
+        // Native Selection state (Row/Col endpoints + System Floating Toolbar)
+        private var isSelecting = false
+        private var selStartRow = 0
+        private var selStartCol = 0
+        private var selEndRow = 0
+        private var selEndCol = 0
+        private var activeActionMode: ActionMode? = null
+        private val selectionContentRect = Rect()
+
+        private var pinchStartSp = fontSizeSp
+
+        private val scaleDetector = ScaleGestureDetector(
+            context,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    pinchStartSp = fontSizeSp
+                    return true
                 }
-                postDelayed(this, 530L)
+
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    val targetSp = (pinchStartSp * detector.scaleFactor).coerceIn(7.0f, 30.0f)
+                    if (abs(targetSp - fontSizeSp) >= 0.25f) {
+                        updateFontMetricsAndReflow(targetSp)
+                    }
+                    return true
+                }
             }
-        }
+        )
+
+        private val gestureDetector = GestureDetector(
+            context,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(e: MotionEvent): Boolean = true
+
+                override fun onSingleTapUp(e: MotionEvent): Boolean {
+                    if (isSelecting) {
+                        stopNativeSelection()
+                        return true
+                    }
+                    requestFocus()
+                    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                    imm?.showSoftInput(this@TerminalSurface, 0)
+                    return true
+                }
+
+                override fun onScroll(
+                    e1: MotionEvent?,
+                    e2: MotionEvent,
+                    distanceX: Float,
+                    distanceY: Float
+                ): Boolean {
+                    if (scaleDetector.isInProgress) return false
+                    if (isSelecting) {
+                        val r = (e2.y / charHeightPx).toInt().coerceIn(0, gridRows - 1)
+                        val c = (e2.x / charWidthPx).toInt().coerceIn(0, gridCols - 1)
+                        selEndRow = r
+                        selEndCol = c
+                        activeActionMode?.invalidateContentRect()
+                        postInvalidateOnAnimation()
+                        return true
+                    }
+                    if (!nativeGetAlternateScreen() && abs(distanceY) > 4f) {
+                        val lines = (distanceY / charHeightPx).roundToInt()
+                        if (lines != 0) {
+                            nativeScrollViewport(lines)
+                            postInvalidateOnAnimation()
+                        }
+                    }
+                    return true
+                }
+
+                override fun onLongPress(e: MotionEvent) {
+                    if (scaleDetector.isInProgress || nativeGetBootstrapState() != 2) return
+                    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    val r = (e.y / charHeightPx).toInt().coerceIn(0, gridRows - 1)
+                    val c = (e.x / charWidthPx).toInt().coerceIn(0, gridCols - 1)
+                    startNativeSelection(r, c)
+                }
+            }
+        )
 
         init {
             isFocusable = true
             isFocusableInTouchMode = true
-            setBackgroundColor(COLOR_AMOLED_BG)
-
-            baseTypeface = try {
-                Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
-            } catch (_: Throwable) {
-                Typeface.MONOSPACE
-            }
-
-            textPaint.typeface = baseTypeface
-            textPaint.fontFeatureSettings = "'liga' 0, 'calt' 0"
-            graphicPaint.style = Paint.Style.FILL
-
-            updateMetrics(false)
-
-            gestureDetector = GestureDetector(
-                context,
-                object : GestureDetector.SimpleOnGestureListener() {
-                    override fun onSingleTapUp(e: MotionEvent): Boolean {
-                        if (nativeIsSelectingText()) {
-                            stopTextSelection()
-                            return true
-                        }
-                        requestFocus()
-                        val imm = context.getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
-                        imm?.showSoftInput(this@TerminalSurface, 0)
-
-                        val modes = nativeGetModesMask()
-                        if ((modes and 8) != 0) {
-                            val col = (e.x / cellWidth).toInt() + 1
-                            val row = (e.y / cellHeight).toInt() + 1
-                            nativeSendMouse(0, col, row, true)
-                            nativeSendMouse(0, col, row, false)
-                        }
-                        return true
-                    }
-
-                    override fun onLongPress(e: MotionEvent) {
-                        if (scaleDetector.isInProgress) return
-                        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                        val col = (e.x / cellWidth).toInt().coerceIn(0, max(0, cols - 1))
-                        val row = (e.y / cellHeight).toInt().coerceIn(0, max(0, rows - 1))
-                        nativeStartTextSelection(scrollOffset, col, row)
-                        updateCursorAnimatorState()
-                        showColorOsFloatingActionMode()
-                        invalidateAllRows()
-                    }
-
-                    override fun onScroll(
-                        e1: MotionEvent?,
-                        e2: MotionEvent,
-                        distanceX: Float,
-                        distanceY: Float
-                    ): Boolean {
-                        if (scaleDetector.isInProgress) return false
-                        scrollAccum += distanceY
-                        val deltaRows = (scrollAccum / cellHeight).toInt()
-                        if (deltaRows != 0) {
-                            scrollAccum -= deltaRows * cellHeight
-                            val maxSb = nativeGetActiveScrollback()
-                            scrollOffset = (scrollOffset - deltaRows).coerceIn(0, maxSb)
-                            actionMode?.invalidateContentRect()
-                            updateCursorAnimatorState()
-                            invalidateAllRows()
-                        }
-                        return true
-                    }
-                }
-            )
-
-            scaleDetector = ScaleGestureDetector(
-                context,
-                object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                    override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
-                        stopTextSelection()
-                        return true
-                    }
-
-                    override fun onScale(detector: ScaleGestureDetector): Boolean {
-                        val prevScale = fontScale
-                        fontScale = (fontScale * detector.scaleFactor).coerceIn(0.45f, 3.0f)
-                        if (abs(fontScale - prevScale) > 0.004f) {
-                            updateMetrics(false)
-                            syncSize()
-                        }
-                        return true
-                    }
-
-                    override fun onScaleEnd(detector: ScaleGestureDetector) {
-                        updateMetrics(true)
-                        syncSize()
-                    }
-                }
-            )
+            defaultFocusHighlightEnabled = false
+            recomputeFontMetrics()
         }
 
-        private fun invalidateCursorCellOnly() {
-            val cursorState = nativeGetCursorState()
-            if (cursorState >= 0) {
-                val cRow = (cursorState ushr 16) and 0x1FFF
-                val cCol = cursorState and 0xFFFF
-                val cx = (cCol * cellWidth).toInt()
-                val cy = (cRow * cellHeight).toInt()
-                postInvalidateOnAnimation(
-                    max(0, cx - 2),
-                    max(0, cy - 2),
-                    min(width, (cx + cellWidth + 4).toInt()),
-                    min(height, (cy + cellHeight + 4).toInt())
-                )
-            }
-        }
-
-        internal fun updateCursorAnimatorState() {
-            removeCallbacks(classicBlinkRunnable)
-            val shouldAnimate = activityResumed && scrollOffset == 0 && !nativeIsSelectingText()
-            when (cursorBlinkMode) {
-                BLINK_SMOOTH -> {
-                    if (shouldAnimate) {
-                        if (!smoothCursorAnimator.isStarted) smoothCursorAnimator.start()
-                    } else {
-                        if (smoothCursorAnimator.isStarted) smoothCursorAnimator.cancel()
-                        cursorAlpha = 0.88f
-                    }
-                }
-                BLINK_CLASSIC -> {
-                    if (smoothCursorAnimator.isStarted) smoothCursorAnimator.cancel()
-                    cursorBlinkOn = true
-                    cursorAlpha = 0.90f
-                    if (shouldAnimate) postDelayed(classicBlinkRunnable, 530L)
-                }
-                else -> {
-                    if (smoothCursorAnimator.isStarted) smoothCursorAnimator.cancel()
-                    cursorAlpha = 0.88f
-                }
-            }
-            postInvalidateOnAnimation()
-        }
-
-        internal fun onActivityResume() {
-            activityResumed = true
-            updateCursorAnimatorState()
-        }
-
-        internal fun onActivityPause() {
-            activityResumed = false
-            removeCallbacks(classicBlinkRunnable)
-            if (smoothCursorAnimator.isStarted) smoothCursorAnimator.cancel()
-            stopTextSelection()
-        }
-
-        private fun showColorOsFloatingActionMode() {
-            actionMode?.finish()
-            val callback = object : ActionMode.Callback2() {
-                override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
-                    val show = MenuItem.SHOW_AS_ACTION_IF_ROOM or MenuItem.SHOW_AS_ACTION_WITH_TEXT
-                    menu.add(Menu.NONE, ITEM_COPY, Menu.NONE, "Копировать").setShowAsAction(show)
-                    menu.add(Menu.NONE, ITEM_PASTE, Menu.NONE, "Вставить")
-                        .setEnabled(hasClipboardText())
-                        .setShowAsAction(show)
-                    menu.add(Menu.NONE, ITEM_SELECT_ALL, Menu.NONE, "Выбрать всё").setShowAsAction(show)
-                    menu.add(Menu.NONE, ITEM_SHARE, Menu.NONE, "Поделиться")
-                        .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
-                    return true
-                }
-
-                override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
-                    menu.findItem(ITEM_PASTE)?.isEnabled = hasClipboardText()
-                    return true
-                }
-
-                override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
-                    when (item.itemId) {
-                        ITEM_COPY -> {
-                            copyToClipboard(nativeGetSelectedText(), true)
-                            stopTextSelection()
-                        }
-                        ITEM_PASTE -> {
-                            stopTextSelection()
-                            pasteFromClipboard()
-                        }
-                        ITEM_SELECT_ALL -> {
-                            nativeSelectAll(scrollOffset)
-                            invalidateAllRows()
-                            actionMode?.invalidateContentRect()
-                        }
-                        ITEM_SHARE -> {
-                            val selected = nativeGetSelectedText()
-                            stopTextSelection()
-                            if (selected.isNotEmpty()) {
-                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_TEXT, selected)
-                                }
-                                startActivity(Intent.createChooser(sendIntent, "Поделиться текстом"))
-                            }
-                        }
-                    }
-                    return true
-                }
-
-                override fun onDestroyActionMode(mode: ActionMode) {}
-
-                override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
-                    if (nativeGetSelectionGeometryPx(
-                            scrollOffset,
-                            cellWidth,
-                            cellHeight,
-                            width.toFloat(),
-                            height.toFloat(),
-                            handleRadiusPx,
-                            selGeomBuf
-                        )
-                    ) {
-                        outRect.set(
-                            selGeomBuf[10].roundToInt(),
-                            selGeomBuf[11].roundToInt(),
-                            selGeomBuf[12].roundToInt(),
-                            selGeomBuf[13].roundToInt()
-                        )
-                    } else {
-                        outRect.set(0, 0, width, height)
-                    }
-                }
-            }
-            actionMode = startActionMode(callback, ActionMode.TYPE_FLOATING)
-        }
-
-        internal fun stopTextSelection(): Boolean {
-            actionMode?.finish()
-            actionMode = null
-            if (!nativeIsSelectingText()) return false
-            val stopped = nativeStopTextSelection()
-            updateCursorAnimatorState()
-            invalidateAllRows()
-            return stopped
-        }
-
-        internal fun isSelectingText(): Boolean = nativeIsSelectingText()
-
-        private fun updateMetrics(forceRebuildCache: Boolean) {
+        private fun recomputeFontMetrics() {
             val px = TypedValue.applyDimension(
                 TypedValue.COMPLEX_UNIT_SP,
-                13.5f * fontScale,
+                fontSizeSp,
                 resources.displayMetrics
             )
             textPaint.textSize = px
-            textPaint.typeface = baseTypeface
+            charWidthPx = max(6f, textPaint.measureText("M"))
             val fm = textPaint.fontMetrics
-            cellWidth = max(6f, textPaint.measureText("M"))
-            cellHeight = max(12f, ceil((fm.descent - fm.ascent + fm.leading).toDouble()).toFloat())
-            cellBaseline = -fm.ascent
-            if (forceRebuildCache) {
-                rowNodes = null
-                rowNodesValid = null
-            }
+            charHeightPx = max(12, (fm.descent - fm.ascent + fm.leading + 2f).roundToInt())
+            charBaselinePx = (-fm.ascent).roundToInt()
         }
 
-        internal fun resetScrollAndBlink() {
-            scrollOffset = 0
-            cursorBlinkOn = true
-            cursorAlpha = 0.92f
-            if (cursorBlinkMode == BLINK_SMOOTH && smoothCursorAnimator.isStarted) {
-                smoothCursorAnimator.currentPlayTime = 680L
+        private fun updateFontMetricsAndReflow(newSp: Float) {
+            fontSizeSp = newSp
+            recomputeFontMetrics()
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putFloat(PREF_FONT_SIZE, fontSizeSp)
+                .apply()
+
+            if (width > 0 && height > 0) {
+                val newCols = (width / charWidthPx).toInt().coerceIn(20, maxGridCols)
+                val newRows = (height / charHeightPx).coerceIn(5, maxGridRows)
+                if (newCols != gridCols || newRows != gridRows) {
+                    gridCols = newCols
+                    gridRows = newRows
+                    nativeResizePty(gridRows, gridCols)
+                }
             }
-            updateCursorAnimatorState()
-            invalidateAllRows()
+            invalidateFullGrid()
         }
 
-        internal fun invalidateAllRows() {
-            rowNodesValid?.fill(false)
+        fun invalidateFullGrid() {
             postInvalidateOnAnimation()
         }
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
-            syncSize()
-        }
-
-        internal fun syncSize() {
-            val w = width
-            val h = height
             if (w <= 0 || h <= 0) return
-            val newCols = max(10, (w / cellWidth).toInt())
-            val newRows = max(4, (h / cellHeight).toInt())
-            val changed = (newCols != cols || newRows != rows)
-            cols = newCols
-            rows = newRows
-            if (changed || rowNodes == null || rowNodes?.size != rows) {
-                rowNodes = arrayOfNulls(rows)
-                rowNodesValid = BooleanArray(rows)
-            } else {
-                rowNodesValid?.fill(false)
+            val newCols = (w / charWidthPx).toInt().coerceIn(20, maxGridCols)
+            val newRows = (h / charHeightPx).coerceIn(5, maxGridRows)
+            gridCols = newCols
+            gridRows = newRows
+
+            if (nativeGetBootstrapState() == 2) {
+                if (!sessionSpawned && nativeGetSessionCount() == 0) {
+                    sessionSpawned = true
+                    nativeCreateSession(gridRows, gridCols)
+                    post { rebuildTabs() }
+                } else {
+                    nativeResizePty(gridRows, gridCols)
+                }
             }
-            nativeResizeActive(rows, cols, cellWidth.roundToInt(), cellHeight.roundToInt())
             postInvalidateOnAnimation()
         }
 
         override fun onDraw(canvas: Canvas) {
-            canvas.drawColor(COLOR_AMOLED_BG)
+            // Paint only within this View's bounds so headerBar above is never affected
+            bgPaint.color = COLOR_AMOLED_BG
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
 
-            val bootState = nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
+            val bootState = nativeGetBootstrapState()
             if (bootState != 2) {
-                textPaint.color = accentColor
-                textPaint.typeface = baseTypeface
-                canvas.drawText(
-                    "⚡ Инициализация среды Termuxx (Android 17 / C++23)...",
-                    dp(16).toFloat(),
-                    height / 2f,
-                    textPaint
-                )
+                textPaint.color = COLOR_ACCENT_ACTIVE
+                val msg = if (bootState == 3) {
+                    "Ошибка bootstrap: ${nativeGetBootstrapError()}"
+                } else {
+                    "⚡ Инициализация среды Termux C++23..."
+                }
+                canvas.drawText(msg, dp(16).toFloat(), dp(48).toFloat(), textPaint)
+                if (bootState != 3) {
+                    // Poll every 40ms while initializing so screen transitions automatically without waiting for touch
+                    postInvalidateDelayed(40L)
+                }
                 return
             }
 
-            if (nativeGetSessionCount() == 0) {
-                nativeNewSession(
-                    false,
-                    max(5, rows),
-                    max(10, cols),
-                    cellWidth.roundToInt(),
-                    cellHeight.roundToInt()
-                )
-                nativeSetDefaultCursorShape(cursorShapePref)
-                rebuildTabs()
-                rowNodesValid?.fill(false)
+            if (!sessionSpawned && nativeGetSessionCount() == 0 && width > 0 && height > 0) {
+                sessionSpawned = true
+                nativeCreateSession(gridRows, gridCols)
+                post { rebuildTabs() }
             }
 
-            val oscClip = nativeConsumeOsc52Clipboard()
-            if (!oscClip.isNullOrEmpty()) {
-                copyToClipboard(oscClip, false)
-            }
+            // Pull only dirty rows from C++23 engine
+            val dirtyCount = nativeFetchDirtyRows(jniAttrsBuffer, jniRowStrings, jniMeta)
+            val rows = jniMeta[0].coerceIn(1, maxGridRows)
+            val cols = jniMeta[1].coerceIn(1, maxGridCols)
+            cachedCursorR = jniMeta[2]
+            cachedCursorC = jniMeta[3]
+            cachedCursorVis = (jniMeta[4] != 0)
 
-            val engineDirty = nativeConsumeFrameDirty()
-            val nodes = rowNodes ?: arrayOfNulls<RenderNode>(rows).also { rowNodes = it }
-            val valid = rowNodesValid ?: BooleanArray(rows).also { rowNodesValid = it }
-
-            if (scrollOffset != cachedScrollOffset) {
-                valid.fill(false)
-                cachedScrollOffset = scrollOffset
-            } else if (engineDirty) {
-                for (r in 0 until min(rows, valid.size)) {
-                    if (nativeIsRowDirty(r)) {
-                        valid[r] = false
-                    }
-                }
-                nativeClearDirtyFlags()
-            }
-
-            if (canvas.isHardwareAccelerated) {
-                val rowHeightPx = ceil(cellHeight.toDouble()).toInt()
+            if (dirtyCount > 0) {
                 for (r in 0 until rows) {
-                    val top = r * cellHeight
-                    var node = nodes[r]
-                    if (node == null) {
-                        node = RenderNode("row_$r")
-                        nodes[r] = node
-                        valid[r] = false
-                    }
-                    if (!valid[r] || !node.hasDisplayList()) {
-                        node.setPosition(0, 0, width, rowHeightPx)
-                        val rc = node.beginRecording()
-                        drawSingleRow(rc, r, 0f)
-                        node.endRecording()
-                        valid[r] = true
-                    }
-                    canvas.save()
-                    canvas.translate(0f, top)
-                    canvas.drawRenderNode(node)
-                    canvas.restore()
-                }
-            } else {
-                for (r in 0 until rows) {
-                    drawSingleRow(canvas, r, r * cellHeight)
+                    val str = jniRowStrings[r]
+                    cachedRowStrings[r] = str
+                    val firstPack = jniAttrsBuffer[r * cols]
+                    val fg = ((firstPack ushr 32) and 0xFFFFFFFFL).toInt()
+                    val bg = (firstPack and 0xFFFFFFFFL).toInt()
+                    cachedRowFg[r] = if (fg != 0) fg else COLOR_TEXT_PRIMARY
+                    cachedRowBg[r] = if (bg != 0) bg else COLOR_AMOLED_BG
                 }
             }
 
-            val selecting = nativeIsSelectingText()
+            // Normalize selection range
+            var sR1 = selStartRow
+            var sC1 = selStartCol
+            var sR2 = selEndRow
+            var sC2 = selEndCol
+            if (sR1 > sR2 || (sR1 == sR2 && sC1 > sC2)) {
+                val tr = sR1; sR1 = sR2; sR2 = tr
+                val tc = sC1; sC1 = sC2; sC2 = tc
+            }
 
-            // Draw Smooth Material Cursor (DECSCUSR) when at bottom of scrollback and not selecting
-            if (scrollOffset == 0 && !selecting) {
-                val cursorState = nativeGetCursorState()
-                if (cursorState >= 0) {
-                    val shape = (cursorState ushr 29) and 3
-                    val cRow = (cursorState ushr 16) and 0x1FFF
-                    val cCol = cursorState and 0xFFFF
-                    if (cRow in 0 until rows && cCol in 0 until cols) {
-                        val cx = cCol * cellWidth
-                        val cy = cRow * cellHeight
-                        val alphaInt = (cursorAlpha.coerceIn(0.05f, 1.0f) * 255f).roundToInt()
-                        bgPaint.color = (alphaInt shl 24) or (accentColor and 0x00FFFFFF)
-                        when (shape) {
-                            1 -> canvas.drawRoundRect(
-                                cx,
-                                cy + cellHeight - dpF(2.5f),
-                                cx + cellWidth,
-                                cy + cellHeight,
-                                dpF(1.2f),
-                                dpF(1.2f),
-                                bgPaint
-                            )
-                            2 -> canvas.drawRoundRect(
-                                cx,
-                                cy + dpF(1f),
-                                cx + dpF(2.4f),
-                                cy + cellHeight - dpF(1f),
-                                dpF(1.2f),
-                                dpF(1.2f),
-                                bgPaint
-                            )
-                            else -> canvas.drawRoundRect(
-                                cx,
-                                cy + dpF(1f),
-                                cx + cellWidth,
-                                cy + cellHeight - dpF(1f),
-                                dpF(2f),
-                                dpF(2f),
-                                bgPaint
-                            )
+            for (r in 0 until rows) {
+                val topY = (r * charHeightPx).toFloat()
+                val bottomY = topY + charHeightPx
+                val baseY = topY + charBaselinePx
+
+                if (cachedRowBg[r] != COLOR_AMOLED_BG) {
+                    bgPaint.color = cachedRowBg[r]
+                    canvas.drawRect(0f, topY, width.toFloat(), bottomY, bgPaint)
+                }
+
+                // Draw native text selection highlight
+                if (isSelecting && r in sR1..sR2) {
+                    val cStart = if (r == sR1) sC1 else 0
+                    val cEnd = if (r == sR2) sC2 + 1 else cols
+                    bgPaint.color = COLOR_SELECTION_BG
+                    canvas.drawRect(
+                        cStart * charWidthPx,
+                        topY,
+                        cEnd * charWidthPx,
+                        bottomY,
+                        bgPaint
+                    )
+                }
+
+                val line = cachedRowStrings[r]
+                if (line.isNotEmpty()) {
+                    textPaint.color = cachedRowFg[r]
+                    canvas.drawText(line, 0f, baseY, textPaint)
+                }
+            }
+
+            // Draw active block cursor
+            if (cachedCursorVis && !isSelecting && cachedCursorR in 0 until rows) {
+                val cx = cachedCursorC * charWidthPx
+                val cy = (cachedCursorR * charHeightPx).toFloat()
+                bgPaint.color = COLOR_ACCENT_ACTIVE
+                canvas.drawRect(cx, cy, cx + charWidthPx, cy + charHeightPx, bgPaint)
+            }
+        }
+
+        private fun startNativeSelection(row: Int, col: Int) {
+            isSelecting = true
+            selStartRow = row
+            selStartCol = col
+            selEndRow = row
+            selEndCol = min(gridCols - 1, col + 6)
+            updateSelectionContentRect()
+
+            activeActionMode?.finish()
+            activeActionMode = startActionMode(object : ActionMode.Callback2() {
+                override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                    menu.add(0, 1, 0, "Копировать").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+                    menu.add(0, 2, 1, "Выделить всё").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+                    menu.add(0, 3, 2, "Вставить").setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+                    return true
+                }
+
+                override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean = false
+
+                override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+                    when (item.itemId) {
+                        1 -> {
+                            val selected = nativeGetSelectedText(selStartRow, selStartCol, selEndRow, selEndCol)
+                            copyToClipboard(selected)
+                            stopNativeSelection()
+                            return true
+                        }
+                        2 -> {
+                            selStartRow = 0
+                            selStartCol = 0
+                            selEndRow = gridRows - 1
+                            selEndCol = gridCols - 1
+                            updateSelectionContentRect()
+                            mode.invalidateContentRect()
+                            postInvalidateOnAnimation()
+                            return true
+                        }
+                        3 -> {
+                            pasteFromClipboard()
+                            stopNativeSelection()
+                            return true
                         }
                     }
+                    return false
                 }
-            }
 
-            // Draw Native ColorOS 17 Selection Handles (Top-circle left stem + Bottom-circle right stem)
-            if (selecting && nativeGetSelectionGeometryPx(
-                    scrollOffset,
-                    cellWidth,
-                    cellHeight,
-                    width.toFloat(),
-                    height.toFloat(),
-                    handleRadiusPx,
-                    selGeomBuf
-                )
-            ) {
-                drawColorOs17Handle(
-                    canvas,
-                    selGeomBuf[0],
-                    selGeomBuf[1],
-                    selGeomBuf[2],
-                    selGeomBuf[3],
-                    selGeomBuf[4]
-                )
-                drawColorOs17Handle(
-                    canvas,
-                    selGeomBuf[5],
-                    selGeomBuf[6],
-                    selGeomBuf[7],
-                    selGeomBuf[8],
-                    selGeomBuf[9]
-                )
+                override fun onDestroyActionMode(mode: ActionMode) {
+                    isSelecting = false
+                    activeActionMode = null
+                    postInvalidateOnAnimation()
+                }
+
+                override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
+                    updateSelectionContentRect()
+                    outRect.set(selectionContentRect)
+                }
+            }, ActionMode.TYPE_FLOATING)
+
+            postInvalidateOnAnimation()
+        }
+
+        private fun updateSelectionContentRect() {
+            val minR = min(selStartRow, selEndRow)
+            val maxR = max(selStartRow, selEndRow)
+            val minC = min(selStartCol, selEndCol)
+            val maxC = max(selStartCol, selEndCol)
+            selectionContentRect.set(
+                (minC * charWidthPx).toInt(),
+                max(0, minR * charHeightPx - charHeightPx),
+                ((maxC + 2) * charWidthPx).toInt(),
+                min(height, (maxR + 1) * charHeightPx)
+            )
+        }
+
+        fun stopNativeSelection() {
+            isSelecting = false
+            activeActionMode?.finish()
+            activeActionMode = null
+            postInvalidateOnAnimation()
+        }
+
+        private fun copyToClipboard(text: String) {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            cm?.setPrimaryClip(ClipData.newPlainText("TermuxX", text))
+            Toast.makeText(context, "Скопировано в буфер обмена", Toast.LENGTH_SHORT).show()
+        }
+
+        private fun pasteFromClipboard() {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            val item = cm?.primaryClip?.getItemAt(0)
+            val text = item?.coerceToText(context)?.toString()
+            if (!text.isNullOrEmpty()) {
+                nativeSendText(text)
             }
         }
 
-        private fun drawColorOs17Handle(
-            canvas: Canvas,
-            stemX: Float,
-            stemTopY: Float,
-            stemBotY: Float,
-            circleX: Float,
-            circleY: Float
-        ) {
-            if (stemBotY < -handleRadiusPx * 2f || stemTopY > height + handleRadiusPx * 2f) return
-
-            handlePaint.style = Paint.Style.STROKE
-            handlePaint.strokeWidth = handleStemWidthPx
-            handlePaint.color = COLOR_HANDLE_STEM
-            canvas.drawLine(stemX, stemTopY, stemX, stemBotY, handlePaint)
-
-            handlePaint.style = Paint.Style.FILL
-            handlePaint.color = COLOR_HANDLE_RING
-            canvas.drawCircle(circleX, circleY, handleRadiusPx, handlePaint)
-
-            handlePaint.color = COLOR_HANDLE_FILL
-            canvas.drawCircle(circleX, circleY, handleInnerRadiusPx, handlePaint)
-        }
-
-        private fun drawSingleRow(rc: Canvas, r: Int, top: Float) {
-            val bottom = top + cellHeight
-            val baseY = top + cellBaseline
-
-            val packed = nativePackRowRender(scrollOffset, r, bgRunsBuf, glyphRunsBuf)
-            val bgCount = (packed ushr 16) and 0xFFFF
-            val glCount = packed and 0xFFFF
-
-            for (i in 0 until bgCount) {
-                val base = i * 3
-                val startCol = bgRunsBuf[base]
-                val endCol = bgRunsBuf[base + 1]
-                bgPaint.color = bgRunsBuf[base + 2]
-                rc.drawRect(startCol * cellWidth, top, endCol * cellWidth, bottom, bgPaint)
+        fun showTranscriptCopyDialog() {
+            val fullText = nativeGetTranscriptText()
+            val tv = TextView(context).apply {
+                text = fullText.ifEmpty { "Буфер терминала пуст." }
+                setTextIsSelectable(true)
+                typeface = Typeface.MONOSPACE
+                setTextColor(COLOR_TEXT_PRIMARY)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setPadding(dp(16), dp(12), dp(16), dp(12))
             }
-
-            var lastFlags = -1
-            for (i in 0 until glCount) {
-                val base = i * 4
-                val cp = glyphRunsBuf[base]
-                val col = glyphRunsBuf[base + 1]
-                val fg = glyphRunsBuf[base + 2]
-                val flags = glyphRunsBuf[base + 3]
-                val x = col * cellWidth
-
-                if (cp == -1) {
-                    val x0 = (flags ushr 24) and 0xFF
-                    val y0 = (flags ushr 16) and 0xFF
-                    val x1 = (flags ushr 8) and 0xFF
-                    val y1 = flags and 0xFF
-                    graphicPaint.color = fg
-                    graphicPaint.style = Paint.Style.FILL
-                    rc.drawRect(
-                        x + cellWidth * (x0 * 0.0625f),
-                        top + cellHeight * (y0 * 0.0625f),
-                        x + cellWidth * (x1 * 0.0625f),
-                        top + cellHeight * (y1 * 0.0625f),
-                        graphicPaint
-                    )
-                    continue
-                }
-
-                val styleBits = flags and 5
-                if (styleBits != lastFlags) {
-                    lastFlags = styleBits
-                    val style = when {
-                        (styleBits and 5) == 5 -> Typeface.BOLD_ITALIC
-                        (styleBits and 1) != 0 -> Typeface.BOLD
-                        (styleBits and 4) != 0 -> Typeface.ITALIC
-                        else -> Typeface.NORMAL
-                    }
-                    textPaint.typeface = Typeface.create(baseTypeface, style)
-                }
-                textPaint.color = fg
-                val charCount = Character.toChars(cp, charBuf, 0)
-                rc.drawText(charBuf, 0, charCount, x, baseY, textPaint)
-
-                if ((flags and (8 or 1024 or 2048)) != 0) {
-                    graphicPaint.color = fg
-                    graphicPaint.strokeWidth = max(1.5f, cellHeight * 0.05f)
-                    if ((flags and 1024) != 0) {
-                        graphicPaint.style = Paint.Style.STROKE
-                        wavePath.reset()
-                        val wy = bottom - graphicPaint.strokeWidth * 1.5f
-                        val amp = max(1.5f, cellHeight * 0.06f)
-                        wavePath.moveTo(x, wy)
-                        wavePath.quadTo(x + cellWidth * 0.25f, wy - amp, x + cellWidth * 0.5f, wy)
-                        wavePath.quadTo(x + cellWidth * 0.75f, wy + amp, x + cellWidth, wy)
-                        rc.drawPath(wavePath, graphicPaint)
-                        graphicPaint.style = Paint.Style.FILL
-                    } else if ((flags and 2048) != 0) {
-                        val u1 = bottom - graphicPaint.strokeWidth * 3f
-                        val u2 = bottom - graphicPaint.strokeWidth
-                        rc.drawLine(x, u1, x + cellWidth, u1, graphicPaint)
-                        rc.drawLine(x, u2, x + cellWidth, u2, graphicPaint)
-                    } else {
-                        val u = bottom - graphicPaint.strokeWidth
-                        rc.drawLine(x, u, x + cellWidth, u, graphicPaint)
-                    }
-                }
-
-                if ((flags and 128) != 0) {
-                    graphicPaint.color = fg
-                    graphicPaint.strokeWidth = max(1.5f, cellHeight * 0.05f)
-                    val sy = top + cellHeight * 0.52f
-                    rc.drawLine(x, sy, x + cellWidth, sy, graphicPaint)
-                }
+            val scroll = ScrollView(context).apply {
+                addView(tv)
             }
+            AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Выделение и копирование истории")
+                .setView(scroll)
+                .setPositiveButton("Копировать всё") { _, _ ->
+                    copyToClipboard(fullText)
+                }
+                .setNeutralButton("Вставить в терминал") { _, _ ->
+                    pasteFromClipboard()
+                }
+                .setNegativeButton("Закрыть", null)
+                .show()
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
-            if (nativeIsSelectingText() && event.pointerCount == 1) {
-                val dragRes = nativeOnSelectionTouchPx(
-                    event.actionMasked,
-                    scrollOffset,
-                    event.x,
-                    event.y,
-                    cellWidth,
-                    cellHeight,
-                    width.toFloat(),
-                    height.toFloat(),
-                    handleRadiusPx
-                )
-                if (dragRes == 1) {
-                    actionMode?.hide(-1)
-                    invalidateAllRows()
-                    return true
-                } else if (dragRes == 2) {
-                    actionMode?.hide(0)
-                    actionMode?.invalidateContentRect()
-                    invalidateAllRows()
-                    return true
-                }
-            }
-
             scaleDetector.onTouchEvent(event)
-            if (!scaleDetector.isInProgress) {
-                gestureDetector.onTouchEvent(event)
+            gestureDetector.onTouchEvent(event)
+            if (isSelecting && event.actionMasked == MotionEvent.ACTION_MOVE && !scaleDetector.isInProgress) {
+                selEndRow = (event.y / charHeightPx).toInt().coerceIn(0, gridRows - 1)
+                selEndCol = (event.x / charWidthPx).toInt().coerceIn(0, gridCols - 1)
+                activeActionMode?.invalidateContentRect()
+                postInvalidateOnAnimation()
             }
             return true
         }
@@ -1431,146 +1026,84 @@ class TermuxActivity : Activity() {
                 EditorInfo.IME_FLAG_NO_EXTRACT_UI or
                 EditorInfo.IME_ACTION_NONE
 
-            return object : BaseInputConnection(this, false) {
+            return object : BaseInputConnection(this, true) {
+                private val editableBuf = SpannableStringBuilder()
+
+                override fun getEditable(): Editable {
+                    if (editableBuf.isEmpty()) {
+                        Selection.setSelection(editableBuf, 0)
+                    }
+                    return editableBuf
+                }
+
                 override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
                     if (!text.isNullOrEmpty()) {
-                        stopTextSelection()
-                        nativeSendText(text.toString(), false)
-                        syncModifierButtons(nativeGetModifierMask())
-                        resetScrollAndBlink()
+                        nativeResetScroll()
+                        nativeSendText(text.toString())
+                        consumeModifiers()
+                        postInvalidateOnAnimation()
                     }
+                    editableBuf.clear()
+                    return true
+                }
+
+                override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                    if (!text.isNullOrEmpty()) {
+                        nativeResetScroll()
+                        nativeSendText(text.toString())
+                        consumeModifiers()
+                        postInvalidateOnAnimation()
+                    }
+                    editableBuf.clear()
                     return true
                 }
 
                 override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-                    stopTextSelection()
-                    for (i in 0 until beforeLength) {
-                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
+                    repeat(max(1, beforeLength)) {
+                        nativeSendKey(KeyEvent.KEYCODE_DEL, false, false)
                     }
-                    for (i in 0 until afterLength) {
-                        nativeSendKeyEvent(KeyEvent.KEYCODE_FORWARD_DEL, 0, 0)
-                    }
-                    resetScrollAndBlink()
+                    postInvalidateOnAnimation()
                     return true
                 }
 
                 override fun sendKeyEvent(event: KeyEvent): Boolean {
                     if (event.action == KeyEvent.ACTION_DOWN) {
-                        this@TerminalSurface.onKeyDown(event.keyCode, event)
+                        handleHardwareKeyDown(event.keyCode, event)
                     }
                     return true
                 }
             }
         }
 
-        override fun onKeyPreIme(keyCode: Int, event: KeyEvent): Boolean {
-            if (keyCode == KeyEvent.KEYCODE_BACK && nativeIsSelectingText()) {
-                if (event.action == KeyEvent.ACTION_UP) {
-                    stopTextSelection()
-                }
-                return true
-            }
-            return super.onKeyPreIme(keyCode, event)
+        override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+            if (handleHardwareKeyDown(keyCode, event)) return true
+            return super.onKeyDown(keyCode, event)
         }
 
-        override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-            if (nativeIsSelectingText()) {
-                if (keyCode == KeyEvent.KEYCODE_BACK) {
-                    stopTextSelection()
+        private fun handleHardwareKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+            if (keyCode == KeyEvent.KEYCODE_BACK) {
+                if (isSelecting) {
+                    stopNativeSelection()
                     return true
                 }
-                stopTextSelection()
+                return false
             }
+            nativeResetScroll()
+            val isCtrl = event.isCtrlPressed || ctrlLatched
+            val isAlt = event.isAltPressed || altLatched
 
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                val mask = nativeDispatchCustomKey("CTRL")
-                syncModifierButtons(mask)
+            val uni = event.getUnicodeChar(event.metaState and KeyEvent.META_CTRL_MASK.inv())
+            if (uni != 0 && !isCtrl && !isAlt && keyCode != KeyEvent.KEYCODE_ENTER && keyCode != KeyEvent.KEYCODE_DEL && keyCode != KeyEvent.KEYCODE_TAB && keyCode != KeyEvent.KEYCODE_ESCAPE) {
+                nativeSendText(String(Character.toChars(uni)))
+                consumeModifiers()
+                postInvalidateOnAnimation()
                 return true
             }
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-                val mask = nativeDispatchCustomKey("ALT")
-                syncModifierButtons(mask)
-                return true
-            }
 
-            val unicode = event.getUnicodeChar(event.metaState and KeyEvent.META_CTRL_MASK.inv())
-            val res = nativeSendKeyEvent(keyCode, unicode, event.metaState)
-            syncModifierButtons(nativeGetModifierMask())
-            resetScrollAndBlink()
-
-            if (res == 2) {
-                closeCurrentSession()
-                return true
-            }
-            return res != 0 || super.onKeyDown(keyCode, event)
+            nativeSendKey(keyCode, isCtrl, isAlt)
+            consumeModifiers()
+            postInvalidateOnAnimation()
+            return true
         }
-    }
-
-    companion object {
-        init {
-            try {
-                System.loadLibrary("termuxx-core")
-            } catch (_: UnsatisfiedLinkError) {
-                System.loadLibrary("termux-core")
-            }
-        }
-
-        @JvmStatic external fun nativeRegisterSurface(surface: View?)
-        @JvmStatic external fun nativeInitAndPollBootstrap(nativeLibDir: String): Int
-        @JvmStatic external fun nativeNewSession(asRoot: Boolean, rows: Int, cols: Int, cellW: Int, cellH: Int): Int
-        @JvmStatic external fun nativeSwitchSession(index: Int)
-        @JvmStatic external fun nativeCloseSession(index: Int): Int
-        @JvmStatic external fun nativeDestroyAll()
-        @JvmStatic external fun nativeGetSessionCount(): Int
-        @JvmStatic external fun nativeGetActiveIndex(): Int
-        @JvmStatic external fun nativeIsSessionRoot(index: Int): Boolean
-        @JvmStatic external fun nativeResizeActive(rows: Int, cols: Int, cellW: Int, cellH: Int)
-        @JvmStatic external fun nativeConsumeFrameDirty(): Boolean
-        @JvmStatic external fun nativeConsumeOsc52Clipboard(): String?
-        @JvmStatic external fun nativeDispatchCustomKey(keyLabel: String): Int
-        @JvmStatic external fun nativeGetModifierMask(): Int
-        @JvmStatic external fun nativeSendText(text: String, isPaste: Boolean)
-        @JvmStatic external fun nativeSendKeyEvent(keyCode: Int, unicodeChar: Int, metaState: Int): Int
-        @JvmStatic external fun nativeSendMouse(button: Int, col: Int, row: Int, pressed: Boolean)
-        @JvmStatic external fun nativeGetActiveScrollback(): Int
-        @JvmStatic external fun nativeIsRowDirty(screenRow: Int): Boolean
-        @JvmStatic external fun nativeClearDirtyFlags()
-        @JvmStatic external fun nativePackRowRender(
-            scrollOffset: Int,
-            screenRow: Int,
-            outBgRuns: IntArray,
-            outGlyphs: IntArray
-        ): Int
-        @JvmStatic external fun nativeSetDefaultCursorShape(shape: Int)
-        @JvmStatic external fun nativeGetCursorState(): Int
-        @JvmStatic external fun nativeGetModesMask(): Int
-        @JvmStatic external fun nativeGetTranscriptText(): String
-        @JvmStatic external fun nativeStartTextSelection(scrollOffset: Int, screenCol: Int, screenRow: Int)
-        @JvmStatic external fun nativeUpdateSelectionHandle(isStartHandle: Boolean, col: Int, logicalY: Int)
-        @JvmStatic external fun nativeOnSelectionTouchPx(
-            action: Int,
-            scrollOffset: Int,
-            touchX: Float,
-            touchY: Float,
-            cellW: Float,
-            cellH: Float,
-            viewW: Float,
-            viewH: Float,
-            radiusPx: Float
-        ): Int
-        @JvmStatic external fun nativeGetSelectionGeometryPx(
-            scrollOffset: Int,
-            cellW: Float,
-            cellH: Float,
-            viewW: Float,
-            viewH: Float,
-            radiusPx: Float,
-            outGeom: FloatArray
-        ): Boolean
-        @JvmStatic external fun nativeStopTextSelection(): Boolean
-        @JvmStatic external fun nativeIsSelectingText(): Boolean
-        @JvmStatic external fun nativeSelectAll(scrollOffset: Int)
-        @JvmStatic external fun nativeGetSelectionSelectors(outSelectors: IntArray)
-        @JvmStatic external fun nativeGetSelectedText(): String
     }
 }

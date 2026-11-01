@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Build-Time Bootstrap Updater & Binary Relocator for Termuxx (com.termuxx).
+Build-Time Bootstrap Updater, APT Lists Pre-Populator & Binary Relocator for Termuxx (com.termuxx).
 Runs during APK build to:
-1. Fetch the live Termux aarch64 package index from packages-cf.termux.dev.
-2. Compare every package in bootstrap-aarch64.zip's var/lib/dpkg/status with the live repository.
-3. Download and slipstream any newer .deb packages directly into the bootstrap archive
-   (updating data files, SYMLINKS.txt, var/lib/dpkg/info/*, and var/lib/dpkg/status).
+1. Fetch the live Termux aarch64 package index & InRelease from packages-cf.termux.dev.
+2. Pre-populate var/lib/apt/lists/ inside bootstrap-aarch64.zip so `apt install <pkg>` works
+   immediately out of the box without needing `apt update` first.
+3. Compare every package in bootstrap-aarch64.zip's var/lib/dpkg/status with the live repository
+   and slipstream any newer .deb packages directly into the bootstrap archive.
 4. Pre-patch 16-byte tokens ("com.termux/files" -> "com.termuxx/file", "com.termux/cache" -> "com.termuxx/cach")
-   and embed apt cache configuration so the APK ships 100% up-to-date out of the box.
+   so the APK ships 100% up-to-date out of the box.
 """
 
 import os
@@ -18,6 +19,7 @@ import urllib.request
 import zipfile
 
 REPO_BASE = "https://packages-cf.termux.dev/apt/termux-main"
+INRELEASE_URL = f"{REPO_BASE}/dists/stable/InRelease"
 PACKAGES_URL = f"{REPO_BASE}/dists/stable/main/binary-aarch64/Packages"
 BOOTSTRAP_ZIP = "app/src/main/cpp/bootstrap-aarch64.zip"
 
@@ -77,7 +79,32 @@ def main():
                 print(f"[update_bootstrap] Fetching live package index from {PACKAGES_URL} ...")
                 req = urllib.request.Request(PACKAGES_URL, headers={"User-Agent": "termux-pkg/2.0"})
                 with urllib.request.urlopen(req, timeout=30) as resp:
-                    repo_text = resp.read().decode("utf-8", errors="replace")
+                    repo_bytes = resp.read()
+                    repo_text = repo_bytes.decode("utf-8", errors="replace")
+
+                # Pre-populate var/lib/apt/lists/ so `apt install <pkg>` works immediately out of the box!
+                apt_lists_dir = os.path.join(extract_dir, "var/lib/apt/lists")
+                os.makedirs(os.path.join(apt_lists_dir, "partial"), exist_ok=True)
+                pkg_list_file = os.path.join(
+                    apt_lists_dir,
+                    "packages-cf.termux.dev_apt_termux-main_dists_stable_main_binary-aarch64_Packages"
+                )
+                with open(pkg_list_file, "wb") as f:
+                    f.write(repo_bytes)
+
+                try:
+                    inrel_req = urllib.request.Request(INRELEASE_URL, headers={"User-Agent": "termux-pkg/2.0"})
+                    with urllib.request.urlopen(inrel_req, timeout=30) as inrel_resp:
+                        inrel_bytes = inrel_resp.read()
+                    inrel_file = os.path.join(
+                        apt_lists_dir,
+                        "packages-cf.termux.dev_apt_termux-main_dists_stable_InRelease"
+                    )
+                    with open(inrel_file, "wb") as f:
+                        f.write(inrel_bytes)
+                    print("[update_bootstrap] Pre-populated var/lib/apt/lists/ with live InRelease & Packages.")
+                except Exception as e:
+                    print(f"[update_bootstrap] InRelease fetch note: {e}")
 
                 repo_pkgs = {}
                 for raw, fields in parse_stanzas(repo_text):
@@ -208,7 +235,7 @@ def slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, deb_url):
             rel_d = f"{rel_root}/{d}" if rel_root else d
             list_entries.append(f"/data/data/com.termuxx/file/usr/{rel_d}")
             dst_d = os.path.join(extract_dir, rel_d)
-            if os.path.islink( os.path.join(root, d)):
+            if os.path.islink(os.path.join(root, d)):
                 target = os.readlink(os.path.join(root, d))
                 symlinks_map[rel_d] = target
                 if os.path.exists(dst_d):

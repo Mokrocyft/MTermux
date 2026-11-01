@@ -1,12 +1,18 @@
 /*
- * libtermuxx-redirect.so — C++23 Transparent Path Redirector, Live Binary Patcher & Exec Engine
+ * libtermuxx-redirect.so — C++23 Transparent Path Redirector, Live Binary Patcher & DPKG/APT Engine
  *
- * 1. Intercepts VFS syscalls (open, stat, statvfs, access, rename, symlink, readlink, etc.)
- *    and rewrites "/data/data/com.termux/files" -> "/data/data/com.termuxx/file" and
- *    "/data/data/com.termux/cache" -> "/data/data/com.termuxx/cach".
- * 2. Intercepts ALL exec family functions (execve, execv, execvp, execvpe, execl, execlp, execle)
- *    using direct kernel __NR_execve syscall — eliminating any RTLD_NEXT loop with libtermux-exec
- *    and fixing apt's execv("/data/data/com.termuxx/file/usr/lib/apt/methods/https")!
+ * 1. Rewrites all path forms:
+ *    - "com.termux/files" -> "com.termuxx/file"
+ *    - "com.termux/cache" -> "com.termuxx/cach"
+ *    - "com.termux" (e.g. "./data/data/com.termux" during dpkg --unpack) -> "com.termuxx"
+ * 2. Intercepts ALL VFS & metadata syscalls used by dpkg/apt/tar:
+ *    open, open64, openat, openat64, fopen, fopen64, opendir, stat, lstat, fstatat,
+ *    statvfs, statvfs64, statfs, statfs64, access, faccessat, mkdir, mkdirat, rmdir,
+ *    unlink, unlinkat, rename, renameat, renameat2, link, linkat, symlink, symlinkat,
+ *    readlink, readlinkat, chmod, fchmodat, chown, lchown, fchownat, utimensat, utimes,
+ *    lutimes, chdir.
+ * 3. Intercepts ALL exec family functions (execve, execv, execvp, execvpe, execl, execlp, execle)
+ *    using direct kernel __NR_execve syscall and preserves LD_PRELOAD & LD_LIBRARY_PATH.
  */
 
 #ifndef _GNU_SOURCE
@@ -27,6 +33,7 @@
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -64,26 +71,72 @@ struct PathBuf {
             ptr = buf;
             return;
         }
-        const char* hit = strstr(in, "com.termux/");
+        const char* hit = strstr(in, "com.termux");
         if (!hit) return;
 
-        size_t len = strlen(in);
-        if (len >= sizeof(buf)) return;
-        memcpy(buf, in, len + 1);
+        size_t inLen = strlen(in);
+        if (inLen + 64 >= sizeof(buf)) return;
 
-        char* p = buf;
-        while ((p = strstr(p, OLD_FILES_16)) != nullptr) {
-            memcpy(p, NEW_FILES_16, TOKEN_16_LEN);
-            p += TOKEN_16_LEN;
+        size_t outIdx = 0;
+        for (size_t i = 0; i < inLen && outIdx + 24 < sizeof(buf);) {
+            if (i + TOKEN_16_LEN <= inLen && memcmp(in + i, OLD_FILES_16, TOKEN_16_LEN) == 0) {
+                memcpy(buf + outIdx, NEW_FILES_16, TOKEN_16_LEN);
+                outIdx += TOKEN_16_LEN;
+                i += TOKEN_16_LEN;
+            } else if (i + TOKEN_16_LEN <= inLen && memcmp(in + i, OLD_CACHE_16, TOKEN_16_LEN) == 0) {
+                memcpy(buf + outIdx, NEW_CACHE_16, TOKEN_16_LEN);
+                outIdx += TOKEN_16_LEN;
+                i += TOKEN_16_LEN;
+            } else if (i + 10 <= inLen && memcmp(in + i, "com.termux", 10) == 0 && in[i + 10] != 'x') {
+                // Rewrites "./data/data/com.termux" or "/data/data/com.termux/" -> ".../com.termuxx..."
+                memcpy(buf + outIdx, "com.termuxx", 11);
+                outIdx += 11;
+                i += 10;
+            } else {
+                buf[outIdx++] = in[i++];
+            }
         }
-        p = buf;
-        while ((p = strstr(p, OLD_CACHE_16)) != nullptr) {
-            memcpy(p, NEW_CACHE_16, TOKEN_16_LEN);
-            p += TOKEN_16_LEN;
-        }
+        buf[outIdx] = '\0';
         ptr = buf;
     }
 };
+
+// Returns true if path refers to a container prefix directory (/, /data, /data/data, /data/data/com.termuxx, etc.)
+// that dpkg inspects or touches when unpacking data.tar.xz
+static bool isContainerParentDir(const char* p) noexcept {
+    if (!p) return false;
+    while (p[0] == '.' && p[1] == '/') p += 2;
+    while (p[0] == '/') p++;
+    if (p[0] == '\0' || strcmp(p, ".") == 0) return true;
+
+    char norm[256];
+    size_t len = strlen(p);
+    if (len >= sizeof(norm)) return false;
+    memcpy(norm, p, len + 1);
+    while (len > 0 && norm[len - 1] == '/') {
+        norm[--len] = '\0';
+    }
+
+    return strcmp(norm, "data") == 0 ||
+           strcmp(norm, "data/data") == 0 ||
+           strcmp(norm, "data/user") == 0 ||
+           strcmp(norm, "data/user/0") == 0 ||
+           strcmp(norm, "data/data/com.termuxx") == 0 ||
+           strcmp(norm, "data/data/com.termuxx/file") == 0 ||
+           strcmp(norm, "data/data/com.termuxx/files") == 0 ||
+           strcmp(norm, "data/data/com.termuxx/file/usr") == 0 ||
+           strcmp(norm, "data/data/com.termuxx/files/usr") == 0;
+}
+
+static void fillSyntheticDirStat(struct stat* st) noexcept {
+    if (!st) return;
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFDIR | 0700;
+    st->st_nlink = 2;
+    st->st_uid = getuid();
+    st->st_gid = getgid();
+    st->st_blksize = 4096;
+}
 
 static bool replaceAll16(uint8_t* data, size_t size, const char* oldTok, const char* newTok) noexcept {
     bool changed = false;
@@ -111,7 +164,7 @@ static int rawExecveSyscall(const char* path, char* const argv[], char* const en
 
 static void patchInstalledFileIfNeeded(const char* path) noexcept {
     if (!path) return;
-    if (!strstr(path, "/com.termuxx/file/usr/")) return;
+    if (!strstr(path, "/com.termuxx/file/usr/") && !strstr(path, "/com.termuxx/files/usr/")) return;
     if (strstr(path, ".dpkg-")) return;
 
     struct stat st{};
@@ -120,6 +173,7 @@ static void patchInstalledFileIfNeeded(const char* path) noexcept {
         return;
     }
 
+    syscall(__NR_fchmodat, AT_FDCWD, path, st.st_mode | 0700, 0);
     int fd = rawOpenAt(AT_FDCWD, path, O_RDWR | O_CLOEXEC, 0);
     if (fd < 0) return;
 
@@ -203,6 +257,11 @@ static int executeResolvedPath(const char* rawFilename, char* const argv[], char
     PathBuf pb(rawFilename);
     const char* targetPath = pb.ptr;
 
+    // Ensure maintainer scripts in tmp.ci or info are patched before execution
+    if (strstr(targetPath, "/var/lib/dpkg/")) {
+        patchInstalledFileIfNeeded(targetPath);
+    }
+
     std::vector<std::string> envStore = buildSanitizedEnvStrings(envp);
     std::vector<char*> envPtrs;
     envPtrs.reserve(envStore.size() + 1);
@@ -265,7 +324,6 @@ static int executeResolvedPath(const char* rawFilename, char* const argv[], char
 
     int rc = rawExecveSyscall(targetPath, argv, envPtrs.data());
     if (rc < 0 && errno == EACCES) {
-        // Ensure execute bit is set and retry
         syscall(__NR_fchmodat, AT_FDCWD, targetPath, 0700, 0);
         rc = rawExecveSyscall(targetPath, argv, envPtrs.data());
         if (rc < 0 && errno == EACCES) {
@@ -331,6 +389,9 @@ extern "C" {
 
 #define EXPORT_SYM __attribute__((visibility("default")))
 
+// ============================================================================
+// Exec Family Hooks
+// ============================================================================
 EXPORT_SYM int execve(const char* filename, char* const argv[], char* const envp[]) {
     return executeResolvedPath(filename, argv, envp);
 }
@@ -390,6 +451,9 @@ EXPORT_SYM int execle(const char* path, const char* arg0, ...) {
     return executeResolvedPath(path, args.data(), envp);
 }
 
+// ============================================================================
+// File & Directory Hooks (with full dpkg container directory protection)
+// ============================================================================
 EXPORT_SYM int open(const char* pathname, int flags, ...) {
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -464,21 +528,48 @@ EXPORT_SYM int stat(const char* pathname, struct stat* statbuf) {
     using fn_t = int (*)(const char*, struct stat*);
     static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "stat"));
     PathBuf pb(pathname);
-    return real_fn(pb.ptr, statbuf);
+    int rc = real_fn(pb.ptr, statbuf);
+    if (rc != 0 && isContainerParentDir(pb.ptr)) {
+        fillSyntheticDirStat(statbuf);
+        return 0;
+    }
+    return rc;
+}
+
+EXPORT_SYM int stat64(const char* pathname, struct stat64* statbuf) {
+    return stat(pathname, reinterpret_cast<struct stat*>(statbuf));
 }
 
 EXPORT_SYM int lstat(const char* pathname, struct stat* statbuf) {
     using fn_t = int (*)(const char*, struct stat*);
     static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "lstat"));
     PathBuf pb(pathname);
-    return real_fn(pb.ptr, statbuf);
+    int rc = real_fn(pb.ptr, statbuf);
+    if (rc != 0 && isContainerParentDir(pb.ptr)) {
+        fillSyntheticDirStat(statbuf);
+        return 0;
+    }
+    return rc;
+}
+
+EXPORT_SYM int lstat64(const char* pathname, struct stat64* statbuf) {
+    return lstat(pathname, reinterpret_cast<struct stat*>(statbuf));
 }
 
 EXPORT_SYM int fstatat(int dirfd, const char* pathname, struct stat* statbuf, int flags) {
     using fn_t = int (*)(int, const char*, struct stat*, int);
     static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "fstatat"));
     PathBuf pb(pathname);
-    return real_fn(dirfd, pb.ptr, statbuf, flags);
+    int rc = real_fn(dirfd, pb.ptr, statbuf, flags);
+    if (rc != 0 && isContainerParentDir(pb.ptr)) {
+        fillSyntheticDirStat(statbuf);
+        return 0;
+    }
+    return rc;
+}
+
+EXPORT_SYM int fstatat64(int dirfd, const char* pathname, struct stat64* statbuf, int flags) {
+    return fstatat(dirfd, pathname, reinterpret_cast<struct stat*>(statbuf), flags);
 }
 
 EXPORT_SYM int statvfs(const char* path, struct statvfs* buf) {
@@ -515,34 +606,49 @@ EXPORT_SYM int access(const char* pathname, int mode) {
     using fn_t = int (*)(const char*, int);
     static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "access"));
     PathBuf pb(pathname);
-    return real_fn(pb.ptr, mode);
+    int rc = real_fn(pb.ptr, mode);
+    if (rc != 0 && isContainerParentDir(pb.ptr)) return 0;
+    return rc;
 }
 
 EXPORT_SYM int faccessat(int dirfd, const char* pathname, int mode, int flags) {
     using fn_t = int (*)(int, const char*, int, int);
     static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "faccessat"));
     PathBuf pb(pathname);
-    return real_fn(dirfd, pb.ptr, mode, flags);
+    int rc = real_fn(dirfd, pb.ptr, mode, flags);
+    if (rc != 0 && isContainerParentDir(pb.ptr)) return 0;
+    return rc;
 }
 
 EXPORT_SYM int mkdir(const char* pathname, mode_t mode) {
     using fn_t = int (*)(const char*, mode_t);
     static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "mkdir"));
     PathBuf pb(pathname);
-    return real_fn(pb.ptr, mode);
+    int rc = real_fn(pb.ptr, mode);
+    if (rc != 0 && isContainerParentDir(pb.ptr)) {
+        errno = EEXIST;
+        return -1;
+    }
+    return rc;
 }
 
 EXPORT_SYM int mkdirat(int dirfd, const char* pathname, mode_t mode) {
     using fn_t = int (*)(int, const char*, mode_t);
     static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "mkdirat"));
     PathBuf pb(pathname);
-    return real_fn(dirfd, pb.ptr, mode);
+    int rc = real_fn(dirfd, pb.ptr, mode);
+    if (rc != 0 && isContainerParentDir(pb.ptr)) {
+        errno = EEXIST;
+        return -1;
+    }
+    return rc;
 }
 
 EXPORT_SYM int rmdir(const char* pathname) {
     using fn_t = int (*)(const char*);
     static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "rmdir"));
     PathBuf pb(pathname);
+    if (isContainerParentDir(pb.ptr)) return 0;
     return real_fn(pb.ptr);
 }
 
@@ -557,6 +663,7 @@ EXPORT_SYM int unlinkat(int dirfd, const char* pathname, int flags) {
     using fn_t = int (*)(int, const char*, int);
     static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "unlinkat"));
     PathBuf pb(pathname);
+    if ((flags & AT_REMOVEDIR) && isContainerParentDir(pb.ptr)) return 0;
     return real_fn(dirfd, pb.ptr, flags);
 }
 
@@ -578,6 +685,30 @@ EXPORT_SYM int renameat(int olddirfd, const char* oldpath, int newdirfd, const c
     int rc = real_fn(olddirfd, pbOld.ptr, newdirfd, pbNew.ptr);
     if (rc == 0) patchInstalledFileIfNeeded(pbNew.ptr);
     return rc;
+}
+
+EXPORT_SYM int renameat2(int olddirfd, const char* oldpath, int newdirfd, const char* newpath, unsigned int flags) {
+    PathBuf pbOld(oldpath);
+    PathBuf pbNew(newpath);
+    int rc = static_cast<int>(syscall(__NR_renameat2, olddirfd, pbOld.ptr, newdirfd, pbNew.ptr, flags));
+    if (rc == 0) patchInstalledFileIfNeeded(pbNew.ptr);
+    return rc;
+}
+
+EXPORT_SYM int link(const char* oldpath, const char* newpath) {
+    using fn_t = int (*)(const char*, const char*);
+    static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "link"));
+    PathBuf pbOld(oldpath);
+    PathBuf pbNew(newpath);
+    return real_fn(pbOld.ptr, pbNew.ptr);
+}
+
+EXPORT_SYM int linkat(int olddirfd, const char* oldpath, int newdirfd, const char* newpath, int flags) {
+    using fn_t = int (*)(int, const char*, int, const char*, int);
+    static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "linkat"));
+    PathBuf pbOld(oldpath);
+    PathBuf pbNew(newpath);
+    return real_fn(olddirfd, pbOld.ptr, newdirfd, pbNew.ptr, flags);
 }
 
 EXPORT_SYM int symlink(const char* target, const char* linkpath) {
@@ -612,14 +743,80 @@ EXPORT_SYM ssize_t readlinkat(int dirfd, const char* pathname, char* buf, size_t
 
 EXPORT_SYM int chmod(const char* pathname, mode_t mode) {
     PathBuf pb(pathname);
-    return static_cast<int>(syscall(__NR_fchmodat, AT_FDCWD, pb.ptr, mode, 0));
+    int rc = static_cast<int>(syscall(__NR_fchmodat, AT_FDCWD, pb.ptr, mode, 0));
+    if (rc != 0 && isContainerParentDir(pb.ptr)) return 0;
+    return rc;
 }
 
 EXPORT_SYM int fchmodat(int dirfd, const char* pathname, mode_t mode, int flags) {
     using fn_t = int (*)(int, const char*, mode_t, int);
     static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "fchmodat"));
     PathBuf pb(pathname);
-    return real_fn(dirfd, pb.ptr, mode, flags);
+    int rc = real_fn(dirfd, pb.ptr, mode, flags);
+    if (rc != 0 && isContainerParentDir(pb.ptr)) return 0;
+    return rc;
+}
+
+EXPORT_SYM int chown(const char* pathname, uid_t owner, gid_t group) {
+    using fn_t = int (*)(const char*, uid_t, gid_t);
+    static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "chown"));
+    PathBuf pb(pathname);
+    int rc = real_fn(pb.ptr, owner, group);
+    if (rc != 0 && (errno == EPERM || errno == EACCES || isContainerParentDir(pb.ptr))) return 0;
+    return rc;
+}
+
+EXPORT_SYM int lchown(const char* pathname, uid_t owner, gid_t group) {
+    using fn_t = int (*)(const char*, uid_t, gid_t);
+    static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "lchown"));
+    PathBuf pb(pathname);
+    int rc = real_fn(pb.ptr, owner, group);
+    if (rc != 0 && (errno == EPERM || errno == EACCES || isContainerParentDir(pb.ptr))) return 0;
+    return rc;
+}
+
+EXPORT_SYM int fchownat(int dirfd, const char* pathname, uid_t owner, gid_t group, int flags) {
+    using fn_t = int (*)(int, const char*, uid_t, gid_t, int);
+    static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "fchownat"));
+    PathBuf pb(pathname);
+    int rc = real_fn(dirfd, pb.ptr, owner, group, flags);
+    if (rc != 0 && (errno == EPERM || errno == EACCES || isContainerParentDir(pb.ptr))) return 0;
+    return rc;
+}
+
+EXPORT_SYM int utimensat(int dirfd, const char* pathname, const struct timespec times[2], int flags) {
+    using fn_t = int (*)(int, const char*, const struct timespec*, int);
+    static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "utimensat"));
+    PathBuf pb(pathname);
+    int rc = real_fn(dirfd, pb.ptr, times, flags);
+    if (rc != 0 && (errno == EPERM || errno == EACCES || isContainerParentDir(pb.ptr))) return 0;
+    return rc;
+}
+
+EXPORT_SYM int utimes(const char* filename, const struct timeval times[2]) {
+    using fn_t = int (*)(const char*, const struct timeval*);
+    static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "utimes"));
+    PathBuf pb(filename);
+    int rc = real_fn(pb.ptr, times);
+    if (rc != 0 && (errno == EPERM || errno == EACCES || isContainerParentDir(pb.ptr))) return 0;
+    return rc;
+}
+
+EXPORT_SYM int lutimes(const char* filename, const struct timeval times[2]) {
+    using fn_t = int (*)(const char*, const struct timeval*);
+    static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "lutimes"));
+    if (!real_fn) return 0;
+    PathBuf pb(filename);
+    int rc = real_fn(pb.ptr, times);
+    if (rc != 0 && (errno == EPERM || errno == EACCES || isContainerParentDir(pb.ptr))) return 0;
+    return rc;
+}
+
+EXPORT_SYM int chdir(const char* path) {
+    using fn_t = int (*)(const char*);
+    static auto real_fn = reinterpret_cast<fn_t>(dlsym(RTLD_NEXT, "chdir"));
+    PathBuf pb(path);
+    return real_fn(pb.ptr);
 }
 
 } // extern "C"
