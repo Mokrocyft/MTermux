@@ -72,7 +72,6 @@ import android.widget.TextView
 import android.widget.Toast
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
-import android.text.Editable
 import com.termuxx.R
 import java.io.File
 import java.text.SimpleDateFormat
@@ -1525,72 +1524,6 @@ class TermuxActivity : Activity() {
         dlg.show()
     }
 
-    // ========================================================================
-    // Material 3 Expressive File Manager & Package Manager
-    // ========================================================================
-    private fun formatSize(bytes: Long): String {
-        if (bytes < 1024L) return "$bytes Б"
-        val kb = bytes / 1024.0
-        if (kb < 1024.0) return String.format("%.1f КБ", kb)
-        val mb = kb / 1024.0
-        if (mb < 1024.0) return String.format("%.1f МБ", mb)
-        val gb = mb / 1024.0
-        return String.format("%.2f ГБ", gb)
-    }
-
-    private fun computeItemSizeBounded(f: File, maxDepth: Int = 3): Long {
-        return try {
-            if (!f.exists()) return 0L
-            if (f.isFile || File(f.parentFile, f.name).let { it.canonicalPath != it.absolutePath }) {
-                f.length()
-            } else if (maxDepth <= 0) {
-                0L
-            } else {
-                var sum = 0L
-                val children = f.listFiles()
-                if (children != null) {
-                    for (c in children) {
-                        sum += if (c.isFile) c.length() else computeItemSizeBounded(c, maxDepth - 1)
-                    }
-                }
-                sum
-            }
-        } catch (_: Throwable) {
-            0L
-        }
-    }
-
-    private fun parseInstalledDpkgPackages(): List<DpkgPackageInfo> {
-        val statusFile = File("/data/data/com.termuxx/file/usr/var/lib/dpkg/status")
-        if (!statusFile.exists() || !statusFile.canRead()) return emptyList()
-        val out = ArrayList<DpkgPackageInfo>()
-        try {
-            val content = statusFile.readText()
-            for (block in content.split("\n\n")) {
-                var pkg = ""
-                var ver = ""
-                var status = ""
-                var sizeKb = 0L
-                var desc = ""
-                for (line in block.lines()) {
-                    when {
-                        line.startsWith("Package: ") -> pkg = line.substring(9).trim()
-                        line.startsWith("Version: ") -> ver = line.substring(9).trim()
-                        line.startsWith("Status: ") -> status = line.substring(8).trim()
-                        line.startsWith("Installed-Size: ") -> {
-                            sizeKb = line.substring(16).trim().toLongOrNull() ?: 0L
-                        }
-                        line.startsWith("Description: ") -> desc = line.substring(13).trim()
-                    }
-                }
-                if (pkg.isNotEmpty() && status.contains("installed")) {
-                    out.add(DpkgPackageInfo(pkg, ver, sizeKb, desc))
-                }
-            }
-        } catch (_: Throwable) {
-        }
-        return out.sortedBy { it.name }
-    }
 
     // ========================================================================
     // SSH Server Persistence & SSH_ASKPASS Non-Interactive Auth Engine
