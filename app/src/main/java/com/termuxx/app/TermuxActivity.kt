@@ -241,16 +241,23 @@ class TermuxActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(COLOR_AMOLED_BG)
-            setPadding(dp(6), dp(2), dp(6), dp(2))
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            clipChildren = false
+            clipToPadding = false
         }
 
         val tabScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
+            clipChildren = false
+            clipToPadding = false
         }
         tabStrip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            clipChildren = false
+            clipToPadding = false
+            setPadding(0, dp(2), 0, dp(2))
         }
         tabScroll.addView(tabStrip)
         headerBar.addView(
@@ -272,7 +279,7 @@ class TermuxActivity : Activity() {
 
         rootLayout.addView(
             headerBar,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38))
         )
 
         // Terminal Viewport
@@ -296,7 +303,9 @@ class TermuxActivity : Activity() {
         extraKeysRoot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_AMOLED_BG)
-            setPadding(dp(2), dp(1), dp(2), dp(2))
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+            clipChildren = false
+            clipToPadding = false
         }
         rebuildExtraKeysBar()
         rootLayout.addView(
@@ -610,7 +619,7 @@ class TermuxActivity : Activity() {
             background = GradientDrawable().apply {
                 setColor(COLOR_SHEET_BG)
                 cornerRadius = dpF(26f)
-                setStroke(1, COLOR_BORDER)
+                setStroke(max(1, dp(1)), COLOR_BORDER)
             }
         }
         dlg.setContentView(sheet)
@@ -639,7 +648,7 @@ class TermuxActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                setMargins(0, 0, dp(6), dp(4))
+                setMargins(0, dp(2), dp(6), dp(2))
             }
             setOnClickListener {
                 triggerHaptic(0.8f)
@@ -652,10 +661,15 @@ class TermuxActivity : Activity() {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            clipChildren = false
+            clipToPadding = false
+            setPadding(dp(1), dp(3), dp(1), dp(3))
         }
         val hsv = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
+            clipChildren = false
+            clipToPadding = false
             addView(row)
         }
         return hsv to row
@@ -2220,7 +2234,7 @@ class TermuxActivity : Activity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    setMargins(0, 0, dp(4), 0)
+                    setMargins(0, dp(2), dp(4), dp(2))
                 }
                 setOnClickListener {
                     if (nativeGetSessionCount() > idx) {
@@ -2292,7 +2306,7 @@ class TermuxActivity : Activity() {
             setTextColor(COLOR_TEXT)
             background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(6))
             layoutParams = LinearLayout.LayoutParams(dp(30), dp(26)).apply {
-                setMargins(dp(3), 0, 0, 0)
+                setMargins(dp(3), dp(2), 0, dp(2))
             }
             setOnClickListener {
                 triggerHaptic(0.85f)
@@ -2308,11 +2322,12 @@ class TermuxActivity : Activity() {
         }
     }
 
-    private fun pillBg(fill: Int, stroke: Int, radiusPx: Int): GradientDrawable {
+    private fun pillBg(fill: Int, stroke: Int, radiusPx: Int, strokeWidthPx: Int = -1): GradientDrawable {
         return GradientDrawable().apply {
             setColor(fill)
             cornerRadius = radiusPx.toFloat()
-            setStroke(1, stroke)
+            val w = if (strokeWidthPx > 0) strokeWidthPx else max(1, dp(1))
+            setStroke(w, stroke)
         }
     }
 
