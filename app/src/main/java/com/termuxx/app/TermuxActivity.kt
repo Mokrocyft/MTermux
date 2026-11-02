@@ -2277,7 +2277,7 @@ class TermuxActivity : Activity() {
         if (clip.itemCount == 0) return
         val text = clip.getItemAt(0).coerceToText(this)
         if (!text.isNullOrEmpty()) {
-            nativeSendText(text.toString(), true)
+            terminalSurface.pasteTextNatively(text.toString())
             rearmLockedModifiersIfNeeded()
             terminalSurface.resetScrollAndBlink()
         }
@@ -2498,6 +2498,22 @@ class TermuxActivity : Activity() {
 
             updateMetrics(false)
             scheduleBlinkLoop()
+
+            setOnReceiveContentListener(arrayOf("text/*")) { _, payload ->
+                val clip = payload.clip
+                val sb = StringBuilder()
+                for (i in 0 until clip.itemCount) {
+                    val str = clip.getItemAt(i).coerceToText(context)
+                    if (!str.isNullOrEmpty()) {
+                        if (sb.isNotEmpty()) sb.append('\n')
+                        sb.append(str)
+                    }
+                }
+                if (sb.isNotEmpty()) {
+                    pasteTextNatively(sb.toString())
+                }
+                null
+            }
 
             gestureDetector = GestureDetector(
                 context,
@@ -3245,6 +3261,15 @@ class TermuxActivity : Activity() {
          *    `setSelection(start, end)` and we highlight those exact words in the terminal via
          *    `nativeSetPreDeleteCount(end - start)` before deleting them on release!
          */
+                private var currentInputConnection: TerminalInputConnection? = null
+
+        internal fun pasteTextNatively(text: String) {
+            if (text.isEmpty()) return
+            stopTextSelection()
+            nativeSendText(text, true)
+            currentInputConnection?.onNativeTextPasted(text)
+        }
+
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
             outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
                 InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
@@ -3252,171 +3277,221 @@ class TermuxActivity : Activity() {
             outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
                 EditorInfo.IME_FLAG_NO_EXTRACT_UI
 
-            val initLine = nativeGetInputLineBeforeCursor()
-            outAttrs.initialSelStart = initLine.length
-            outAttrs.initialSelEnd = initLine.length
+            val initialText = nativeGetInputLineBeforeCursor()
+            outAttrs.setInitialSurroundingSubText(initialText, 0)
+            outAttrs.initialSelStart = initialText.length
+            outAttrs.initialSelEnd = initialText.length
 
-            return object : BaseInputConnection(this, true) {
-                private val mirrorBuf = SpannableStringBuilder(initLine)
-                private var preDeleteHighlighted = 0
+            val conn = TerminalInputConnection(initialText)
+            currentInputConnection = conn
+            return conn
+        }
 
-                private fun syncMirrorWithTerminal() {
-                    val cur = nativeGetInputLineBeforeCursor()
-                    mirrorBuf.replace(0, mirrorBuf.length, cur)
-                    Selection.setSelection(mirrorBuf, mirrorBuf.length)
-                }
+        inner class TerminalInputConnection(initialText: String) : BaseInputConnection(this@TerminalSurface, true) {
+            private val localBuffer = SpannableStringBuilder(initialText)
+            private var preDeleteCount = 0
 
-                override fun getEditable(): Editable = mirrorBuf
+            init {
+                Selection.setSelection(localBuffer, initialText.length)
+            }
 
-                override fun getTextBeforeCursor(length: Int, flags: Int): CharSequence {
-                    if (preDeleteHighlighted == 0) {
-                        syncMirrorWithTerminal()
-                    }
-                    return super.getTextBeforeCursor(length, flags) ?: ""
-                }
-
-                override fun setSelection(start: Int, end: Int): Boolean {
-                    val s = start.coerceIn(0, mirrorBuf.length)
-                    val e = end.coerceIn(0, mirrorBuf.length)
-                    val minPos = min(s, e)
-                    val maxPos = max(s, e)
-                    val preCount = if (maxPos > minPos) (maxPos - minPos) else 0
-                    preDeleteHighlighted = preCount
-                    nativeSetPreDeleteCount(preCount)
-                    return super.setSelection(s, e)
-                }
-
-                override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                    val committed = text?.toString() ?: ""
-                    stopTextSelection()
-                    if (preDeleteHighlighted > 0 && committed.isEmpty()) {
-                        val toDel = preDeleteHighlighted
-                        preDeleteHighlighted = 0
-                        nativeSetPreDeleteCount(0)
-                        for (i in 0 until toDel) {
-                            nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
-                        }
-                    } else if (committed.isNotEmpty()) {
-                        if (preDeleteHighlighted > 0) {
-                            val toDel = preDeleteHighlighted
-                            preDeleteHighlighted = 0
-                            nativeSetPreDeleteCount(0)
-                            for (i in 0 until toDel) {
-                                nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
-                            }
-                        }
-                        nativeSendText(committed, committed.length > 1)
-                    }
-                    rearmLockedModifiersIfNeeded()
-                    resetScrollAndBlink()
-                    syncMirrorWithTerminal()
-                    return true
-                }
-
-                override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                    val comp = text?.toString() ?: ""
-                    if (comp.isNotEmpty()) {
-                        return commitText(comp, newCursorPosition)
-                    }
-                    return true
-                }
-
-                override fun finishComposingText(): Boolean {
-                    if (preDeleteHighlighted > 0) {
-                        preDeleteHighlighted = 0
-                        nativeSetPreDeleteCount(0)
-                    }
-                    return true
-                }
-
-                override fun replaceText(
-                    start: Int,
-                    end: Int,
-                    text: CharSequence,
-                    newCursorPosition: Int,
-                    textAttribute: TextAttribute?
-                ): Boolean {
-                    stopTextSelection()
-                    if (preDeleteHighlighted > 0) {
-                        val toDel = preDeleteHighlighted
-                        preDeleteHighlighted = 0
-                        nativeSetPreDeleteCount(0)
-                        for (i in 0 until toDel) {
-                            nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
-                        }
-                    }
-                    val s = text.toString()
-                    if (s.isNotEmpty()) {
-                        nativeSendText(s, s.length > 1)
-                        rearmLockedModifiersIfNeeded()
-                        resetScrollAndBlink()
-                    }
-                    syncMirrorWithTerminal()
-                    return true
-                }
-
-                override fun performContextMenuAction(id: Int): Boolean {
-                    when (id) {
-                        android.R.id.paste, android.R.id.pasteAsPlainText -> {
-                            stopTextSelection()
-                            pasteFromClipboard()
-                            syncMirrorWithTerminal()
-                            return true
-                        }
-                        android.R.id.copy -> {
-                            copyToClipboard(nativeGetSelectedText(), true)
-                            stopTextSelection()
-                            return true
-                        }
-                        android.R.id.selectAll -> {
-                            nativeSelectAll(scrollOffset)
-                            showColorOsFloatingActionMode()
-                            invalidateAllRows()
-                            return true
-                        }
-                    }
-                    return super.performContextMenuAction(id)
-                }
-
-                override fun deleteSurroundingText(leftLength: Int, rightLength: Int): Boolean {
-                    stopTextSelection()
-                    val delCount = if (preDeleteHighlighted > 0 && leftLength == 0 && rightLength == 0) {
-                        preDeleteHighlighted
-                    } else {
-                        max(leftLength, preDeleteHighlighted)
-                    }
-                    preDeleteHighlighted = 0
+            internal fun onNativeTextPasted(pasted: String) {
+                if (preDeleteCount > 0) {
+                    preDeleteCount = 0
                     nativeSetPreDeleteCount(0)
-                    for (i in 0 until delCount) {
+                }
+                localBuffer.append(pasted)
+                Selection.setSelection(localBuffer, localBuffer.length)
+            }
+
+            override fun getEditable(): Editable = localBuffer
+
+            override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence {
+                val curLen = localBuffer.length
+                val s = Selection.getSelectionStart(localBuffer)
+                val e = Selection.getSelectionEnd(localBuffer)
+                val cursor = if (s in 0..curLen && e in 0..curLen) min(s, e) else curLen
+                val take = min(n, cursor)
+                return localBuffer.subSequence(cursor - take, cursor)
+            }
+
+            override fun getTextAfterCursor(n: Int, flags: Int): CharSequence {
+                val curLen = localBuffer.length
+                val s = Selection.getSelectionStart(localBuffer)
+                val e = Selection.getSelectionEnd(localBuffer)
+                val rightEdge = if (s in 0..curLen && e in 0..curLen) max(s, e) else curLen
+                val take = min(n, max(0, curLen - rightEdge))
+                return localBuffer.subSequence(rightEdge, rightEdge + take)
+            }
+
+            override fun getSelectedText(flags: Int): CharSequence {
+                val s = Selection.getSelectionStart(localBuffer)
+                val e = Selection.getSelectionEnd(localBuffer)
+                val curLen = localBuffer.length
+                if (s in 0..curLen && e in 0..curLen && s != e) {
+                    return localBuffer.subSequence(min(s, e), max(s, e))
+                }
+                return ""
+            }
+
+            override fun setSelection(start: Int, end: Int): Boolean {
+                val curLen = localBuffer.length
+                val s = start.coerceIn(0, curLen)
+                val e = end.coerceIn(0, curLen)
+                Selection.setSelection(localBuffer, s, e)
+                val count = max(0, max(s, e) - min(s, e))
+                preDeleteCount = count
+                nativeSetPreDeleteCount(count)
+                return true
+            }
+
+            override fun deleteSurroundingText(leftLength: Int, rightLength: Int): Boolean {
+                stopTextSelection()
+                val delLeft = if (preDeleteCount > 0) preDeleteCount else max(0, leftLength)
+                preDeleteCount = 0
+                nativeSetPreDeleteCount(0)
+
+                if (delLeft > 0) {
+                    for (i in 0 until delLeft) {
                         nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
                     }
+                    val newLen = max(0, localBuffer.length - delLeft)
+                    localBuffer.delete(newLen, localBuffer.length)
+                    Selection.setSelection(localBuffer, newLen)
+                }
+                if (rightLength > 0) {
                     for (i in 0 until rightLength) {
                         nativeSendKeyEvent(KeyEvent.KEYCODE_FORWARD_DEL, 0, 0)
                     }
-                    rearmLockedModifiersIfNeeded()
-                    resetScrollAndBlink()
-                    syncMirrorWithTerminal()
-                    return true
                 }
+                rearmLockedModifiersIfNeeded()
+                resetScrollAndBlink()
+                return true
+            }
 
-                override fun sendKeyEvent(event: KeyEvent): Boolean {
-                    if (event.action == KeyEvent.ACTION_DOWN) {
-                        if (event.keyCode == KeyEvent.KEYCODE_DEL && preDeleteHighlighted > 0) {
-                            val toDel = preDeleteHighlighted
-                            preDeleteHighlighted = 0
-                            nativeSetPreDeleteCount(0)
-                            for (i in 0 until toDel) {
-                                nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
-                            }
-                            resetScrollAndBlink()
-                            syncMirrorWithTerminal()
-                            return true
-                        }
-                        this@TerminalSurface.onKeyDown(event.keyCode, event)
-                        syncMirrorWithTerminal()
+            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                val str = text?.toString() ?: ""
+                stopTextSelection()
+                if (preDeleteCount > 0) {
+                    val del = preDeleteCount
+                    preDeleteCount = 0
+                    nativeSetPreDeleteCount(0)
+                    for (i in 0 until del) {
+                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
                     }
-                    return true
+                    val newLen = max(0, localBuffer.length - del)
+                    localBuffer.delete(newLen, localBuffer.length)
                 }
+                if (str.isNotEmpty()) {
+                    nativeSendText(str, str.length > 1)
+                    localBuffer.append(str)
+                }
+                Selection.setSelection(localBuffer, localBuffer.length)
+                rearmLockedModifiersIfNeeded()
+                resetScrollAndBlink()
+                return true
+            }
+
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                val comp = text?.toString() ?: ""
+                if (comp.isNotEmpty()) {
+                    return commitText(comp, newCursorPosition)
+                }
+                return true
+            }
+
+            override fun finishComposingText(): Boolean {
+                if (preDeleteCount > 0) {
+                    preDeleteCount = 0
+                    nativeSetPreDeleteCount(0)
+                }
+                return true
+            }
+
+            override fun replaceText(
+                start: Int,
+                end: Int,
+                text: CharSequence,
+                newCursorPosition: Int,
+                textAttribute: TextAttribute?
+            ): Boolean {
+                stopTextSelection()
+                val curLen = localBuffer.length
+                val s = start.coerceIn(0, curLen)
+                val e = end.coerceIn(0, curLen)
+                val toDel = if (preDeleteCount > 0) preDeleteCount else max(0, max(s, e) - min(s, e))
+                preDeleteCount = 0
+                nativeSetPreDeleteCount(0)
+
+                if (toDel > 0) {
+                    for (i in 0 until toDel) {
+                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
+                    }
+                    val delStart = min(s, e)
+                    val delEnd = min(curLen, delStart + toDel)
+                    if (delStart in 0..curLen && delEnd in delStart..curLen) {
+                        localBuffer.delete(delStart, delEnd)
+                    }
+                }
+                val sText = text.toString()
+                if (sText.isNotEmpty()) {
+                    nativeSendText(sText, true)
+                    localBuffer.append(sText)
+                }
+                Selection.setSelection(localBuffer, localBuffer.length)
+                rearmLockedModifiersIfNeeded()
+                resetScrollAndBlink()
+                return true
+            }
+
+            override fun performContextMenuAction(id: Int): Boolean {
+                when (id) {
+                    android.R.id.paste, android.R.id.pasteAsPlainText -> {
+                        stopTextSelection()
+                        pasteFromClipboard()
+                        return true
+                    }
+                    android.R.id.copy -> {
+                        copyToClipboard(nativeGetSelectedText(), true)
+                        stopTextSelection()
+                        return true
+                    }
+                    android.R.id.selectAll -> {
+                        nativeSelectAll(scrollOffset)
+                        showColorOsFloatingActionMode()
+                        invalidateAllRows()
+                        return true
+                    }
+                }
+                return super.performContextMenuAction(id)
+            }
+
+            override fun sendKeyEvent(event: KeyEvent): Boolean {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    if (event.keyCode == KeyEvent.KEYCODE_DEL) {
+                        val del = if (preDeleteCount > 0) preDeleteCount else 1
+                        preDeleteCount = 0
+                        nativeSetPreDeleteCount(0)
+                        for (i in 0 until del) {
+                            nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
+                        }
+                        if (localBuffer.isNotEmpty()) {
+                            val newLen = max(0, localBuffer.length - del)
+                            localBuffer.delete(newLen, localBuffer.length)
+                            Selection.setSelection(localBuffer, newLen)
+                        }
+                        resetScrollAndBlink()
+                        return true
+                    }
+                    if (event.keyCode == KeyEvent.KEYCODE_ENTER) {
+                        localBuffer.clear()
+                        Selection.setSelection(localBuffer, 0)
+                        preDeleteCount = 0
+                        nativeSetPreDeleteCount(0)
+                    }
+                    this@TerminalSurface.onKeyDown(event.keyCode, event)
+                }
+                return true
             }
         }
 

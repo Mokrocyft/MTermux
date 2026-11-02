@@ -3304,21 +3304,25 @@ Java_com_termuxx_app_TermuxActivity_nativeGetInputLineBeforeCursor(JNIEnv* env, 
         const Row& row = eng->activeGrid()[static_cast<size_t>(eng->mCursorRow)];
         int maxC = std::min(eng->mCursorCol, static_cast<int>(row.cells.size()));
         int startC = 0;
-        // Find end of shell prompt (e.g., › or $ or # followed by space)
+        // Find end of shell prompt (e.g., › or $ or # or > followed by space) from the start of the line
         for (int c = 0; c < maxC; ++c) {
             uint32_t cp = row.cells[static_cast<size_t>(c)].codepoint;
-            if (cp == 0x203A || cp == '$' || cp == '#') {
+            if (cp == 0x203A || cp == '$' || cp == '#' || cp == '>') {
                 if (c + 1 < maxC && row.cells[static_cast<size_t>(c + 1)].codepoint == ' ') {
                     startC = c + 2;
-                } else {
+                    break;
+                } else if (c + 1 <= maxC) {
                     startC = c + 1;
+                    break;
                 }
             }
         }
         for (int c = startC; c < maxC; ++c) {
             const Cell& cell = row.cells[static_cast<size_t>(c)];
             if (cell.flags & FLAG_WIDE_TRAIL) continue;
-            appendUtf8(line, cell.codepoint ? cell.codepoint : ' ');
+            if (cell.codepoint != 0) {
+                appendUtf8(line, cell.codepoint);
+            }
         }
     }
     eng->unlock();
