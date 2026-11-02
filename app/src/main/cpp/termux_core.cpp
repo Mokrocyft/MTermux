@@ -24,8 +24,14 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include <algorithm>
 #include <atomic>
@@ -97,26 +103,12 @@ constexpr uint32_t SELECTION_FG = 0xFFFFFFFFu;
 constexpr uint32_t PREDELETE_BG = 0xFF5C1D24u;
 constexpr uint32_t PREDELETE_FG = 0xFFFFDAD6u;
 
-static std::atomic<int> gPerfMode{0}; // 0: Oryon Smart Boost, 1: Oryon Prime Max, 2: Oryon Eco
-
-static void applyOryonAffinity(int mode, bool isBurst = false) noexcept {
+static void applyOryonSmartAffinity(bool isBurst) noexcept {
     cpu_set_t mask;
     CPU_ZERO(&mask);
-    if (mode == 2 && !isBurst) {
-        // Eco mode: bind to efficiency/lower-clocked cluster (cores 0..3)
-        for (int c = 0; c < 4; ++c) CPU_SET(c, &mask);
-        sched_setaffinity(0, sizeof(mask), &mask);
-        setpriority(PRIO_PROCESS, 0, 5);
-    } else if (mode == 1 || isBurst) {
-        // Prime Max / Burst: unlock all 8 Snapdragon 8 Elite Gen 5 Oryon cores (including Prime cores 6..7)
-        for (int c = 0; c < 8; ++c) CPU_SET(c, &mask);
-        sched_setaffinity(0, sizeof(mask), &mask);
-        setpriority(PRIO_PROCESS, 0, mode == 1 ? -15 : -8);
-    } else {
-        for (int c = 0; c < 8; ++c) CPU_SET(c, &mask);
-        sched_setaffinity(0, sizeof(mask), &mask);
-        setpriority(PRIO_PROCESS, 0, 0);
-    }
+    for (int c = 0; c < 8; ++c) CPU_SET(c, &mask);
+    sched_setaffinity(0, sizeof(mask), &mask);
+    setpriority(PRIO_PROCESS, 0, isBurst ? -12 : 0);
 }
 
 // Android KeyEvent constants
@@ -493,7 +485,7 @@ static void copyFileBinary(const char* srcPath, const char* dstPath, mode_t mode
         close(inFd);
         return;
     }
-    applyOryonAffinity(gPerfMode.load(std::memory_order_relaxed), false);
+    applyOryonSmartAffinity(false);
         uint8_t buf[65536];
     ssize_t n;
     while ((n = read(inFd, buf, sizeof(buf))) > 0) {
@@ -2195,15 +2187,13 @@ public:
                     if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
                     break;
                 }
-                int pMode = gPerfMode.load(std::memory_order_relaxed);
-                if (n >= 16384 && pMode == 0) {
-                    applyOryonAffinity(0, true);
-                }
+                bool isBurst = (n >= 8192);
+                applyOryonSmartAffinity(isBurst);
                 reply.clear();
                 lock();
                 processStream(buf, static_cast<size_t>(n), reply);
                 // Batch-drain additional immediately available kernel PTY chunks under the same lock
-                int maxBatches = (pMode == 1) ? 6 : 3;
+                int maxBatches = isBurst ? 6 : 3;
                 for (int b = 0; b < maxBatches; ++b) {
                     struct pollfd bpfd{fd, POLLIN, 0};
                     if (poll(&bpfd, 1, 0) <= 0 || !(bpfd.revents & POLLIN)) break;
@@ -2398,7 +2388,7 @@ static bool startSessionProcess(
         close(ptm);
         setsid();
         umask(0022);
-        applyOryonAffinity(gPerfMode.load(std::memory_order_relaxed), true);
+        applyOryonSmartAffinity(true);
 
         int pts = open(devname, O_RDWR);
         if (pts < 0) _exit(127);
@@ -3332,11 +3322,555 @@ Java_com_termuxx_app_TermuxActivity_nativeGetInputLineBeforeCursor(JNIEnv* env, 
     return env->NewStringUTF(line.c_str());
 }
 
-JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeSetPerformanceMode(JNIEnv* /*env*/, jclass /*clazz*/, jint mode) {
-    int m = std::clamp(static_cast<int>(mode), 0, 2);
-    gPerfMode.store(m, std::memory_order_release);
-    applyOryonAffinity(m, m == 1);
+static std::string jstringToStdString(JNIEnv* env, jstring jStr) {
+    if (!jStr) return "";
+    const char* utf = env->GetStringUTFChars(jStr, nullptr);
+    if (!utf) return "";
+    std::string out(utf);
+    env->ReleaseStringUTFChars(jStr, utf);
+    return out;
+}
+
+static std::string shellEscapeSingleCpp(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\"'\"'";
+        else out.push_back(c);
+    }
+    out.push_back('\'');
+    return out;
+}
+
+static std::string trimCpp(const std::string& s) {
+    size_t a = 0;
+    while (a < s.size() && isspace(static_cast<unsigned char>(s[a]))) a++;
+    size_t b = s.size();
+    while (b > a && isspace(static_cast<unsigned char>(s[b - 1]))) b--;
+    return s.substr(a, b - a);
+}
+
+static std::string normalizeForwardSpecCpp(const std::string& spec) {
+    std::string t = trimCpp(spec);
+    if (t.empty()) return "";
+    int colons = 0;
+    for (char c : t) {
+        if (c == ':') colons++;
+    }
+    if (colons == 0) {
+        // Port only (e.g. "54321") -> "54321:127.0.0.1:54321"
+        return t + ":127.0.0.1:" + t;
+    } else if (colons == 1) {
+        // "54321:80" -> "54321:127.0.0.1:80"
+        size_t pos = t.find(':');
+        return t.substr(0, pos) + ":127.0.0.1:" + t.substr(pos + 1);
+    }
+    return t;
+}
+
+static void appendForwardFlagsCpp(std::string& out, const char* flag, const std::string& rawList) {
+    std::string cur;
+    for (size_t i = 0; i <= rawList.size(); ++i) {
+        char c = (i < rawList.size()) ? rawList[i] : ',';
+        if (c == ',' || c == ';' || isspace(static_cast<unsigned char>(c))) {
+            std::string norm = normalizeForwardSpecCpp(cur);
+            if (!norm.empty()) {
+                out += " ";
+                out += flag;
+                out += " ";
+                out += shellEscapeSingleCpp(norm);
+            }
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+}
+
+static std::string createOneShotAskPassEnvCpp(int authType, const std::string& secret) {
+    if (authType != 0 || secret.empty()) return "";
+    mkdirsRecursive(TMP_PATH, 0700);
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    char pathBuf[256];
+    snprintf(pathBuf, sizeof(pathBuf), "%s/.askpass_%lld_%ld.sh",
+             TMP_PATH, static_cast<long long>(ts.tv_sec), static_cast<long>(ts.tv_nsec));
+    int fd = open(pathBuf, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
+    if (fd < 0) return "";
+    std::string script = "#!/data/data/com.termuxx/file/usr/bin/sh\n"
+                         "rm -f \"$0\" 2>/dev/null || true\n"
+                         "printf '%s\\n' " + shellEscapeSingleCpp(secret) + "\n";
+    writeAllFd(fd, script.data(), script.size());
+    close(fd);
+    chmod(pathBuf, 0700);
+    return "DISPLAY=:0 SSH_ASKPASS=" + shellEscapeSingleCpp(pathBuf) + " SSH_ASKPASS_REQUIRE=force ";
+}
+
+JNIEXPORT jint JNICALL
+Java_com_termuxx_app_TermuxActivity_nativePingHostMs(
+    JNIEnv* env, jclass /*clazz*/, jstring jHost, jint port, jint timeoutMs) {
+    std::string host = trimCpp(jstringToStdString(env, jHost));
+    if (host.empty()) return -1;
+    int targetPort = (port > 0 && port <= 65535) ? static_cast<int>(port) : 22;
+    int maxWaitMs = std::clamp(static_cast<int>(timeoutMs), 200, 10000);
+
+    char portStr[16];
+    snprintf(portStr, sizeof(portStr), "%d", targetPort);
+
+    struct addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = nullptr;
+    if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0 || !res) {
+        return -1;
+    }
+
+    int rttMs = -1;
+    for (struct addrinfo* rp = res; rp != nullptr; rp = rp->ai_next) {
+        int sock = socket(rp->ai_family, rp->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC, rp->ai_protocol);
+        if (sock < 0) continue;
+
+        int one = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+        struct timespec t0{}, t1{};
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+
+        int rc = connect(sock, rp->ai_addr, rp->ai_addrlen);
+        bool connected = false;
+        if (rc == 0) {
+            connected = true;
+        } else if (errno == EINPROGRESS) {
+            struct pollfd pfd{sock, POLLOUT, 0};
+            int pr = poll(&pfd, 1, maxWaitMs);
+            if (pr > 0 && (pfd.revents & POLLOUT)) {
+                int soErr = 0;
+                socklen_t len = sizeof(soErr);
+                if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soErr, &len) == 0 && soErr == 0) {
+                    connected = true;
+                }
+            }
+        }
+
+        if (connected) {
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            long long diffNs = (static_cast<long long>(t1.tv_sec - t0.tv_sec) * 1000000000LL) +
+                               static_cast<long long>(t1.tv_nsec - t0.tv_nsec);
+            rttMs = std::max(1, static_cast<int>((diffNs + 500000LL) / 1000000LL));
+            close(sock);
+            break;
+        }
+        close(sock);
+    }
+
+    freeaddrinfo(res);
+    return rttMs;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeBuildSshCommand(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring jHost,
+    jint port,
+    jstring jUser,
+    jint authType,
+    jstring jSecret,
+    jstring jLocalFwds,
+    jstring jRemoteFwds,
+    jstring jDynamicPort,
+    jstring jJumpHost,
+    jint keepAliveSec,
+    jboolean tunnelOnlyN,
+    jboolean compression,
+    jboolean forwardAgent,
+    jboolean ipv4Only,
+    jstring jCustomFlags,
+    jstring jStartupCmd,
+    jboolean withAskPass) {
+
+    std::string host = trimCpp(jstringToStdString(env, jHost));
+    std::string user = trimCpp(jstringToStdString(env, jUser));
+    if (user.empty()) user = "root";
+    int p = (port > 0 && port <= 65535) ? static_cast<int>(port) : 22;
+    std::string secret = jstringToStdString(env, jSecret);
+    std::string localFwds = trimCpp(jstringToStdString(env, jLocalFwds));
+    std::string remoteFwds = trimCpp(jstringToStdString(env, jRemoteFwds));
+    std::string dynamicPort = trimCpp(jstringToStdString(env, jDynamicPort));
+    std::string jumpHost = trimCpp(jstringToStdString(env, jJumpHost));
+    std::string customFlags = trimCpp(jstringToStdString(env, jCustomFlags));
+    std::string startupCmd = trimCpp(jstringToStdString(env, jStartupCmd));
+
+    std::string cmd;
+    if (withAskPass) {
+        cmd += createOneShotAskPassEnvCpp(static_cast<int>(authType), secret);
+    }
+    cmd += "ssh";
+    if (p != 22) {
+        cmd += " -p " + std::to_string(p);
+    }
+    if (ipv4Only) cmd += " -4";
+    if (compression) cmd += " -C";
+    if (forwardAgent || authType == 2) cmd += " -A";
+    if (tunnelOnlyN) cmd += " -N";
+
+    if (!localFwds.empty()) appendForwardFlagsCpp(cmd, "-L", localFwds);
+    if (!remoteFwds.empty()) appendForwardFlagsCpp(cmd, "-R", remoteFwds);
+    if (!dynamicPort.empty()) {
+        cmd += " -D " + shellEscapeSingleCpp(dynamicPort);
+    }
+    if (!jumpHost.empty()) {
+        cmd += " -J " + shellEscapeSingleCpp(jumpHost);
+    }
+    if (authType == 1 && !secret.empty()) {
+        cmd += " -i " + shellEscapeSingleCpp(trimCpp(secret));
+    }
+    if (keepAliveSec > 0) {
+        cmd += " -o ServerAliveInterval=" + std::to_string(static_cast<int>(keepAliveSec));
+        cmd += " -o ServerAliveCountMax=3";
+    }
+    cmd += " -o StrictHostKeyChecking=accept-new";
+    if (!customFlags.empty()) {
+        cmd += " " + customFlags;
+    }
+    cmd += " " + user + "@" + host;
+    if (!tunnelOnlyN && !startupCmd.empty()) {
+        cmd += " -t " + shellEscapeSingleCpp(startupCmd);
+    }
+    return env->NewStringUTF(cmd.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeParseSshCommand(
+    JNIEnv* env, jclass /*clazz*/, jstring jRawCmd) {
+    std::string raw = trimCpp(jstringToStdString(env, jRawCmd));
+    std::vector<std::string> tokens;
+    std::string cur;
+    char quote = 0;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        char c = raw[i];
+        if (quote) {
+            if (c == quote) quote = 0;
+            else cur.push_back(c);
+        } else if (c == '\'' || c == '"') {
+            quote = c;
+        } else if (isspace(static_cast<unsigned char>(c))) {
+            if (!cur.empty()) { tokens.push_back(cur); cur.clear(); }
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) tokens.push_back(cur);
+
+    std::string host;
+    std::string port = "22";
+    std::string user = "root";
+    std::string localFwds;
+    std::string remoteFwds;
+    std::string dynamicPort;
+    std::string jumpHost;
+    std::string keyPath;
+    bool tunnelOnlyN = false;
+    bool compression = false;
+    bool forwardAgent = false;
+    bool ipv4Only = false;
+    std::string customFlags;
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const std::string& t = tokens[i];
+        if (i == 0 && t == "ssh") continue;
+        if (t == "-p" && i + 1 < tokens.size()) {
+            port = tokens[++i];
+        } else if (t == "-l" && i + 1 < tokens.size()) {
+            user = tokens[++i];
+        } else if (t == "-L" && i + 1 < tokens.size()) {
+            if (!localFwds.empty()) localFwds += ", ";
+            localFwds += normalizeForwardSpecCpp(tokens[++i]);
+        } else if (t == "-R" && i + 1 < tokens.size()) {
+            if (!remoteFwds.empty()) remoteFwds += ", ";
+            remoteFwds += normalizeForwardSpecCpp(tokens[++i]);
+        } else if (t == "-D" && i + 1 < tokens.size()) {
+            dynamicPort = tokens[++i];
+        } else if (t == "-J" && i + 1 < tokens.size()) {
+            jumpHost = tokens[++i];
+        } else if (t == "-i" && i + 1 < tokens.size()) {
+            keyPath = tokens[++i];
+        } else if (t == "-N") {
+            tunnelOnlyN = true;
+        } else if (t == "-C") {
+            compression = true;
+        } else if (t == "-A") {
+            forwardAgent = true;
+        } else if (t == "-4") {
+            ipv4Only = true;
+        } else if (!t.empty() && t[0] != '-' && host.empty()) {
+            size_t atPos = t.find('@');
+            if (atPos != std::string::npos) {
+                user = t.substr(0, atPos);
+                host = t.substr(atPos + 1);
+            } else {
+                host = t;
+            }
+            size_t colonPos = host.find(':');
+            if (colonPos != std::string::npos && port == "22") {
+                port = host.substr(colonPos + 1);
+                host = host.substr(0, colonPos);
+            }
+        } else {
+            if (!customFlags.empty()) customFlags += " ";
+            customFlags += t;
+        }
+    }
+
+    std::string out = host + "\t" + port + "\t" + user + "\t" + localFwds + "\t" +
+                      remoteFwds + "\t" + dynamicPort + "\t" + jumpHost + "\t" +
+                      keyPath + "\t" + (tunnelOnlyN ? "1" : "0") + "\t" +
+                      (compression ? "1" : "0") + "\t" + (forwardAgent ? "1" : "0") + "\t" +
+                      (ipv4Only ? "1" : "0") + "\t" + customFlags;
+    return env->NewStringUTF(out.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeListLocalDir(
+    JNIEnv* env, jclass /*clazz*/, jstring jDirPath, jboolean showHidden, jstring jSearchQuery) {
+    std::string dirPath = jstringToStdString(env, jDirPath);
+    std::string query = trimCpp(jstringToStdString(env, jSearchQuery));
+    for (char& c : query) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+    DIR* dir = opendir(dirPath.c_str());
+    if (!dir) return env->NewStringUTF("");
+
+    struct LocalEntry {
+        std::string name;
+        std::string lowerName;
+        std::string fullPath;
+        bool isDir;
+        long long sizeBytes;
+        long long mtimeMs;
+        char perms[11];
+    };
+    std::vector<LocalEntry> entries;
+
+    struct dirent* de;
+    while ((de = readdir(dir)) != nullptr) {
+        const char* n = de->d_name;
+        if (strcmp(n, ".") == 0 || strcmp(n, "..") == 0) continue;
+        if (!showHidden && n[0] == '.' && query.empty()) continue;
+
+        std::string nameStr(n);
+        std::string lowerStr = nameStr;
+        for (char& c : lowerStr) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        if (!query.empty() && lowerStr.find(query) == std::string::npos) continue;
+
+        std::string full = (dirPath == "/") ? ("/" + nameStr) : (dirPath + "/" + nameStr);
+        struct stat st{};
+        if (stat(full.c_str(), &st) != 0) {
+            if (lstat(full.c_str(), &st) != 0) continue;
+        }
+        LocalEntry item{};
+        item.name = std::move(nameStr);
+        item.lowerName = std::move(lowerStr);
+        item.fullPath = std::move(full);
+        item.isDir = S_ISDIR(st.st_mode);
+        item.sizeBytes = item.isDir ? 0LL : static_cast<long long>(st.st_size);
+        item.mtimeMs = static_cast<long long>(st.st_mtime) * 1000LL;
+        item.perms[0] = item.isDir ? 'd' : (S_ISLNK(st.st_mode) ? 'l' : '-');
+        item.perms[1] = (st.st_mode & S_IRUSR) ? 'r' : '-';
+        item.perms[2] = (st.st_mode & S_IWUSR) ? 'w' : '-';
+        item.perms[3] = (st.st_mode & S_IXUSR) ? 'x' : '-';
+        item.perms[4] = (st.st_mode & S_IRGRP) ? 'r' : '-';
+        item.perms[5] = (st.st_mode & S_IWGRP) ? 'w' : '-';
+        item.perms[6] = (st.st_mode & S_IXGRP) ? 'x' : '-';
+        item.perms[7] = (st.st_mode & S_IROTH) ? 'r' : '-';
+        item.perms[8] = (st.st_mode & S_IWOTH) ? 'w' : '-';
+        item.perms[9] = (st.st_mode & S_IXOTH) ? 'x' : '-';
+        item.perms[10] = '\0';
+        entries.push_back(std::move(item));
+    }
+    closedir(dir);
+
+    std::sort(entries.begin(), entries.end(), [](const LocalEntry& a, const LocalEntry& b) {
+        if (a.isDir != b.isDir) return a.isDir > b.isDir;
+        return a.lowerName < b.lowerName;
+    });
+
+    std::string out;
+    out.reserve(entries.size() * 64);
+    for (const auto& e : entries) {
+        out += e.name;
+        out.push_back('\t');
+        out += e.fullPath;
+        out.push_back('\t');
+        out += (e.isDir ? "1\t" : "0\t");
+        out += std::to_string(e.sizeBytes);
+        out.push_back('\t');
+        out += std::to_string(e.mtimeMs);
+        out.push_back('\t');
+        out += e.perms;
+        out.push_back('\n');
+    }
+    return env->NewStringUTF(out.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring jHost,
+    jint port,
+    jstring jUser,
+    jint authType,
+    jstring jSecret,
+    jstring jJumpHost,
+    jstring jRemoteShCmd) {
+
+    std::string sshBin = std::string(BIN_PATH) + "/ssh";
+    if (access(sshBin.c_str(), X_OK) != 0) {
+        return env->NewStringUTF("ERR\nПакет openssh не установлен. Установите его во вкладке Пакеты (+ openssh) или командой: pkg install -y openssh");
+    }
+
+    std::string host = trimCpp(jstringToStdString(env, jHost));
+    std::string user = trimCpp(jstringToStdString(env, jUser));
+    if (user.empty()) user = "root";
+    int p = (port > 0 && port <= 65535) ? static_cast<int>(port) : 22;
+    std::string secret = jstringToStdString(env, jSecret);
+    std::string jumpHost = trimCpp(jstringToStdString(env, jJumpHost));
+    std::string remoteSh = jstringToStdString(env, jRemoteShCmd);
+
+    mkdirsRecursive(TMP_PATH, 0700);
+    std::string askPassPrefix = createOneShotAskPassEnvCpp(static_cast<int>(authType), secret);
+    std::string muxPath = std::string(TMP_PATH) + "/.ssh_mux_%C";
+
+    std::string sshArgs = "-p " + std::to_string(p) +
+        " -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8"
+        " -o ControlMaster=auto -o ControlPath=" + shellEscapeSingleCpp(muxPath) +
+        " -o ControlPersist=300 -C";
+    if (authType != 0) sshArgs += " -o BatchMode=yes";
+    if (authType == 2) sshArgs += " -A";
+    if (authType == 1 && !secret.empty()) {
+        sshArgs += " -i " + shellEscapeSingleCpp(trimCpp(secret));
+    }
+    if (!jumpHost.empty()) {
+        sshArgs += " -J " + shellEscapeSingleCpp(jumpHost);
+    }
+
+    std::string redirectSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
+    std::string fullShellLine =
+        "export PATH=\"" + std::string(BIN_PATH) + ":$PATH\"; "
+        "export LD_LIBRARY_PATH=\"" + std::string(LIB_PATH) + "\"; "
+        "export HOME=\"" + std::string(HOME_PATH) + "\"; ";
+    if (access(redirectSo.c_str(), R_OK) == 0) {
+        fullShellLine += "export LD_PRELOAD=\"" + redirectSo + "\"; ";
+    }
+    fullShellLine += askPassPrefix + shellEscapeSingleCpp(sshBin) + " " + sshArgs + " " +
+                     shellEscapeSingleCpp(user + "@" + host) + " " +
+                     shellEscapeSingleCpp(remoteSh) + " 2>&1";
+
+    int pipefd[2];
+    if (pipe2(pipefd, O_CLOEXEC) != 0) {
+        return env->NewStringUTF("ERR\nНе удалось создать канал pipe()");
+    }
+
+    std::string shBin = std::string(BIN_PATH) + "/sh";
+    if (access(shBin.c_str(), X_OK) != 0) shBin = "/system/bin/sh";
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return env->NewStringUTF("ERR\nОшибка fork()");
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+        execl(shBin.c_str(), "sh", "-c", fullShellLine.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+    std::string output;
+    char buf[8192];
+    ssize_t n;
+    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+        output.append(buf, static_cast<size_t>(n));
+        if (output.size() > 512 * 1024) break;
+    }
+    close(pipefd[0]);
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) break;
+    }
+    bool ok = WIFEXITED(status) && (WEXITSTATUS(status) == 0);
+    std::string result = (ok ? "OK\n" : "ERR\n") + output;
+    return env->NewStringUTF(result.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetInstalledPackages(JNIEnv* env, jclass /*clazz*/) {
+    std::string statusPath = std::string(PREFIX_PATH) + "/var/lib/dpkg/status";
+    int fd = open(statusPath.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return env->NewStringUTF("");
+
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        return env->NewStringUTF("");
+    }
+    std::string content(static_cast<size_t>(st.st_size), '\0');
+    size_t totalRead = 0;
+    while (totalRead < content.size()) {
+        ssize_t r = read(fd, content.data() + totalRead, content.size() - totalRead);
+        if (r <= 0) break;
+        totalRead += static_cast<size_t>(r);
+    }
+    close(fd);
+    content.resize(totalRead);
+
+    struct PkgEntry {
+        std::string name;
+        std::string version;
+        std::string sizeKb;
+        std::string desc;
+    };
+    std::vector<PkgEntry> pkgs;
+
+    size_t pos = 0;
+    while (pos < content.size()) {
+        size_t endBlock = content.find("\n\n", pos);
+        if (endBlock == std::string::npos) endBlock = content.size();
+        std::string_view block(content.data() + pos, endBlock - pos);
+
+        std::string pkg, ver, status, sizeKb = "0", desc;
+        size_t lpos = 0;
+        while (lpos < block.size()) {
+            size_t lend = block.find('\n', lpos);
+            if (lend == std::string_view::npos) lend = block.size();
+            std::string_view line = block.substr(lpos, lend - lpos);
+            if (line.rfind("Package: ", 0) == 0) pkg = std::string(line.substr(9));
+            else if (line.rfind("Version: ", 0) == 0) ver = std::string(line.substr(9));
+            else if (line.rfind("Status: ", 0) == 0) status = std::string(line.substr(8));
+            else if (line.rfind("Installed-Size: ", 0) == 0) sizeKb = std::string(line.substr(16));
+            else if (line.rfind("Description: ", 0) == 0) desc = std::string(line.substr(13));
+            lpos = lend + 1;
+        }
+        if (!pkg.empty() && status.find("installed") != std::string::npos) {
+            pkgs.push_back(PkgEntry{trimCpp(pkg), trimCpp(ver), trimCpp(sizeKb), trimCpp(desc)});
+        }
+        pos = endBlock + 2;
+    }
+
+    std::sort(pkgs.begin(), pkgs.end(), [](const PkgEntry& a, const PkgEntry& b) {
+        return a.name < b.name;
+    });
+
+    std::string out;
+    out.reserve(pkgs.size() * 64);
+    for (const auto& p : pkgs) {
+        out += p.name + "\t" + p.version + "\t" + p.sizeKb + "\t" + p.desc + "\n";
+    }
+    return env->NewStringUTF(out.c_str());
 }
 
 JNIEXPORT jint JNICALL
