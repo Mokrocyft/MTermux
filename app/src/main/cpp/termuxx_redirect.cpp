@@ -26,6 +26,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -56,33 +57,39 @@ struct PathBuf {
     explicit PathBuf(const char* in) noexcept : ptr(in) {
         if (!in || !in[0]) return;
 
-        if (strcmp(in, "/bin/sh") == 0 || strcmp(in, "/usr/bin/sh") == 0 ||
-            (strcmp(in, "/system/bin/sh") == 0 && rawAccessAt(AT_FDCWD, USR_SH_PATH, R_OK) == 0)) {
+        if ((strcmp(in, "/bin/sh") == 0 || strcmp(in, "/usr/bin/sh") == 0) &&
+            rawAccessAt(AT_FDCWD, in, F_OK) != 0) {
             strcpy(buf, USR_SH_PATH);
             ptr = buf;
             return;
         }
-        if (strcmp(in, "/usr/bin/env") == 0 || strcmp(in, "/bin/env") == 0) {
+        if (strcmp(in, "/system/bin/sh") == 0 && rawAccessAt(AT_FDCWD, USR_SH_PATH, R_OK) == 0) {
+            strcpy(buf, USR_SH_PATH);
+            ptr = buf;
+            return;
+        }
+        if ((strcmp(in, "/usr/bin/env") == 0 || strcmp(in, "/bin/env") == 0) &&
+            rawAccessAt(AT_FDCWD, in, F_OK) != 0) {
             strcpy(buf, "/data/data/com.termuxx/file/usr/bin/env");
             ptr = buf;
             return;
         }
-        if (strncmp(in, "/bin/", 5) == 0 && in[5] != '\0') {
+        if (strncmp(in, "/bin/", 5) == 0 && in[5] != '\0' && rawAccessAt(AT_FDCWD, in, F_OK) != 0) {
             snprintf(buf, sizeof(buf), "%s/%s", USR_BIN_PATH, in + 5);
             ptr = buf;
             return;
         }
-        if (strncmp(in, "/usr/bin/", 9) == 0 && in[9] != '\0') {
+        if (strncmp(in, "/usr/bin/", 9) == 0 && in[9] != '\0' && rawAccessAt(AT_FDCWD, in, F_OK) != 0) {
             snprintf(buf, sizeof(buf), "%s/%s", USR_BIN_PATH, in + 9);
             ptr = buf;
             return;
         }
-        if (strcmp(in, "/tmp") == 0 || strcmp(in, "/tmp/") == 0) {
+        if ((strcmp(in, "/tmp") == 0 || strcmp(in, "/tmp/") == 0) && rawAccessAt(AT_FDCWD, "/tmp", W_OK) != 0) {
             strcpy(buf, USR_TMP_PATH);
             ptr = buf;
             return;
         }
-        if (strncmp(in, "/tmp/", 5) == 0) {
+        if (strncmp(in, "/tmp/", 5) == 0 && rawAccessAt(AT_FDCWD, "/tmp", W_OK) != 0) {
             snprintf(buf, sizeof(buf), "%s/%s", USR_TMP_PATH, in + 5);
             ptr = buf;
             return;
@@ -273,7 +280,16 @@ static void patchInstalledFileIfNeeded(const char* path) noexcept {
     patchInstalledFileIfNeededAt(AT_FDCWD, path);
 }
 
-static std::vector<std::string> buildSanitizedEnvStrings(char* const envp[]) {
+static bool isProotOrChrootExec(const char* targetPath) noexcept {
+    if (!targetPath) return false;
+    if (strstr(targetPath, "/installed-rootfs/") || strstr(targetPath, "/chroot/")) return true;
+    size_t len = strlen(targetPath);
+    if (len >= 6 && strcmp(targetPath + len - 6, "/proot") == 0) return true;
+    if (len >= 7 && strcmp(targetPath + len - 7, "/chroot") == 0) return true;
+    return false;
+}
+
+static std::vector<std::string> buildSanitizedEnvStrings(char* const envp[], const char* targetPath = nullptr) {
     std::vector<std::string> out;
     char* const* src = envp ? envp : environ;
     bool hasPreload = false;
@@ -330,7 +346,16 @@ static std::vector<std::string> buildSanitizedEnvStrings(char* const envp[]) {
         }
     }
 
-    if (!hasPreload) {
+    bool skipBionicPreload = isProotOrChrootExec(targetPath);
+    if (skipBionicPreload) {
+        out.erase(
+            std::remove_if(out.begin(), out.end(), [](const std::string& s) {
+                return s.rfind("LD_PRELOAD=", 0) == 0 && s.find("libtermuxx-redirect.so") != std::string::npos;
+            }),
+            out.end()
+        );
+        out.emplace_back(std::string("PROOT_TMP_DIR=") + USR_TMP_PATH);
+    } else if (!hasPreload) {
         out.emplace_back(std::string("LD_PRELOAD=") + REDIRECT_SO_PATH);
     }
     if (!hasLibPath) {
@@ -371,7 +396,7 @@ static int executeResolvedPath(const char* rawFilename, char* const argv[], char
     // Ensure any newly created script or binary under com.termuxx has its 16-byte tokens patched before exec
     patchInstalledFileIfNeeded(targetPath);
 
-    std::vector<std::string> envStore = buildSanitizedEnvStrings(envp);
+    std::vector<std::string> envStore = buildSanitizedEnvStrings(envp, targetPath);
     std::vector<char*> envPtrs;
     envPtrs.reserve(envStore.size() + 1);
     for (auto& s : envStore) {

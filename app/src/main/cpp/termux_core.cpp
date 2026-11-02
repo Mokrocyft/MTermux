@@ -12,6 +12,8 @@
 #include <math.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
+#include <sys/resource.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -92,6 +94,30 @@ constexpr uint32_t DEFAULT_FG   = 0xFFD0D6E0u;
 constexpr uint32_t DEFAULT_BG   = 0xFF000000u;
 constexpr uint32_t SELECTION_BG = 0xFF52525Au;
 constexpr uint32_t SELECTION_FG = 0xFFFFFFFFu;
+constexpr uint32_t PREDELETE_BG = 0xFF5C1D24u;
+constexpr uint32_t PREDELETE_FG = 0xFFFFDAD6u;
+
+static std::atomic<int> gPerfMode{0}; // 0: Oryon Smart Boost, 1: Oryon Prime Max, 2: Oryon Eco
+
+static void applyOryonAffinity(int mode, bool isBurst = false) noexcept {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    if (mode == 2 && !isBurst) {
+        // Eco mode: bind to efficiency/lower-clocked cluster (cores 0..3)
+        for (int c = 0; c < 4; ++c) CPU_SET(c, &mask);
+        sched_setaffinity(0, sizeof(mask), &mask);
+        setpriority(PRIO_PROCESS, 0, 5);
+    } else if (mode == 1 || isBurst) {
+        // Prime Max / Burst: unlock all 8 Snapdragon 8 Elite Gen 5 Oryon cores (including Prime cores 6..7)
+        for (int c = 0; c < 8; ++c) CPU_SET(c, &mask);
+        sched_setaffinity(0, sizeof(mask), &mask);
+        setpriority(PRIO_PROCESS, 0, mode == 1 ? -15 : -8);
+    } else {
+        for (int c = 0; c < 8; ++c) CPU_SET(c, &mask);
+        sched_setaffinity(0, sizeof(mask), &mask);
+        setpriority(PRIO_PROCESS, 0, 0);
+    }
+}
 
 // Android KeyEvent constants
 constexpr int AKEYCODE_ENTER        = 66;
@@ -467,7 +493,8 @@ static void copyFileBinary(const char* srcPath, const char* dstPath, mode_t mode
         close(inFd);
         return;
     }
-    uint8_t buf[65536];
+    applyOryonAffinity(gPerfMode.load(std::memory_order_relaxed), false);
+        uint8_t buf[65536];
     ssize_t n;
     while ((n = read(inFd, buf, sizeof(buf))) > 0) {
         writeAllFd(outFd, buf, static_cast<size_t>(n));
@@ -796,6 +823,7 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     mkdirsRecursive(TMP_PATH, 0700);
     mkdirsRecursive(APT_ARCHIVES_PARTIAL, 0700);
     mkdirsRecursive("/data/data/com.termuxx/cache/apt/archives/partial", 0700);
+    mkdirsRecursive("/data/data/com.termuxx/file/usr/var/lib/proot-distro/installed-rootfs", 0700);
 
     unlink("/data/data/com.termuxx/files/usr");
     symlink(PREFIX_PATH, "/data/data/com.termuxx/files/usr");
@@ -829,7 +857,8 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         "fi\n"
         "export HISTCONTROL=ignoredups:erasedups\n"
         "export HISTSIZE=10000\n"
-        "export HISTFILESIZE=20000\n";
+        "export HISTFILESIZE=20000\n"
+        "export PROOT_TMP_DIR=/data/data/com.termuxx/file/usr/tmp\n";
     int pfd = open(profPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (pfd >= 0) {
         writeAllFd(pfd, profText, strlen(profText));
@@ -846,6 +875,7 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         "export PREFIX=/data/data/com.termuxx/file/usr\n"
         "export HOME=/data/data/com.termuxx/file/home\n"
         "export TMPDIR=/data/data/com.termuxx/file/usr/tmp\n"
+        "export PROOT_TMP_DIR=/data/data/com.termuxx/file/usr/tmp\n"
         "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
         "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
         "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
@@ -921,7 +951,8 @@ public:
     bool mSelActive = false;
     int mSelX1 = -1, mSelY1 = -1;
     int mSelX2 = -1, mSelY2 = -1;
-    int mDragHandle = 0; // 0 = none, 1 = start handle, 2 = end handle
+    int mDragHandle = 0;
+    int mPreDeleteCount = 0; // 0 = none, 1 = start handle, 2 = end handle
     float mDragOffsetX = 0.0f;
     float mDragOffsetY = 0.0f;
 
@@ -1988,6 +2019,7 @@ public:
     }
 
     void processStream(const uint8_t* data, size_t len, std::string& reply) {
+        mPreDeleteCount = 0;
         size_t i = 0;
         while (i < len) {
             if (mState == State::NORMAL && mUtf8BytesNeeded == 0) {
@@ -2163,9 +2195,22 @@ public:
                     if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
                     break;
                 }
+                int pMode = gPerfMode.load(std::memory_order_relaxed);
+                if (n >= 16384 && pMode == 0) {
+                    applyOryonAffinity(0, true);
+                }
                 reply.clear();
                 lock();
                 processStream(buf, static_cast<size_t>(n), reply);
+                // Batch-drain additional immediately available kernel PTY chunks under the same lock
+                int maxBatches = (pMode == 1) ? 6 : 3;
+                for (int b = 0; b < maxBatches; ++b) {
+                    struct pollfd bpfd{fd, POLLIN, 0};
+                    if (poll(&bpfd, 1, 0) <= 0 || !(bpfd.revents & POLLIN)) break;
+                    ssize_t bn = read(fd, buf, sizeof(buf));
+                    if (bn <= 0) break;
+                    processStream(buf, static_cast<size_t>(bn), reply);
+                }
                 bool shouldWake = !(mModes.load(std::memory_order_relaxed) & MODE_SYNC_OUTPUT);
                 unlock();
                 if (!reply.empty()) writeAllFd(fd, reply.data(), reply.size());
@@ -2273,6 +2318,7 @@ static bool startSessionProcess(
     envStrings.emplace_back("PREFIX=" + std::string(PREFIX_PATH));
     envStrings.emplace_back("TMPDIR=" + std::string(TMP_PATH));
     envStrings.emplace_back("TMP=" + std::string(TMP_PATH));
+    envStrings.emplace_back("PROOT_TMP_DIR=" + std::string(TMP_PATH));
     envStrings.emplace_back("LANG=en_US.UTF-8");
     envStrings.emplace_back("PATH=" + std::string(BIN_PATH) + ":" + std::string(BIN_PATH) + "/applets:/system/bin:/system/xbin:/sbin");
     envStrings.emplace_back("LD_LIBRARY_PATH=" + std::string(LIB_PATH));
@@ -2351,6 +2397,8 @@ static bool startSessionProcess(
 
         close(ptm);
         setsid();
+        umask(0022);
+        applyOryonAffinity(gPerfMode.load(std::memory_order_relaxed), true);
 
         int pts = open(devname, O_RDWR);
         if (pts < 0) _exit(127);
@@ -2612,7 +2660,7 @@ JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeNewSession(
     JNIEnv* /*env*/, jclass /*clazz*/, jboolean asRoot, jint rows, jint cols, jint cellW, jint cellH) {
     pthread_mutex_lock(&gGlobalMutex);
-    auto engine = std::make_shared<NeoTerminalEngine>(rows, cols, 2000, asRoot == JNI_TRUE);
+    auto engine = std::make_shared<NeoTerminalEngine>(rows, cols, 10000, asRoot == JNI_TRUE);
     std::string libDir = gNativeLibDir;
     gSessions.push_back(engine);
     gActiveIdx = static_cast<int>(gSessions.size()) - 1;
@@ -3153,8 +3201,17 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     int glCount = 0;
 
     if (bgPtr && glPtr) {
+        const bool isCursorRow = (logicalY == engine->mCursorRow);
+        const int preDelStart = (isCursorRow && engine->mPreDeleteCount > 0)
+            ? std::max(0, engine->mCursorCol - engine->mPreDeleteCount)
+            : -1;
+        const int preDelEnd = (isCursorRow && engine->mPreDeleteCount > 0)
+            ? engine->mCursorCol
+            : -1;
+
         auto cellBgAt = [&](int c) -> uint32_t {
             if (engine->isLogicalCellSelected(logicalY, c)) return SELECTION_BG;
+            if (c >= preDelStart && c < preDelEnd) return PREDELETE_BG;
             const Cell& cell = row.cells[static_cast<size_t>(c)];
             return resolveBgColor(cell.fg, cell.bg, cell.flags);
         };
@@ -3183,7 +3240,9 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
             }
             uint32_t fg = engine->isLogicalCellSelected(logicalY, c)
                 ? SELECTION_FG
-                : resolveFgColor(cell.fg, cell.bg, cell.flags);
+                : ((c >= preDelStart && c < preDelEnd)
+                    ? PREDELETE_FG
+                    : resolveFgColor(cell.fg, cell.bg, cell.flags));
 
             if (!emitProceduralBoxOrBlockInCpp23(cell.codepoint, c, fg, glPtr, glCount, maxGlyphs)) {
                 if (glCount < maxGlyphs) {
@@ -3216,6 +3275,61 @@ Java_com_termuxx_app_TermuxActivity_nativeSetDefaultCursorShape(JNIEnv* /*env*/,
         }
     }
     pthread_mutex_unlock(&gGlobalMutex);
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSetPreDeleteCount(JNIEnv* /*env*/, jclass /*clazz*/, jint count) {
+    auto eng = getActiveEngineSafe();
+    if (!eng) return;
+    eng->lock();
+    int clamped = std::max(0, static_cast<int>(count));
+    if (eng->mPreDeleteCount != clamped) {
+        eng->mPreDeleteCount = clamped;
+        if (eng->mCursorRow >= 0 && eng->mCursorRow < eng->mRows) {
+            eng->activeGrid()[static_cast<size_t>(eng->mCursorRow)].dirty = true;
+        }
+        eng->mFrameDirty.store(true, std::memory_order_release);
+    }
+    eng->unlock();
+    notifySurfaceFromNative();
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGetInputLineBeforeCursor(JNIEnv* env, jclass /*clazz*/) {
+    auto eng = getActiveEngineSafe();
+    if (!eng) return env->NewStringUTF("");
+    std::string line;
+    eng->lock();
+    if (eng->mCursorRow >= 0 && eng->mCursorRow < eng->mRows) {
+        const Row& row = eng->activeGrid()[static_cast<size_t>(eng->mCursorRow)];
+        int maxC = std::min(eng->mCursorCol, static_cast<int>(row.cells.size()));
+        int startC = 0;
+        // Find end of shell prompt (e.g., › or $ or # followed by space)
+        for (int c = 0; c < maxC; ++c) {
+            uint32_t cp = row.cells[static_cast<size_t>(c)].codepoint;
+            if (cp == 0x203A || cp == '$' || cp == '#') {
+                if (c + 1 < maxC && row.cells[static_cast<size_t>(c + 1)].codepoint == ' ') {
+                    startC = c + 2;
+                } else {
+                    startC = c + 1;
+                }
+            }
+        }
+        for (int c = startC; c < maxC; ++c) {
+            const Cell& cell = row.cells[static_cast<size_t>(c)];
+            if (cell.flags & FLAG_WIDE_TRAIL) continue;
+            appendUtf8(line, cell.codepoint ? cell.codepoint : ' ');
+        }
+    }
+    eng->unlock();
+    return env->NewStringUTF(line.c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSetPerformanceMode(JNIEnv* /*env*/, jclass /*clazz*/, jint mode) {
+    int m = std::clamp(static_cast<int>(mode), 0, 2);
+    gPerfMode.store(m, std::memory_order_release);
+    applyOryonAffinity(m, m == 1);
 }
 
 JNIEXPORT jint JNICALL
