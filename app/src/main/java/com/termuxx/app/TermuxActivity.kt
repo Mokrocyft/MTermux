@@ -72,8 +72,13 @@ import android.widget.TextView
 import android.widget.Toast
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
+import android.text.Editable
 import com.termuxx.R
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -167,11 +172,45 @@ private val UI_THEMES = arrayOf(
     UiThemePreset("Графитовый", 0xFF8C96A6.toInt(), 0xFF16191F.toInt())
 )
 
+private const val KEY_SSH_SERVERS_V1 = "ssh_servers_v1"
+private const val KEY_LOCAL_STARTUP_CMD = "local_startup_cmd_v1"
+
+// Material 3 Expressive Warm Tonal Secondary Container (matches local-and-ssh.png & sftp.png)
+private const val COLOR_EXPRESSIVE_WARM_CONTAINER = 0xFF4A3723.toInt()
+private const val COLOR_EXPRESSIVE_WARM_ACCENT = 0xFFE6C39C.toInt()
+private const val COLOR_EXPRESSIVE_PILL_BG = 0xFF1A1D26.toInt()
+private const val COLOR_EXPRESSIVE_CONNECTED = 0xFF4CAF50.toInt()
+private const val COLOR_EXPRESSIVE_STOP = 0xFFF2B8B5.toInt()
+
 private data class DpkgPackageInfo(
     val name: String,
     val version: String,
     val sizeKb: Long,
     val description: String
+)
+
+internal data class SshServerProfile(
+    val id: String,
+    val label: String,
+    val host: String,
+    val port: Int = 22,
+    val username: String,
+    val authType: Int = 0, // 0 = Password, 1 = Private Key, 2 = SSH Agent
+    val secretOrKeyPath: String = "",
+    val startupCommand: String = "",
+    val useCompression: Boolean = true,
+    val forwardAgent: Boolean = false
+)
+
+internal data class SftpItemEntry(
+    val name: String,
+    val path: String,
+    val isDirectory: Boolean,
+    val sizeBytes: Long,
+    val modifiedEpochMs: Long,
+    val permissions: String = "",
+    val depth: Int = 0,
+    val isExpanded: Boolean = false
 )
 
 class TermuxActivity : Activity() {
@@ -269,7 +308,13 @@ class TermuxActivity : Activity() {
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
         )
 
-        headerBar.addView(makeHeaderButton("+") { createSession(false) })
+        headerBar.addView(
+            makeHeaderButton(
+                label = "+",
+                onClick = { createSession(false) },
+                onLongClick = { showWorkspaceHubDialog(initialTab = 0) }
+            )
+        )
         headerBar.addView(
             makeHeaderButton(
                 label = "#",
@@ -277,7 +322,8 @@ class TermuxActivity : Activity() {
                 onLongClick = { terminalSurface.showTranscriptCopyDialog() }
             )
         )
-        headerBar.addView(makeHeaderButton("▤") { showFileAndPackageManagerDialog() })
+        headerBar.addView(makeHeaderButton("⇄") { showWorkspaceHubDialog(initialTab = 0) })
+        headerBar.addView(makeHeaderButton("▤") { showWorkspaceHubDialog(initialTab = 1) })
         headerBar.addView(makeHeaderButton("⚙") { showCategorizedSettingsDialog() })
         headerBar.addView(makeHeaderButton("✕") { closeCurrentSession() })
 
@@ -799,18 +845,20 @@ class TermuxActivity : Activity() {
             title: String,
             subtitle: String,
             badge: String,
+            index: Int = 0,
+            total: Int = 1,
             onClick: () -> Unit
         ): LinearLayout {
             return LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(14), dp(12), dp(14), dp(12))
-                background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(16))
+                setPadding(dp(14), dp(13), dp(14), dp(13))
+                background = segmentedCardBg(index, total, COLOR_CARD_BG, COLOR_BORDER)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    bottomMargin = dp(8)
+                    bottomMargin = if (index < total - 1) dp(2) else dp(8)
                 }
 
                 val badgeView = TextView(this@TermuxActivity).apply {
@@ -1425,7 +1473,9 @@ class TermuxActivity : Activity() {
                 makeCategoryCard(
                     title = "Курсор и анимации",
                     subtitle = "$curStyleName · ${terminalSurface.cursorAlphaPct}% · ${terminalSurface.cursorRadiusTenths / 10f}dp",
-                    badge = "▊"
+                    badge = "▊",
+                    index = 0,
+                    total = 5
                 ) { showCursorCategory() }
             )
 
@@ -1433,7 +1483,9 @@ class TermuxActivity : Activity() {
                 makeCategoryCard(
                     title = "Клавиатура и бинды",
                     subtitle = "Настройка рядов, спецклавиш и пользовательских команд",
-                    badge = "⌨"
+                    badge = "⌨",
+                    index = 1,
+                    total = 5
                 ) { showKeyboardCategory() }
             )
 
@@ -1441,7 +1493,9 @@ class TermuxActivity : Activity() {
                 makeCategoryCard(
                     title = "Тактильный отклик",
                     subtitle = if (hapticEnabled) "Вкл · ${hapticDurationMs} мс · ${(hapticAmplitude * 100f / 255f).roundToInt()}%" else "Отключён",
-                    badge = "≈"
+                    badge = "≈",
+                    index = 2,
+                    total = 5
                 ) { showHapticsCategory() }
             )
 
@@ -1449,7 +1503,9 @@ class TermuxActivity : Activity() {
                 makeCategoryCard(
                     title = "Оформление и тема",
                     subtitle = "Палитра: ${UI_THEMES[uiThemeIndex].name} · Масштаб шрифта",
-                    badge = "◈"
+                    badge = "◈",
+                    index = 3,
+                    total = 5
                 ) { showThemeCategory() }
             )
 
@@ -1458,7 +1514,9 @@ class TermuxActivity : Activity() {
                 makeCategoryCard(
                     title = "Процессор и система",
                     subtitle = "${perfNames[oryonPerfMode.coerceIn(0, 2)]} · proot / chroot",
-                    badge = "⚡"
+                    badge = "⚡",
+                    index = 4,
+                    total = 5
                 ) { showPerformanceCategory() }
             )
         }
@@ -1534,601 +1592,1980 @@ class TermuxActivity : Activity() {
         return out.sortedBy { it.name }
     }
 
-    private fun showFileAndPackageManagerDialog() {
-        val (dlg, sheet) = createExpressiveDialog(440)
+    // ========================================================================
+    // SSH Server Persistence & SSH_ASKPASS Non-Interactive Auth Engine
+    // ========================================================================
+    private fun loadSshServers(): MutableList<SshServerProfile> {
+        val raw = prefs.getString(KEY_SSH_SERVERS_V1, "") ?: ""
+        if (raw.isBlank()) return mutableListOf()
+        val list = mutableListOf<SshServerProfile>()
+        for (line in raw.split("\n")) {
+            if (line.isBlank()) continue
+            val parts = line.split("\t")
+            if (parts.size >= 6) {
+                list.add(
+                    SshServerProfile(
+                        id = parts[0],
+                        label = parts[1],
+                        host = parts[2],
+                        port = parts[3].toIntOrNull() ?: 22,
+                        username = parts[4],
+                        authType = parts[5].toIntOrNull() ?: 0,
+                        secretOrKeyPath = parts.getOrNull(6) ?: "",
+                        startupCommand = parts.getOrNull(7) ?: "",
+                        useCompression = (parts.getOrNull(8) ?: "1") == "1",
+                        forwardAgent = (parts.getOrNull(9) ?: "0") == "1"
+                    )
+                )
+            }
+        }
+        return list
+    }
 
-        var activeTab = 0 // 0 = Files, 1 = Packages
-        var currentDir = File("/data/data/com.termuxx/file/home").let {
+    private fun saveSshServers(servers: List<SshServerProfile>) {
+        val clean = { s: String -> s.replace("\t", " ").replace("\n", " ").replace("\r", "") }
+        val serialized = servers.joinToString("\n") { s ->
+            listOf(
+                clean(s.id),
+                clean(s.label),
+                clean(s.host),
+                s.port.toString(),
+                clean(s.username),
+                s.authType.toString(),
+                clean(s.secretOrKeyPath),
+                clean(s.startupCommand),
+                if (s.useCompression) "1" else "0",
+                if (s.forwardAgent) "1" else "0"
+            ).joinToString("\t")
+        }
+        prefs.edit().putString(KEY_SSH_SERVERS_V1, serialized).apply()
+    }
+
+    private fun shellEscapeSingle(s: String): String {
+        return "'" + s.replace("'", "'\"'\"'") + "'"
+    }
+
+    /**
+     * Creates a one-shot 0700 SSH_ASKPASS script in $PREFIX/tmp so standard OpenSSH (`ssh`, `sftp`, `scp`, `ssh-copy-id`)
+     * authenticates automatically with `SSH_ASKPASS_REQUIRE=force` even without `sshpass` installed.
+     */
+    private fun prepareAskPassEnvPrefix(server: SshServerProfile): String {
+        if (server.authType != 0 || server.secretOrKeyPath.isEmpty()) return ""
+        return try {
+            val tmpDir = File("/data/data/com.termuxx/file/usr/tmp").apply { mkdirs() }
+            val script = File(tmpDir, ".askpass_${System.nanoTime()}.sh")
+            val escapedPwd = shellEscapeSingle(server.secretOrKeyPath)
+            script.writeText(
+                "#!/data/data/com.termuxx/file/usr/bin/sh\n" +
+                "rm -f \"\$0\" 2>/dev/null || true\n" +
+                "printf '%s\\n' $escapedPwd\n"
+            )
+            script.setReadable(true, true)
+            script.setWritable(true, true)
+            script.setExecutable(true, true)
+            "DISPLAY=:0 SSH_ASKPASS=${shellEscapeSingle(script.absolutePath)} SSH_ASKPASS_REQUIRE=force "
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    private fun buildSshBaseArgs(server: SshServerProfile, batchMode: Boolean = false): String {
+        val sb = StringBuilder()
+        sb.append("-p ").append(server.port)
+        sb.append(" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8")
+        if (batchMode && server.authType != 0) {
+            sb.append(" -o BatchMode=yes")
+        }
+        if (server.useCompression) sb.append(" -C")
+        if (server.forwardAgent || server.authType == 2) sb.append(" -A")
+        if (server.authType == 1 && server.secretOrKeyPath.isNotBlank()) {
+            sb.append(" -i ").append(shellEscapeSingle(server.secretOrKeyPath.trim()))
+        }
+        return sb.toString()
+    }
+
+    private fun connectToSshServerInTerminal(server: SshServerProfile, dlgToDismiss: Dialog? = null) {
+        dlgToDismiss?.dismiss()
+        createSession(false, runStartupCmd = false)
+        val envPrefix = prepareAskPassEnvPrefix(server)
+        val args = buildSshBaseArgs(server, batchMode = false)
+        val target = "${server.username}@${server.host}"
+        val remoteCmd = if (server.startupCommand.isNotBlank()) {
+            " -t " + shellEscapeSingle(server.startupCommand.trim())
+        } else {
+            ""
+        }
+        val fullCmd = "${envPrefix}ssh $args $target$remoteCmd\n"
+        terminalSurface.postDelayed({
+            nativeSendText(fullCmd, false)
+        }, 120L)
+    }
+
+    private fun runRemoteSshCommandSync(server: SshServerProfile, remoteShCommand: String): Pair<Boolean, String> {
+        return try {
+            val prefixDir = "/data/data/com.termuxx/file/usr"
+            val shBin = File("$prefixDir/bin/sh").let { if (it.exists()) it.absolutePath else "/system/bin/sh" }
+            val sshBin = File("$prefixDir/bin/ssh")
+            if (!sshBin.exists()) {
+                return false to "Пакет openssh не установлен. Установите его во вкладке Пакеты (+ openssh) или командой: pkg install openssh"
+            }
+            val askPassPrefix = prepareAskPassEnvPrefix(server)
+            val sshArgs = buildSshBaseArgs(server, batchMode = true)
+            val target = "${server.username}@${server.host}"
+            val fullLine = "export PATH=\"$prefixDir/bin:\$PATH\"; " +
+                "export LD_LIBRARY_PATH=\"$prefixDir/lib\"; " +
+                "export HOME=\"/data/data/com.termuxx/file/home\"; " +
+                (if (File("$prefixDir/lib/libtermuxx-redirect.so").exists())
+                    "export LD_PRELOAD=\"$prefixDir/lib/libtermuxx-redirect.so\"; " else "") +
+                "${askPassPrefix}${sshBin.absolutePath} $sshArgs $target ${shellEscapeSingle(remoteShCommand)} 2>&1"
+
+            val proc = ProcessBuilder(shBin, "-c", fullLine).start()
+            val output = proc.inputStream.bufferedReader().readText()
+            val code = proc.waitFor()
+            (code == 0) to output
+        } catch (e: Throwable) {
+            false to (e.localizedMessage ?: "Ошибка выполнения SSH-команды")
+        }
+    }
+
+    // ========================================================================
+    // Material 3 Expressive Workspace Hub: Servers (SSH) | SFTP & Files | Packages
+    // (Modeled on termux-ghostty-dev: local-and-ssh.png & sftp.png)
+    // ========================================================================
+    private fun formatSize(bytes: Long): String {
+        if (bytes < 1024L) return "$bytes B"
+        val kb = bytes / 1024.0
+        if (kb < 1024.0) return String.format(Locale.US, "%.1f KB", kb)
+        val mb = kb / 1024.0
+        if (mb < 1024.0) return String.format(Locale.US, "%.2f MB", mb)
+        val gb = mb / 1024.0
+        return String.format(Locale.US, "%.2f GB", gb)
+    }
+
+    private fun formatTimestamp(epochMs: Long): String {
+        if (epochMs <= 0L) return ""
+        return try {
+            SimpleDateFormat("yyyy-MM-dd hh:mm:ss a", Locale.US).format(Date(epochMs))
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    private fun computeItemSizeBounded(f: File, maxDepth: Int = 3): Long {
+        return try {
+            if (!f.exists()) return 0L
+            if (f.isFile || File(f.parentFile, f.name).let { it.canonicalPath != it.absolutePath }) {
+                f.length()
+            } else if (maxDepth <= 0) {
+                0L
+            } else {
+                var sum = 0L
+                val children = f.listFiles()
+                if (children != null) {
+                    for (c in children) {
+                        sum += if (c.isFile) c.length() else computeItemSizeBounded(c, maxDepth - 1)
+                    }
+                }
+                sum
+            }
+        } catch (_: Throwable) {
+            0L
+        }
+    }
+
+    private fun parseInstalledDpkgPackages(): List<DpkgPackageInfo> {
+        val statusFile = File("/data/data/com.termuxx/file/usr/var/lib/dpkg/status")
+        if (!statusFile.exists() || !statusFile.canRead()) return emptyList()
+        val out = ArrayList<DpkgPackageInfo>()
+        try {
+            val content = statusFile.readText()
+            for (block in content.split("\n\n")) {
+                var pkg = ""
+                var ver = ""
+                var status = ""
+                var sizeKb = 0L
+                var desc = ""
+                for (line in block.lines()) {
+                    when {
+                        line.startsWith("Package: ") -> pkg = line.substring(9).trim()
+                        line.startsWith("Version: ") -> ver = line.substring(9).trim()
+                        line.startsWith("Status: ") -> status = line.substring(8).trim()
+                        line.startsWith("Installed-Size: ") -> {
+                            sizeKb = line.substring(16).trim().toLongOrNull() ?: 0L
+                        }
+                        line.startsWith("Description: ") -> desc = line.substring(13).trim()
+                    }
+                }
+                if (pkg.isNotEmpty() && status.contains("installed")) {
+                    out.add(DpkgPackageInfo(pkg, ver, sizeKb, desc))
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        return out.sortedBy { it.name }
+    }
+
+    private fun showWorkspaceHubDialog(initialTab: Int = 0) {
+        val dlg = Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
+        dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dlg.window?.apply {
+            setBackgroundDrawable(ColorDrawable(COLOR_AMOLED_BG))
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        }
+
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(COLOR_AMOLED_BG)
+            setPadding(0, dp(10), 0, dp(8))
+        }
+
+        val mainCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        root.addView(mainCol)
+
+        var activeTab = initialTab.coerceIn(0, 2) // 0 = Servers (SSH), 1 = SFTP, 2 = Packages
+        var activeSftpServer: SshServerProfile? = null // null = Local Termux filesystem
+        var localCurrentDir = File("/data/data/com.termuxx/file/home").let {
             if (it.exists()) it else File(applicationInfo.dataDir)
         }
+        var remoteCurrentPath = "/root"
+        var sftpTreeMode = false
+        val expandedTreePaths = HashSet<String>()
+        var sftpSearchActive = false
+        var sftpSearchQuery = ""
 
-        val topBar = LinearLayout(this).apply {
+        // Top Navigation Bar matching sftp.png (Terminal | Servers | SFTP | Packages with bottom indicator)
+        val topNavRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(8))
-        }
-        val tabFilesBtn = makeExpressiveChip("Файлы", true) {}
-        val tabPkgsBtn = makeExpressiveChip("Пакеты", false) {}
-        val spacer = View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-        }
-        val closeBtn = TextView(this).apply {
-            text = "✕"
-            setTextColor(COLOR_TEXT_DIM)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            setPadding(dp(10), dp(4), dp(6), dp(4))
-            setOnClickListener {
-                triggerHaptic(0.8f)
-                dlg.dismiss()
-            }
-        }
-        topBar.addView(tabFilesBtn)
-        topBar.addView(tabPkgsBtn)
-        topBar.addView(spacer)
-        topBar.addView(closeBtn)
-        sheet.addView(topBar)
-
-        val contentContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        sheet.addView(contentContainer)
-
-        lateinit var renderCurrentTab: () -> Unit
-
-        tabFilesBtn.setOnClickListener {
-            triggerHaptic(0.8f)
-            activeTab = 0
-            renderCurrentTab()
-        }
-        tabPkgsBtn.setOnClickListener {
-            triggerHaptic(0.8f)
-            activeTab = 1
-            renderCurrentTab()
+            setBackgroundColor(COLOR_AMOLED_BG)
+            setPadding(dp(8), dp(4), dp(8), 0)
         }
 
-        fun showTextEditorDialog(file: File, onSaved: () -> Unit) {
-            val (edDlg, edSheet) = createExpressiveDialog(440)
-            edSheet.addView(TextView(this).apply {
-                text = file.name
-                setTextColor(COLOR_TEXT_BRIGHT)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                typeface = Typeface.DEFAULT_BOLD
-                setPadding(0, 0, 0, dp(8))
-            })
-            val initialText = try {
-                if (file.length() <= 256 * 1024) file.readText() else "Файл слишком велик для текстового редактора (> 256 КБ)"
-            } catch (e: Throwable) {
-                ""
-            }
-            val edit = EditText(this).apply {
-                setText(initialText)
-                setTextColor(COLOR_TEXT_BRIGHT)
-                typeface = Typeface.MONOSPACE
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                gravity = Gravity.TOP or Gravity.START
-                minLines = 10
-                maxLines = 18
-                background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(12))
-                setPadding(dp(10), dp(8), dp(10), dp(8))
-            }
-            edSheet.addView(edit)
-
-            val bar = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.END
-                setPadding(0, dp(10), 0, 0)
-            }
-            bar.addView(makeExpressiveChip("Отмена", false) { edDlg.dismiss() })
-            bar.addView(makeExpressiveChip("Сохранить", true) {
-                try {
-                    file.writeText(edit.text.toString())
-                    Toast.makeText(this, "Сохранено", Toast.LENGTH_SHORT).show()
-                    onSaved()
-                } catch (e: Throwable) {
-                    Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+        fun makeTopNavTab(title: String, tabIdx: Int, onSelect: () -> Unit): Pair<LinearLayout, View> {
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                setPadding(dp(4), dp(8), dp(4), 0)
+                setOnClickListener {
+                    triggerHaptic(0.8f)
+                    onSelect()
                 }
-                edDlg.dismiss()
-            })
-            edSheet.addView(bar)
-            edDlg.show()
+            }
+            val tv = TextView(this).apply {
+                text = title
+                tag = "label"
+                gravity = Gravity.CENTER
+                typeface = Typeface.MONOSPACE
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setPadding(0, 0, 0, dp(8))
+            }
+            val indicator = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(3)
+                )
+            }
+            col.addView(tv)
+            col.addView(indicator)
+            return col to indicator
         }
 
-        fun showFileActionsDialog(target: File) {
-            val itemSize = computeItemSizeBounded(target, 4)
-            val options = ArrayList<Pair<String, () -> Unit>>()
-            if (target.isFile) {
-                options.add("Редактировать текст" to {
-                    showTextEditorDialog(target) { renderCurrentTab() }
-                })
-            } else {
-                options.add("Открыть папку в терминале (cd)" to {
-                    dlg.dismiss()
-                    nativeSendText("cd \"${target.absolutePath}\"\n", false)
-                })
+        lateinit var renderActiveTab: () -> Unit
+
+        val (tabTermCol, _) = makeTopNavTab("Terminal", -1) {
+            dlg.dismiss()
+        }
+        val (tabServersCol, indServers) = makeTopNavTab("Servers", 0) {
+            activeTab = 0
+            renderActiveTab()
+        }
+        val (tabSftpCol, indSftp) = makeTopNavTab("SFTP", 1) {
+            activeTab = 1
+            renderActiveTab()
+        }
+        val (tabPkgsCol, indPkgs) = makeTopNavTab("Packages", 2) {
+            activeTab = 2
+            renderActiveTab()
+        }
+
+        topNavRow.addView(tabTermCol)
+        topNavRow.addView(tabServersCol)
+        topNavRow.addView(tabSftpCol)
+        topNavRow.addView(tabPkgsCol)
+        mainCol.addView(topNavRow)
+
+        val navDivider = View(this).apply {
+            setBackgroundColor(COLOR_BORDER)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
+        }
+        mainCol.addView(navDivider)
+
+        val contentFrame = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+        mainCol.addView(contentFrame)
+
+        // ====================================================================
+        // Built-in Syntax-Highlighted Code & Markdown Viewer / Editor (SftpFileViewerScreen)
+        // ====================================================================
+        fun showCodeViewerAndEditorDialog(
+            fileName: String,
+            fullPath: String,
+            initialContent: String,
+            onSaveContent: (String) -> Boolean
+        ) {
+            val vDlg = Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
+            vDlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
+            vDlg.window?.apply {
+                setBackgroundDrawable(ColorDrawable(COLOR_AMOLED_BG))
+                setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             }
-            options.add("Переименовать" to {
-                val (renDlg, renSheet) = createExpressiveDialog(360)
-                renSheet.addView(TextView(this).apply {
-                    text = "Переименовать"
-                    setTextColor(COLOR_TEXT_BRIGHT)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setPadding(0, 0, 0, dp(8))
+
+            var isEditMode = false
+            var viewerFontScale = 1.0f
+            var currentText = initialContent
+
+            val vRoot = FrameLayout(this).apply {
+                setBackgroundColor(COLOR_AMOLED_BG)
+                setPadding(0, dp(12), 0, dp(12))
+            }
+
+            lateinit var rebuildViewer: () -> Unit
+            rebuildViewer = {
+                vRoot.removeAllViews()
+                val col = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                }
+
+                // Header
+                val hdr = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(14), dp(6), dp(14), dp(10))
+                }
+                hdr.addView(TextView(this).apply {
+                    text = "←"
+                    setTextColor(COLOR_EXPRESSIVE_WARM_ACCENT)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                    setPadding(dp(4), dp(2), dp(14), dp(2))
+                    setOnClickListener {
+                        triggerHaptic(0.8f)
+                        vDlg.dismiss()
+                    }
                 })
-                val input = EditText(this).apply {
-                    setText(target.name)
+                val titleCol = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                titleCol.addView(TextView(this).apply {
+                    text = fileName
+                    setSingleLine(true)
+                    setTextColor(COLOR_TEXT_BRIGHT)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                })
+                titleCol.addView(TextView(this).apply {
+                    text = fullPath
+                    setSingleLine(true)
+                    setTextColor(COLOR_TEXT_DIM)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                })
+                hdr.addView(titleCol)
+                col.addView(hdr)
+
+                if (isEditMode) {
+                    val editBox = EditText(this).apply {
+                        setText(currentText)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f * viewerFontScale)
+                        gravity = Gravity.TOP or Gravity.START
+                        setBackgroundColor(0xFF0A0D12.toInt())
+                        setPadding(dp(14), dp(12), dp(14), dp(96))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            0,
+                            1f
+                        )
+                    }
+                    val scroll = ScrollView(this).apply {
+                        isFillViewport = true
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            0,
+                            1f
+                        )
+                        addView(editBox)
+                    }
+                    col.addView(scroll)
+
+                    // FloatingPill save bar at bottom
+                    val pillWrap = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(14), dp(8), dp(14), dp(8))
+                        background = pillBg(COLOR_EXPRESSIVE_PILL_BG, COLOR_BORDER, dp(28))
+                        layoutParams = FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            dp(52),
+                            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                        ).apply {
+                            bottomMargin = dp(16)
+                        }
+                    }
+                    pillWrap.addView(makeExpressiveChip("Отмена", false) {
+                        isEditMode = false
+                        rebuildViewer()
+                    })
+                    pillWrap.addView(makeExpressiveChip("Сохранить", true, COLOR_EXPRESSIVE_WARM_ACCENT, COLOR_EXPRESSIVE_WARM_CONTAINER) {
+                        currentText = editBox.text.toString()
+                        if (onSaveContent(currentText)) {
+                            Toast.makeText(this@TermuxActivity, "Сохранено: $fileName", Toast.LENGTH_SHORT).show()
+                            isEditMode = false
+                            rebuildViewer()
+                        } else {
+                            Toast.makeText(this@TermuxActivity, "Ошибка сохранения", Toast.LENGTH_SHORT).show()
+                        }
+                    })
+                    vRoot.addView(col)
+                    vRoot.addView(pillWrap)
+                } else {
+                    // Read-only CodeViewer with Line Numbers Gutter & Horizontal Scroll (matching SftpFileViewerScreen.kt)
+                    val vScroll = ScrollView(this).apply {
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            0,
+                            1f
+                        )
+                    }
+                    val codeRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        setPadding(0, dp(8), 0, dp(96))
+                    }
+                    val lines = if (currentText.endsWith("\n")) currentText.lines().dropLast(1) else currentText.lines()
+                    val numSb = StringBuilder()
+                    for (i in 1..max(1, lines.size)) {
+                        if (i > 1) numSb.append('\n')
+                        numSb.append(i)
+                    }
+                    val lineNumsTv = TextView(this).apply {
+                        text = numSb.toString()
+                        setTextColor(COLOR_TEXT_DIM)
+                        typeface = Typeface.MONOSPACE
+                        gravity = Gravity.END
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f * viewerFontScale)
+                        setPadding(dp(12), 0, dp(10), 0)
+                    }
+                    val vLine = View(this).apply {
+                        setBackgroundColor(COLOR_BORDER)
+                        layoutParams = LinearLayout.LayoutParams(1, ViewGroup.LayoutParams.MATCH_PARENT)
+                    }
+                    val hScroll = HorizontalScrollView(this).apply {
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    }
+                    val codeTv = TextView(this).apply {
+                        text = currentText.ifEmpty { "(Пустой файл)" }
+                        setTextIsSelectable(true)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f * viewerFontScale)
+                        setPadding(dp(10), 0, dp(16), 0)
+                    }
+                    hScroll.addView(codeTv)
+                    codeRow.addView(lineNumsTv)
+                    codeRow.addView(vLine)
+                    codeRow.addView(hScroll)
+                    vScroll.addView(codeRow)
+                    col.addView(vScroll)
+                    vRoot.addView(col)
+
+                    // FloatingPill at bottom (FileViewerPill: filename | Zoom -/+ | Copy | Edit)
+                    val pill = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(14), dp(6), dp(14), dp(6))
+                        background = pillBg(COLOR_EXPRESSIVE_PILL_BG, COLOR_BORDER, dp(28))
+                        layoutParams = FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            dp(52),
+                            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                        ).apply {
+                            bottomMargin = dp(16)
+                        }
+                    }
+                    pill.addView(TextView(this).apply {
+                        text = "${(viewerFontScale * 100).roundToInt()}%"
+                        setTextColor(COLOR_TEXT_DIM)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        setPadding(dp(6), dp(4), dp(8), dp(4))
+                        setOnClickListener {
+                            viewerFontScale = 1.0f
+                            rebuildViewer()
+                        }
+                    })
+                    pill.addView(makeExpressiveChip("A-", false) {
+                        viewerFontScale = (viewerFontScale - 0.15f).coerceIn(0.6f, 2.5f)
+                        rebuildViewer()
+                    })
+                    pill.addView(makeExpressiveChip("A+", false) {
+                        viewerFontScale = (viewerFontScale + 0.15f).coerceIn(0.6f, 2.5f)
+                        rebuildViewer()
+                    })
+                    pill.addView(makeExpressiveChip("Копировать", false) {
+                        copyToClipboard(currentText, true)
+                    })
+                    pill.addView(makeExpressiveChip("Изменить", true, COLOR_EXPRESSIVE_WARM_ACCENT, COLOR_EXPRESSIVE_WARM_CONTAINER) {
+                        isEditMode = true
+                        rebuildViewer()
+                    })
+                    vRoot.addView(pill)
+                }
+            }
+
+            rebuildViewer()
+            vDlg.setContentView(vRoot)
+            vDlg.show()
+        }
+
+        // ====================================================================
+        // TAB 0: Servers & SSH Manager (Modeled on local-and-ssh.png & AddServerScreen.kt)
+        // ====================================================================
+        fun showAddOrEditServerDialog(existing: SshServerProfile?, onSaved: () -> Unit) {
+            val (sDlg, sSheet) = createExpressiveDialog(430)
+            sSheet.addView(TextView(this).apply {
+                text = if (existing == null) "Добавить SSH-сервер" else "Изменить сервер"
+                setTextColor(COLOR_TEXT_BRIGHT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, 0, 0, dp(10))
+            })
+
+            val scroll = ScrollView(this).apply {
+                isVerticalScrollBarEnabled = false
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            }
+            val form = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            scroll.addView(form)
+            sSheet.addView(scroll)
+
+            fun makeLabeledField(label: String, initial: String, hintStr: String, isNumeric: Boolean = false): EditText {
+                form.addView(makeSectionLabel(label))
+                val et = EditText(this).apply {
+                    setText(initial)
+                    hint = hintStr
+                    setHintTextColor(COLOR_TEXT_DIM)
                     setTextColor(COLOR_TEXT_BRIGHT)
                     typeface = Typeface.MONOSPACE
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                    background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(10))
-                    setPadding(dp(10), dp(8), dp(10), dp(8))
                     setSingleLine(true)
-                }
-                renSheet.addView(input)
-                val bar = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.END
-                    setPadding(0, dp(10), 0, 0)
-                }
-                bar.addView(makeExpressiveChip("Отмена", false) { renDlg.dismiss() })
-                bar.addView(makeExpressiveChip("Готово", true) {
-                    val newName = input.text.toString().trim()
-                    if (newName.isNotEmpty() && newName != target.name) {
-                        target.renameTo(File(target.parentFile, newName))
-                        renderCurrentTab()
+                    if (isNumeric) {
+                        inputType = InputType.TYPE_CLASS_NUMBER
                     }
-                    renDlg.dismiss()
+                    background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(12))
+                    setPadding(dp(12), dp(9), dp(12), dp(9))
+                }
+                form.addView(et)
+                return et
+            }
+
+            val labelEt = makeLabeledField("Label (Название)", existing?.label ?: "", "proputer / prod-vps")
+            val hostEt = makeLabeledField("Host (IP или домен)", existing?.host ?: "", "192.168.1.50 или host.local")
+            val portEt = makeLabeledField("Port", (existing?.port ?: 22).toString(), "22", isNumeric = true)
+            val userEt = makeLabeledField("Username", existing?.username ?: "root", "root / ubuntu")
+
+            var selectedAuth = existing?.authType ?: 0
+            form.addView(makeSectionLabel("Способ авторизации"))
+            val (authScroll, authRow) = makeHorizontalChipRow()
+            val secretLabelTv = makeSectionLabel(
+                if (selectedAuth == 0) "Password (Пароль)" else if (selectedAuth == 1) "Путь к приватному ключу" else "Опции агента"
+            )
+            val defaultKeyPath = "/data/data/com.termuxx/file/home/.ssh/id_ed25519"
+            val secretEt = EditText(this).apply {
+                setText(existing?.secretOrKeyPath ?: (if (selectedAuth == 1) defaultKeyPath else ""))
+                hint = if (selectedAuth == 0) "Пароль SSH (авто-ввод через SSH_ASKPASS)" else defaultKeyPath
+                setHintTextColor(COLOR_TEXT_DIM)
+                setTextColor(COLOR_TEXT_BRIGHT)
+                typeface = Typeface.MONOSPACE
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                setSingleLine(true)
+                background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(12))
+                setPadding(dp(12), dp(9), dp(12), dp(9))
+            }
+
+            fun rebuildAuthChips() {
+                authRow.removeAllViews()
+                val opts = listOf("Пароль" to 0, "SSH-Ключ (ed25519/rsa)" to 1, "SSH-Агент" to 2)
+                for ((lbl, code) in opts) {
+                    authRow.addView(
+                        makeExpressiveChip(
+                            lbl,
+                            selectedAuth == code,
+                            COLOR_EXPRESSIVE_WARM_ACCENT,
+                            COLOR_EXPRESSIVE_WARM_CONTAINER
+                        ) {
+                            selectedAuth = code
+                            secretLabelTv.text = when (code) {
+                                0 -> "Password (Пароль)"
+                                1 -> "Путь к приватному ключу"
+                                else -> "Комментарий / Агент"
+                            }
+                            if (code == 1 && secretEt.text.isNullOrBlank()) {
+                                secretEt.setText(defaultKeyPath)
+                            }
+                            rebuildAuthChips()
+                        }
+                    )
+                }
+            }
+            rebuildAuthChips()
+            form.addView(authScroll)
+            form.addView(secretLabelTv)
+            form.addView(secretEt)
+
+            val startupEt = makeLabeledField(
+                "Startup Command (при входе, опционально)",
+                existing?.startupCommand ?: "",
+                "tmux attach || tmux"
+            )
+
+            var useComp = existing?.useCompression ?: true
+            var fwdAgent = existing?.forwardAgent ?: false
+            form.addView(makeSectionLabel("Параметры транспорта SSH"))
+            val (optScroll, optRow) = makeHorizontalChipRow()
+            fun rebuildOptChips() {
+                optRow.removeAllViews()
+                optRow.addView(makeExpressiveChip("Сжатие трафика (-C)", useComp) {
+                    useComp = !useComp
+                    rebuildOptChips()
                 })
-                renSheet.addView(bar)
-                renDlg.show()
-            })
-            options.add("Копировать" to {
-                fileClipSource = target
-                fileClipIsMove = false
-                Toast.makeText(this, "Скопировано: ${target.name}", Toast.LENGTH_SHORT).show()
-                renderCurrentTab()
-            })
-            options.add("Вырезать (Переместить)" to {
-                fileClipSource = target
-                fileClipIsMove = true
-                Toast.makeText(this, "Вырезано: ${target.name}", Toast.LENGTH_SHORT).show()
-                renderCurrentTab()
-            })
-            if (target.isFile) {
-                options.add("Сделать исполняемым (chmod 700)" to {
-                    target.setExecutable(true, true)
-                    target.setReadable(true, true)
-                    target.setWritable(true, true)
-                    Toast.makeText(this, "Права 700 установлены", Toast.LENGTH_SHORT).show()
-                    renderCurrentTab()
+                optRow.addView(makeExpressiveChip("Forward Agent (-A)", fwdAgent) {
+                    fwdAgent = !fwdAgent
+                    rebuildOptChips()
                 })
             }
-            options.add("Скопировать путь" to {
-                copyToClipboard(target.absolutePath, true)
-            })
-            options.add("Удалить (${formatSize(itemSize)})" to {
-                try {
-                    target.deleteRecursively()
-                    renderCurrentTab()
-                } catch (e: Throwable) {
-                    Toast.makeText(this, "Ошибка удаления", Toast.LENGTH_SHORT).show()
-                }
-            })
+            rebuildOptChips()
+            form.addView(optScroll)
 
-            val labels = options.map { it.first }.toTypedArray()
-            AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("${target.name} (${formatSize(itemSize)})")
-                .setItems(labels) { _, which ->
-                    options[which].second.invoke()
+            val btnBar = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
+                setPadding(0, dp(14), 0, 0)
+            }
+            btnBar.addView(makeExpressiveChip("Отмена", false) { sDlg.dismiss() })
+            btnBar.addView(
+                makeExpressiveChip(
+                    "Сохранить",
+                    true,
+                    COLOR_EXPRESSIVE_WARM_ACCENT,
+                    COLOR_EXPRESSIVE_WARM_CONTAINER
+                ) {
+                    val hostVal = hostEt.text.toString().trim()
+                    val userVal = userEt.text.toString().trim().ifEmpty { "root" }
+                    if (hostVal.isEmpty()) {
+                        Toast.makeText(this, "Укажите адрес сервера (Host)", Toast.LENGTH_SHORT).show()
+                        return@makeExpressiveChip
+                    }
+                    val labelVal = labelEt.text.toString().trim().ifEmpty { "$userVal@$hostVal" }
+                    val portVal = portEt.text.toString().trim().toIntOrNull()?.coerceIn(1, 65535) ?: 22
+                    val profile = SshServerProfile(
+                        id = existing?.id ?: UUID.randomUUID().toString(),
+                        label = labelVal,
+                        host = hostVal,
+                        port = portVal,
+                        username = userVal,
+                        authType = selectedAuth,
+                        secretOrKeyPath = secretEt.text.toString(),
+                        startupCommand = startupEt.text.toString().trim(),
+                        useCompression = useComp,
+                        forwardAgent = fwdAgent
+                    )
+                    val list = loadSshServers()
+                    val idx = list.indexOfFirst { it.id == profile.id }
+                    if (idx >= 0) list[idx] = profile else list.add(profile)
+                    saveSshServers(list)
+                    sDlg.dismiss()
+                    onSaved()
                 }
-                .show()
+            )
+            form.addView(btnBar)
+            sDlg.show()
         }
 
-        fun renderFilesTab() {
-            contentContainer.removeAllViews()
+        fun renderServersTab() {
+            contentFrame.removeAllViews()
 
-            // Quick bookmarks
-            val (bmScroll, bmRow) = makeHorizontalChipRow()
-            val bookmarks = listOf(
-                "Домашняя (~)" to File("/data/data/com.termuxx/file/home"),
+            val scroll = ScrollView(this).apply {
+                isVerticalScrollBarEnabled = false
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+            val listCol = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(14), dp(16), dp(96))
+            }
+            scroll.addView(listCol)
+            contentFrame.addView(scroll)
+
+            // Header Row ("Servers" + SSH Keygen button)
+            val titleRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(2), 0, dp(2), dp(12))
+            }
+            titleRow.addView(TextView(this).apply {
+                text = "Servers"
+                setTextColor(COLOR_TEXT_BRIGHT)
+                typeface = Typeface.MONOSPACE
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            titleRow.addView(makeExpressiveChip("🔑 SSH-Ключи", false) {
+                val sshDir = File("/data/data/com.termuxx/file/home/.ssh").apply { mkdirs() }
+                val pubFile = File(sshDir, "id_ed25519.pub")
+                val privFile = File(sshDir, "id_ed25519")
+                val (kDlg, kSheet) = createExpressiveDialog(420)
+                kSheet.addView(TextView(this).apply {
+                    text = "Управление SSH-ключами (ed25519)"
+                    setTextColor(COLOR_TEXT_BRIGHT)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setPadding(0, 0, 0, dp(8))
+                })
+                val pubText = if (pubFile.exists()) pubFile.readText().trim() else "Ключ ~/.ssh/id_ed25519.pub ещё не создан."
+                kSheet.addView(TextView(this).apply {
+                    text = pubText
+                    setTextIsSelectable(true)
+                    setTextColor(if (pubFile.exists()) COLOR_EXPRESSIVE_WARM_ACCENT else COLOR_TEXT_DIM)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(12))
+                    setPadding(dp(12), dp(10), dp(12), dp(10))
+                })
+                val actRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.END
+                    setPadding(0, dp(12), 0, 0)
+                }
+                if (pubFile.exists()) {
+                    actRow.addView(makeExpressiveChip("Копировать pub-ключ", false) {
+                        copyToClipboard(pubText, true)
+                    })
+                }
+                actRow.addView(
+                    makeExpressiveChip(
+                        if (privFile.exists()) "Пересоздать ed25519" else "Сгенерировать ed25519",
+                        true,
+                        COLOR_EXPRESSIVE_WARM_ACCENT,
+                        COLOR_EXPRESSIVE_WARM_CONTAINER
+                    ) {
+                        kDlg.dismiss()
+                        dlg.dismiss()
+                        nativeSendText(
+                            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && rm -f ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub && ssh-keygen -t ed25519 -N \"\" -f ~/.ssh/id_ed25519 && cat ~/.ssh/id_ed25519.pub\n",
+                            false
+                        )
+                    }
+                )
+                kSheet.addView(actRow)
+                kDlg.show()
+            })
+            listCol.addView(titleRow)
+
+            // 1. Hero "Local Terminal" Card (Warm Expressive Secondary Container matching local-and-ssh.png)
+            val localStartupCmd = prefs.getString(KEY_LOCAL_STARTUP_CMD, "")?.trim().orEmpty()
+            val localHeroCard = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(16), dp(12), dp(16))
+                background = pillBg(COLOR_EXPRESSIVE_WARM_CONTAINER, COLOR_EXPRESSIVE_WARM_ACCENT, dp(22))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    bottomMargin = dp(12)
+                }
+                setOnClickListener {
+                    triggerHaptic(0.85f)
+                    dlg.dismiss()
+                    createSession(false, runStartupCmd = true)
+                }
+            }
+            val termIconBox = TextView(this).apply {
+                text = ">_"
+                gravity = Gravity.CENTER
+                typeface = Typeface.MONOSPACE
+                setTextColor(COLOR_EXPRESSIVE_WARM_ACCENT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                background = pillBg(0x33000000, COLOR_EXPRESSIVE_WARM_ACCENT, dp(8))
+                layoutParams = LinearLayout.LayoutParams(dp(36), dp(30)).apply {
+                    marginEnd = dp(14)
+                }
+            }
+            localHeroCard.addView(termIconBox)
+
+            val localTextCol = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            localTextCol.addView(TextView(this).apply {
+                text = "Local Terminal"
+                setTextColor(0xFFF5E6D3.toInt())
+                typeface = Typeface.MONOSPACE
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
+            })
+            localTextCol.addView(TextView(this).apply {
+                text = if (localStartupCmd.isNotEmpty()) localStartupCmd else "Локальная оболочка устройства (Bash / Root)"
+                setSingleLine(true)
+                setTextColor(COLOR_EXPRESSIVE_WARM_ACCENT)
+                typeface = Typeface.MONOSPACE
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            })
+            localHeroCard.addView(localTextCol)
+
+            val localGearBtn = TextView(this).apply {
+                text = "⚙"
+                setTextColor(COLOR_EXPRESSIVE_WARM_ACCENT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                setPadding(dp(10), dp(6), dp(10), dp(6))
+                setOnClickListener {
+                    triggerHaptic(0.8f)
+                    val (lDlg, lSheet) = createExpressiveDialog(400)
+                    lSheet.addView(TextView(this@TermuxActivity).apply {
+                        text = "Local Terminal Settings"
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setPadding(0, 0, 0, dp(6))
+                    })
+                    lSheet.addView(TextView(this@TermuxActivity).apply {
+                        text = "Автокоманда при запуске новой локальной сессии:"
+                        setTextColor(COLOR_TEXT_DIM)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        setPadding(0, 0, 0, dp(8))
+                    })
+                    val cmdInput = EditText(this@TermuxActivity).apply {
+                        setText(localStartupCmd)
+                        hint = "напр. proot-distro login ubuntu или fastfetch"
+                        setHintTextColor(COLOR_TEXT_DIM)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        setSingleLine(true)
+                        background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(12))
+                        setPadding(dp(12), dp(9), dp(12), dp(9))
+                    }
+                    lSheet.addView(cmdInput)
+                    val bRow = LinearLayout(this@TermuxActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.END
+                        setPadding(0, dp(12), 0, 0)
+                    }
+                    bRow.addView(makeExpressiveChip("Отмена", false) { lDlg.dismiss() })
+                    bRow.addView(
+                        makeExpressiveChip(
+                            "Сохранить",
+                            true,
+                            COLOR_EXPRESSIVE_WARM_ACCENT,
+                            COLOR_EXPRESSIVE_WARM_CONTAINER
+                        ) {
+                            prefs.edit().putString(KEY_LOCAL_STARTUP_CMD, cmdInput.text.toString().trim()).apply()
+                            lDlg.dismiss()
+                            renderServersTab()
+                        }
+                    )
+                    lSheet.addView(bRow)
+                    lDlg.show()
+                }
+            }
+            localHeroCard.addView(localGearBtn)
+            localHeroCard.addView(TextView(this).apply {
+                text = "›"
+                setTextColor(COLOR_EXPRESSIVE_WARM_ACCENT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                setPadding(dp(4), 0, dp(4), 0)
+            })
+            listCol.addView(localHeroCard)
+
+            // 2. Saved SSH Servers List
+            val servers = loadSshServers()
+            if (servers.isEmpty()) {
+                val emptyBox = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    setPadding(dp(24), dp(36), dp(24), dp(36))
+                    background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(22))
+                }
+                emptyBox.addView(TextView(this).apply {
+                    text = "Нет сохранённых SSH-серверов"
+                    gravity = Gravity.CENTER
+                    setTextColor(COLOR_TEXT_BRIGHT)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                })
+                emptyBox.addView(TextView(this).apply {
+                    text = "Нажмите кнопку «+» внизу справа, чтобы добавить сервер для быстрого входа по SSH и работы с файлами по SFTP."
+                    gravity = Gravity.CENTER
+                    setTextColor(COLOR_TEXT_DIM)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setPadding(0, dp(6), 0, 0)
+                })
+                listCol.addView(emptyBox)
+            } else {
+                for ((idx, srv) in servers.withIndex()) {
+                    val card = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(16), dp(14), dp(12), dp(14))
+                        background = segmentedCardBg(idx, servers.size, COLOR_CARD_BG, COLOR_BORDER, 22f, 6f)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = if (idx < servers.size - 1) dp(3) else dp(10)
+                        }
+                        setOnClickListener {
+                            triggerHaptic(0.85f)
+                            connectToSshServerInTerminal(srv, dlg)
+                        }
+                    }
+
+                    // Connected / Ready indicator circle matching local-and-ssh.png
+                    val statusDot = TextView(this).apply {
+                        text = "✓"
+                        gravity = Gravity.CENTER
+                        setTextColor(0xFF071F09.toInt())
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        typeface = Typeface.DEFAULT_BOLD
+                        background = pillBg(COLOR_EXPRESSIVE_CONNECTED, COLOR_EXPRESSIVE_CONNECTED, dp(11))
+                        layoutParams = LinearLayout.LayoutParams(dp(22), dp(22)).apply {
+                            marginEnd = dp(12)
+                        }
+                    }
+                    card.addView(statusDot)
+
+                    val infoCol = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    }
+                    infoCol.addView(TextView(this).apply {
+                        text = srv.label
+                        setSingleLine(true)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    })
+                    infoCol.addView(TextView(this).apply {
+                        text = "${srv.host}:${srv.port} • ${srv.username}"
+                        setSingleLine(true)
+                        setTextColor(COLOR_TEXT_DIM)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        setPadding(0, dp(2), 0, dp(4))
+                    })
+
+                    // Tonal Badges row (like "Herdr" badge in local-and-ssh.png)
+                    val badgeRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+                    val authBadgeText = when (srv.authType) {
+                        0 -> "Password"
+                        1 -> "SSH Key"
+                        else -> "Agent"
+                    }
+                    badgeRow.addView(TextView(this).apply {
+                        text = authBadgeText
+                        setTextColor(COLOR_EXPRESSIVE_WARM_ACCENT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                        background = pillBg(COLOR_EXPRESSIVE_WARM_CONTAINER, COLOR_EXPRESSIVE_WARM_CONTAINER, dp(6))
+                        setPadding(dp(8), dp(2), dp(8), dp(2))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            marginEnd = dp(6)
+                        }
+                    })
+                    if (srv.startupCommand.isNotBlank()) {
+                        badgeRow.addView(TextView(this).apply {
+                            text = srv.startupCommand.take(16)
+                            setTextColor(uiAccent)
+                            typeface = Typeface.MONOSPACE
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                            background = pillBg(uiAccentContainer, uiAccentContainer, dp(6))
+                            setPadding(dp(8), dp(2), dp(8), dp(2))
+                        })
+                    }
+                    infoCol.addView(badgeRow)
+                    card.addView(infoCol)
+
+                    // Quick SFTP button on every server card
+                    card.addView(
+                        makeExpressiveChip(
+                            "SFTP",
+                            false,
+                            COLOR_EXPRESSIVE_WARM_ACCENT,
+                            COLOR_EXPRESSIVE_WARM_CONTAINER
+                        ) {
+                            activeSftpServer = srv
+                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                            activeTab = 1
+                            renderActiveTab()
+                        }
+                    )
+
+                    // ⋮ More options button
+                    val moreBtn = TextView(this).apply {
+                        text = "⋮"
+                        gravity = Gravity.CENTER
+                        setTextColor(COLOR_TEXT)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                        setPadding(dp(10), dp(4), dp(8), dp(4))
+                        setOnClickListener {
+                            triggerHaptic(0.8f)
+                            val actions = arrayOf(
+                                "Подключиться в терминале (SSH)",
+                                "Открыть файловый менеджер SFTP",
+                                "Установить мой SSH-ключ на сервер (ssh-copy-id)",
+                                "Изменить настройки сервера",
+                                "Удалить сервер"
+                            )
+                            AlertDialog.Builder(this@TermuxActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                                .setTitle(srv.label)
+                                .setItems(actions) { _, which ->
+                                    when (which) {
+                                        0 -> connectToSshServerInTerminal(srv, dlg)
+                                        1 -> {
+                                            activeSftpServer = srv
+                                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                                            activeTab = 1
+                                            renderActiveTab()
+                                        }
+                                        2 -> {
+                                            dlg.dismiss()
+                                            createSession(false, runStartupCmd = false)
+                                            val envPrefix = prepareAskPassEnvPrefix(srv)
+                                            val copyCmd = "mkdir -p ~/.ssh && ([ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -t ed25519 -N \"\" -f ~/.ssh/id_ed25519) && ${envPrefix}ssh-copy-id -p ${srv.port} -o StrictHostKeyChecking=accept-new ${srv.username}@${srv.host}\n"
+                                            terminalSurface.postDelayed({ nativeSendText(copyCmd, false) }, 120L)
+                                        }
+                                        3 -> showAddOrEditServerDialog(srv) { renderServersTab() }
+                                        4 -> {
+                                            val updated = loadSshServers().filter { it.id != srv.id }
+                                            saveSshServers(updated)
+                                            if (activeSftpServer?.id == srv.id) activeSftpServer = null
+                                            renderServersTab()
+                                        }
+                                    }
+                                }
+                                .show()
+                        }
+                    }
+                    card.addView(moreBtn)
+                    listCol.addView(card)
+                }
+            }
+
+            // Bottom-Right Expressive Squircle FAB ("+") matching local-and-ssh.png
+            val addFab = TextView(this).apply {
+                text = "+"
+                gravity = Gravity.CENTER
+                setTextColor(COLOR_EXPRESSIVE_WARM_ACCENT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+                background = pillBg(COLOR_EXPRESSIVE_WARM_CONTAINER, COLOR_EXPRESSIVE_WARM_ACCENT, dp(18))
+                elevation = dpF(6f)
+                layoutParams = FrameLayout.LayoutParams(dp(58), dp(58), Gravity.BOTTOM or Gravity.END).apply {
+                    marginEnd = dp(20)
+                    bottomMargin = dp(20)
+                }
+                setOnClickListener {
+                    triggerHaptic(1.0f)
+                    showAddOrEditServerDialog(null) { renderServersTab() }
+                }
+            }
+            contentFrame.addView(addFab)
+        }
+
+        // ====================================================================
+        // TAB 1: SFTP & File Manager (Modeled on sftp.png, SftpBreadcrumbs.kt, SftpFileList.kt & FloatingPill.kt)
+        // ====================================================================
+        fun listLocalEntries(dir: File, depth: Int = 0): List<SftpItemEntry> {
+            val out = ArrayList<SftpItemEntry>()
+            val raw = dir.listFiles()?.sortedWith(
+                compareBy<File>({ !it.isDirectory }, { it.name.lowercase() })
+            ) ?: emptyList()
+            for (f in raw) {
+                val perms = buildString {
+                    append(if (f.isDirectory) 'd' else '-')
+                    append(if (f.canRead()) 'r' else '-')
+                    append(if (f.canWrite()) 'w' else '-')
+                    append(if (f.canExecute()) 'x' else '-')
+                }
+                val isExp = f.isDirectory && expandedTreePaths.contains(f.absolutePath)
+                out.add(
+                    SftpItemEntry(
+                        name = f.name,
+                        path = f.absolutePath,
+                        isDirectory = f.isDirectory,
+                        sizeBytes = if (f.isFile) f.length() else 0L,
+                        modifiedEpochMs = f.lastModified(),
+                        permissions = perms,
+                        depth = depth,
+                        isExpanded = isExp
+                    )
+                )
+                if (sftpTreeMode && isExp && depth < 5) {
+                    out.addAll(listLocalEntries(f, depth + 1))
+                }
+            }
+            return out
+        }
+
+        fun listRemoteSftpEntries(server: SshServerProfile, remoteDir: String): Pair<String?, List<SftpItemEntry>> {
+            val pyOrSh = "cd ${shellEscapeSingle(remoteDir)} 2>/dev/null && pwd && " +
+                "for f in * .[!.]* ..?*; do " +
+                "[ -e \"\$f\" ] || continue; " +
+                "if [ -d \"\$f\" ]; then t=D; else t=F; fi; " +
+                "sz=\$(stat -c '%s' \"\$f\" 2>/dev/null || wc -c < \"\$f\" 2>/dev/null || echo 0); " +
+                "mt=\$(stat -c '%Y' \"\$f\" 2>/dev/null || echo 0); " +
+                "pm=\$(stat -c '%A' \"\$f\" 2>/dev/null || echo ''); " +
+                "printf '%s\\t%s\\t%s\\t%s\\t%s\\n' \"\$t\" \"\$sz\" \"\$mt\" \"\$pm\" \"\$f\"; " +
+                "done"
+            val (ok, output) = runRemoteSshCommandSync(server, pyOrSh)
+            if (!ok) return output.ifBlank { "Не удалось подключиться по SFTP/SSH" } to emptyList()
+            val lines = output.lines().filter { it.isNotBlank() }
+            val resolvedPwd = lines.firstOrNull()?.trim()?.takeIf { it.startsWith("/") } ?: remoteDir
+            val items = ArrayList<SftpItemEntry>()
+            for (i in 1 until lines.size) {
+                val cols = lines[i].split("\t")
+                if (cols.size >= 5) {
+                    val isDir = cols[0] == "D"
+                    val sz = cols[1].trim().toLongOrNull() ?: 0L
+                    val mtSec = cols[2].trim().toLongOrNull() ?: 0L
+                    val pm = cols[3].trim()
+                    val name = cols[4].trim()
+                    if (name == "." || name == "..") continue
+                    val fullP = if (resolvedPwd == "/") "/$name" else "$resolvedPwd/$name"
+                    items.add(
+                        SftpItemEntry(
+                            name = name,
+                            path = fullP,
+                            isDirectory = isDir,
+                            sizeBytes = sz,
+                            modifiedEpochMs = mtSec * 1000L,
+                            permissions = pm
+                        )
+                    )
+                }
+            }
+            items.sortWith(compareBy<SftpItemEntry>({ !it.isDirectory }, { it.name.lowercase() }))
+            return null to items
+        }
+
+        fun renderSftpTab() {
+            contentFrame.removeAllViews()
+
+            val mainSftpCol = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+            contentFrame.addView(mainSftpCol)
+
+            // 1. Target Host Selector Bar (Local bookmarks + Saved SSH Servers for Remote SFTP)
+            val (hostScroll, hostRow) = makeHorizontalChipRow()
+            hostScroll.setPadding(dp(10), dp(6), dp(10), dp(2))
+            val localBookmarks = listOf(
+                "Локальный (~)" to File("/data/data/com.termuxx/file/home"),
                 "Usr (\$PREFIX)" to File("/data/data/com.termuxx/file/usr"),
-                "Данные приложения" to File(applicationInfo.dataDir),
-                "Дистрибутивы" to File("/data/data/com.termuxx/file/usr/var/lib/proot-distro/installed-rootfs"),
                 "SDCard" to Environment.getExternalStorageDirectory()
             )
-            for ((lbl, dir) in bookmarks) {
-                val isCur = (currentDir.absolutePath == dir.absolutePath)
-                bmRow.addView(makeExpressiveChip(lbl, isCur) {
+            for ((lbl, dir) in localBookmarks) {
+                val selected = (activeSftpServer == null && localCurrentDir.absolutePath == dir.absolutePath)
+                hostRow.addView(makeExpressiveChip(lbl, selected) {
+                    activeSftpServer = null
                     if (!dir.exists()) dir.mkdirs()
                     if (dir.exists() && dir.canRead()) {
-                        currentDir = dir
-                        renderCurrentTab()
+                        localCurrentDir = dir
+                        renderSftpTab()
                     } else {
                         Toast.makeText(this, "Нет доступа к ${dir.absolutePath}", Toast.LENGTH_SHORT).show()
                     }
                 })
             }
-            contentContainer.addView(bmScroll)
-
-            // Current path & storage stats card
-            val dirSize = computeItemSizeBounded(currentDir, 2)
-            val freeBytes = try {
-                StatFs(currentDir.absolutePath).availableBytes
-            } catch (_: Throwable) {
-                0L
-            }
-            contentContainer.addView(TextView(this).apply {
-                text = "${currentDir.absolutePath}\nЗанято в папке: ${formatSize(dirSize)} · Свободно: ${formatSize(freeBytes)}"
-                setTextColor(COLOR_TEXT_DIM)
-                typeface = Typeface.MONOSPACE
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
-                setPadding(dp(2), dp(4), dp(2), dp(6))
-            })
-
-            // Action toolbar: Up, + Folder, + File, Paste, Open in Terminal
-            val (actScroll, actRow) = makeHorizontalChipRow()
-            actRow.addView(makeExpressiveChip("↑ Вверх", false) {
-                val parent = currentDir.parentFile
-                if (parent != null && parent.canRead()) {
-                    currentDir = parent
-                    renderCurrentTab()
-                }
-            })
-            actRow.addView(makeExpressiveChip("+ Папка", false) {
-                val (cDlg, cSheet) = createExpressiveDialog(340)
-                cSheet.addView(TextView(this).apply {
-                    text = "Новая папка"
-                    setTextColor(COLOR_TEXT_BRIGHT)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setPadding(0, 0, 0, dp(8))
-                })
-                val inp = EditText(this).apply {
-                    hint = "Имя папки"
-                    setHintTextColor(COLOR_TEXT_DIM)
-                    setTextColor(COLOR_TEXT_BRIGHT)
-                    background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(10))
-                    setPadding(dp(10), dp(8), dp(10), dp(8))
-                    setSingleLine(true)
-                }
-                cSheet.addView(inp)
-                val bar = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.END
-                    setPadding(0, dp(10), 0, 0)
-                }
-                bar.addView(makeExpressiveChip("Отмена", false) { cDlg.dismiss() })
-                bar.addView(makeExpressiveChip("Создать", true) {
-                    val name = inp.text.toString().trim()
-                    if (name.isNotEmpty()) {
-                        File(currentDir, name).mkdirs()
-                        renderCurrentTab()
-                    }
-                    cDlg.dismiss()
-                })
-                cSheet.addView(bar)
-                cDlg.show()
-            })
-            actRow.addView(makeExpressiveChip("+ Файл", false) {
-                val (cDlg, cSheet) = createExpressiveDialog(340)
-                cSheet.addView(TextView(this).apply {
-                    text = "Новый файл"
-                    setTextColor(COLOR_TEXT_BRIGHT)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setPadding(0, 0, 0, dp(8))
-                })
-                val inp = EditText(this).apply {
-                    hint = "Имя файла (напр. script.sh)"
-                    setHintTextColor(COLOR_TEXT_DIM)
-                    setTextColor(COLOR_TEXT_BRIGHT)
-                    background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(10))
-                    setPadding(dp(10), dp(8), dp(10), dp(8))
-                    setSingleLine(true)
-                }
-                cSheet.addView(inp)
-                val bar = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.END
-                    setPadding(0, dp(10), 0, 0)
-                }
-                bar.addView(makeExpressiveChip("Отмена", false) { cDlg.dismiss() })
-                bar.addView(makeExpressiveChip("Создать", true) {
-                    val name = inp.text.toString().trim()
-                    if (name.isNotEmpty()) {
-                        val f = File(currentDir, name)
-                        try {
-                            f.createNewFile()
-                            renderCurrentTab()
-                            showTextEditorDialog(f) { renderCurrentTab() }
-                        } catch (_: Throwable) {
+            for (srv in loadSshServers()) {
+                val selected = (activeSftpServer?.id == srv.id)
+                hostRow.addView(
+                    makeExpressiveChip(
+                        "☁ SFTP: ${srv.label}",
+                        selected,
+                        COLOR_EXPRESSIVE_WARM_ACCENT,
+                        COLOR_EXPRESSIVE_WARM_CONTAINER
+                    ) {
+                        activeSftpServer = srv
+                        if (remoteCurrentPath.isBlank()) {
+                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
                         }
+                        renderSftpTab()
                     }
-                    cDlg.dismiss()
-                })
-                cSheet.addView(bar)
-                cDlg.show()
-            })
+                )
+            }
+            mainSftpCol.addView(hostScroll)
 
-            val clipFile = fileClipSource
-            if (clipFile != null && clipFile.exists()) {
-                val actionLabel = if (fileClipIsMove) "Вставить (Перем. ${clipFile.name})" else "Вставить (${clipFile.name})"
-                actRow.addView(makeExpressiveChip(actionLabel, true) {
-                    try {
-                        val dst = File(currentDir, clipFile.name)
-                        if (fileClipIsMove) {
-                            if (!clipFile.renameTo(dst)) {
-                                clipFile.copyRecursively(dst, overwrite = true)
-                                clipFile.deleteRecursively()
+            // 2. SftpBreadcrumbs Bar (matching sftp.png: `> compose-app > build > outputs > [release]`)
+            val activePathStr = if (activeSftpServer == null) localCurrentDir.absolutePath else remoteCurrentPath
+            val (bcScroll, bcRow) = makeHorizontalChipRow()
+            bcScroll.setPadding(dp(10), dp(4), dp(10), dp(6))
+
+            val parts = activePathStr.split("/").filter { it.isNotEmpty() }
+            val segments = ArrayList<Pair<String, String>>()
+            segments.add("/" to "/")
+            var built = ""
+            for (p in parts) {
+                built += "/$p"
+                segments.add(p to built)
+            }
+            for ((idx, seg) in segments.withIndex()) {
+                val isLast = (idx == segments.lastIndex)
+                if (idx > 0) {
+                    bcRow.addView(TextView(this).apply {
+                        text = "›"
+                        setTextColor(COLOR_TEXT_DIM)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        setPadding(dp(5), 0, dp(5), 0)
+                    })
+                }
+                val segChip = TextView(this).apply {
+                    text = seg.first
+                    setSingleLine(true)
+                    typeface = if (isLast) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    setTextColor(if (isLast) COLOR_EXPRESSIVE_WARM_ACCENT else COLOR_TEXT)
+                    if (isLast) {
+                        background = pillBg(COLOR_EXPRESSIVE_WARM_CONTAINER, COLOR_EXPRESSIVE_WARM_CONTAINER, dp(8))
+                        setPadding(dp(10), dp(4), dp(10), dp(4))
+                    } else {
+                        setPadding(dp(6), dp(4), dp(6), dp(4))
+                    }
+                    setOnClickListener {
+                        triggerHaptic(0.75f)
+                        if (activeSftpServer == null) {
+                            val targetDir = File(seg.second)
+                            if (targetDir.exists() && targetDir.canRead()) {
+                                localCurrentDir = targetDir
+                                renderSftpTab()
                             }
-                            fileClipSource = null
                         } else {
-                            clipFile.copyRecursively(dst, overwrite = true)
+                            remoteCurrentPath = seg.second
+                            renderSftpTab()
                         }
-                        renderCurrentTab()
-                    } catch (e: Throwable) {
-                        Toast.makeText(this, "Ошибка вставки: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
+                }
+                bcRow.addView(segChip)
+            }
+            bcScroll.post { bcScroll.fullScroll(View.FOCUS_RIGHT) }
+            mainSftpCol.addView(bcScroll)
+
+            // Paste clipboard banner if a local file is staged for copy/move
+            val clipFile = fileClipSource
+            if (activeSftpServer == null && clipFile != null && clipFile.exists()) {
+                val clipBanner = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(6), dp(12), dp(6))
+                }
+                clipBanner.addView(
+                    makeExpressiveChip(
+                        "Вставить «${clipFile.name}» сюда",
+                        true,
+                        COLOR_EXPRESSIVE_WARM_ACCENT,
+                        COLOR_EXPRESSIVE_WARM_CONTAINER
+                    ) {
+                        try {
+                            val dst = File(localCurrentDir, clipFile.name)
+                            if (clipFile.isDirectory) clipFile.copyRecursively(dst, overwrite = true)
+                            else clipFile.copyTo(dst, overwrite = true)
+                            if (fileClipIsMove) clipFile.deleteRecursively()
+                            fileClipSource = null
+                            renderSftpTab()
+                        } catch (e: Throwable) {
+                            Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                )
+                clipBanner.addView(makeExpressiveChip("✕", false) {
+                    fileClipSource = null
+                    renderSftpTab()
                 })
+                mainSftpCol.addView(clipBanner)
             }
 
-            actRow.addView(makeExpressiveChip("Открыть в терминале", false) {
-                dlg.dismiss()
-                nativeSendText("cd \"${currentDir.absolutePath}\"\n", false)
-            })
-            contentContainer.addView(actScroll)
-
-            // File list
+            // 3. SftpFileList ScrollView
             val listScroll = ScrollView(this).apply {
                 isVerticalScrollBarEnabled = false
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    dp(320)
-                ).apply {
-                    topMargin = dp(6)
-                }
+                    0,
+                    1f
+                )
             }
-            val listCol = LinearLayout(this).apply {
+            val rowsCol = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(4), 0, dp(104))
             }
-            listScroll.addView(listCol)
-            contentContainer.addView(listScroll)
+            listScroll.addView(rowsCol)
+            mainSftpCol.addView(listScroll)
 
-            val entries = (currentDir.listFiles()?.toList() ?: emptyList())
-                .sortedWith(compareBy<File>({ !it.isDirectory }, { it.name.lowercase() }))
+            val srv = activeSftpServer
+            val (errStr, rawEntries) = if (srv == null) {
+                null to listLocalEntries(localCurrentDir, 0)
+            } else {
+                listRemoteSftpEntries(srv, remoteCurrentPath)
+            }
 
-            if (entries.isEmpty()) {
-                listCol.addView(TextView(this).apply {
-                    text = "Папка пуста"
-                    setTextColor(COLOR_TEXT_DIM)
+            val entries = if (sftpSearchQuery.isBlank()) {
+                rawEntries
+            } else {
+                val q = sftpSearchQuery.trim()
+                rawEntries.filter { it.name.contains(q, ignoreCase = true) }
+            }
+
+            fun openEntryMenu(item: SftpItemEntry) {
+                val opts = ArrayList<Pair<String, () -> Unit>>()
+                if (!item.isDirectory) {
+                    opts.add("Открыть в просмотрщике кода" to {
+                        if (srv == null) {
+                            val f = File(item.path)
+                            val content = try {
+                                if (f.length() <= 512 * 1024) f.readText() else "Файл > 512 КБ"
+                            } catch (_: Throwable) { "" }
+                            showCodeViewerAndEditorDialog(item.name, item.path, content) { updated ->
+                                try {
+                                    f.writeText(updated)
+                                    renderSftpTab()
+                                    true
+                                } catch (_: Throwable) { false }
+                            }
+                        } else {
+                            val (_, content) = runRemoteSshCommandSync(srv, "head -c 262144 ${shellEscapeSingle(item.path)}")
+                            showCodeViewerAndEditorDialog(item.name, "${srv.label}:${item.path}", content) { updated ->
+                                val b64 = android.util.Base64.encodeToString(updated.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                                val (ok, _) = runRemoteSshCommandSync(
+                                    srv,
+                                    "printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(item.path)}"
+                                )
+                                if (ok) renderSftpTab()
+                                ok
+                            }
+                        }
+                    })
+                    opts.add("Скачать в Загрузки (/sdcard/Download)" to {
+                        val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).apply { mkdirs() }
+                        val dst = File(dlDir, item.name)
+                        if (srv == null) {
+                            try {
+                                File(item.path).copyTo(dst, overwrite = true)
+                                Toast.makeText(this, "Сохранено в Загрузки: ${dst.name}", Toast.LENGTH_SHORT).show()
+                            } catch (e: Throwable) {
+                                Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            val prefixDir = "/data/data/com.termuxx/file/usr"
+                            val askPrefix = prepareAskPassEnvPrefix(srv)
+                            val scpArgs = buildSshBaseArgs(srv, batchMode = false).replace("-p ", "-P ")
+                            dlg.dismiss()
+                            createSession(false, runStartupCmd = false)
+                            val cmd = "${askPrefix}$prefixDir/bin/scp $scpArgs ${srv.username}@${srv.host}:${shellEscapeSingle(item.path)} ${shellEscapeSingle(dst.absolutePath)} && echo 'Downloaded to ${dst.absolutePath}'\n"
+                            terminalSurface.postDelayed({ nativeSendText(cmd, false) }, 120L)
+                        }
+                    })
+                } else {
+                    opts.add("Открыть папку в терминале (cd)" to {
+                        if (srv == null) {
+                            dlg.dismiss()
+                            nativeSendText("cd ${shellEscapeSingle(item.path)}\n", false)
+                        } else {
+                            connectToSshServerInTerminal(
+                                srv.copy(startupCommand = "cd ${shellEscapeSingle(item.path)} && exec \$SHELL -l"),
+                                dlg
+                            )
+                        }
+                    })
+                }
+                opts.add("Переименовать" to {
+                    val (rDlg, rSheet) = createExpressiveDialog(360)
+                    rSheet.addView(TextView(this).apply {
+                        text = "Переименовать"
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setPadding(0, 0, 0, dp(8))
+                    })
+                    val input = EditText(this).apply {
+                        setText(item.name)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        setSingleLine(true)
+                        background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(10))
+                        setPadding(dp(12), dp(8), dp(12), dp(8))
+                    }
+                    rSheet.addView(input)
+                    val bBar = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.END
+                        setPadding(0, dp(10), 0, 0)
+                    }
+                    bBar.addView(makeExpressiveChip("Отмена", false) { rDlg.dismiss() })
+                    bBar.addView(makeExpressiveChip("Переименовать", true, COLOR_EXPRESSIVE_WARM_ACCENT, COLOR_EXPRESSIVE_WARM_CONTAINER) {
+                        val newName = input.text.toString().trim()
+                        if (newName.isNotEmpty() && !newName.contains('/') && newName != item.name) {
+                            if (srv == null) {
+                                val f = File(item.path)
+                                f.renameTo(File(f.parentFile, newName))
+                            } else {
+                                val parent = item.path.substringBeforeLast('/').ifEmpty { "/" }
+                                val newPath = if (parent == "/") "/$newName" else "$parent/$newName"
+                                runRemoteSshCommandSync(srv, "mv ${shellEscapeSingle(item.path)} ${shellEscapeSingle(newPath)}")
+                            }
+                            renderSftpTab()
+                        }
+                        rDlg.dismiss()
+                    })
+                    rSheet.addView(bBar)
+                    rDlg.show()
+                })
+                opts.add("Права доступа (chmod 755 / 644 / 700)" to {
+                    val modes = arrayOf("755 (rwxr-xr-x)", "700 (rwx------)", "644 (rw-r--r--)", "600 (rw-------)")
+                    val codes = arrayOf("755", "700", "644", "600")
+                    AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("chmod: ${item.name}")
+                        .setItems(modes) { _, which ->
+                            val c = codes[which]
+                            if (srv == null) {
+                                Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", c, item.path)).waitFor()
+                            } else {
+                                runRemoteSshCommandSync(srv, "chmod $c ${shellEscapeSingle(item.path)}")
+                            }
+                            renderSftpTab()
+                        }
+                        .show()
+                })
+                if (srv == null) {
+                    opts.add("Копировать" to {
+                        fileClipSource = File(item.path)
+                        fileClipIsMove = false
+                        renderSftpTab()
+                    })
+                    opts.add("Вырезать" to {
+                        fileClipSource = File(item.path)
+                        fileClipIsMove = true
+                        renderSftpTab()
+                    })
+                }
+                opts.add("Скопировать путь" to {
+                    copyToClipboard(item.path, true)
+                })
+                opts.add("Удалить" to {
+                    AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Удалить «${item.name}»?")
+                        .setMessage("Это действие нельзя отменить.")
+                        .setPositiveButton("Удалить") { _, _ ->
+                            if (srv == null) {
+                                File(item.path).deleteRecursively()
+                            } else {
+                                runRemoteSshCommandSync(srv, "rm -rf ${shellEscapeSingle(item.path)}")
+                            }
+                            renderSftpTab()
+                        }
+                        .setNegativeButton("Отмена", null)
+                        .show()
+                })
+
+                AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle(item.name)
+                    .setItems(opts.map { it.first }.toTypedArray()) { _, which ->
+                        opts[which].second.invoke()
+                    }
+                    .show()
+            }
+
+            if (errStr != null) {
+                rowsCol.addView(TextView(this).apply {
+                    text = errStr
+                    setTextColor(COLOR_ROOT)
+                    typeface = Typeface.MONOSPACE
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    setPadding(dp(8), dp(16), dp(8), dp(16))
+                    setPadding(dp(18), dp(24), dp(18), dp(24))
+                })
+            } else if (entries.isEmpty()) {
+                rowsCol.addView(TextView(this).apply {
+                    text = if (sftpSearchQuery.isNotBlank()) "Нет файлов по запросу «$sftpSearchQuery»" else "Папка пуста"
+                    gravity = Gravity.CENTER
+                    setTextColor(COLOR_TEXT_DIM)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                    setPadding(dp(20), dp(48), dp(20), dp(48))
                 })
             } else {
                 for (item in entries) {
-                    val isDir = item.isDirectory
-                    val sz = if (isDir) computeItemSizeBounded(item, 1) else item.length()
-                    val rowCard = LinearLayout(this).apply {
+                    val row = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
-                        setPadding(dp(12), dp(8), dp(10), dp(8))
-                        background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(12))
-                        layoutParams = LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ).apply {
-                            bottomMargin = dp(5)
-                        }
-
-                        addView(TextView(this@TermuxActivity).apply {
-                            text = if (isDir) "▸" else "·"
-                            setTextColor(if (isDir) uiAccent else COLOR_TEXT_DIM)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                            setPadding(0, 0, dp(10), 0)
-                        })
-
-                        val midCol = LinearLayout(this@TermuxActivity).apply {
-                            orientation = LinearLayout.VERTICAL
-                            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                        }
-                        midCol.addView(TextView(this@TermuxActivity).apply {
-                            text = item.name
-                            setSingleLine(true)
-                            setTextColor(if (isDir) COLOR_TEXT_BRIGHT else COLOR_TEXT)
-                            typeface = Typeface.MONOSPACE
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                        })
-                        val perms = buildString {
-                            append(if (isDir) "d" else "-")
-                            append(if (item.canRead()) "r" else "-")
-                            append(if (item.canWrite()) "w" else "-")
-                            append(if (item.canExecute()) "x" else "-")
-                        }
-                        midCol.addView(TextView(this@TermuxActivity).apply {
-                            text = "$perms · ${formatSize(sz)}"
-                            setTextColor(COLOR_TEXT_DIM)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-                        })
-                        addView(midCol)
-
-                        val moreBtn = TextView(this@TermuxActivity).apply {
-                            text = "⋯"
-                            setTextColor(COLOR_TEXT)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                            setPadding(dp(10), dp(4), dp(8), dp(4))
-                            background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(8))
-                            setOnClickListener {
-                                triggerHaptic(0.8f)
-                                showFileActionsDialog(item)
-                            }
-                        }
-                        addView(moreBtn)
-
+                        setPadding(dp(16 + item.depth * 14), dp(12), dp(10), dp(12))
                         setOnClickListener {
-                            triggerHaptic(0.8f)
-                            if (isDir) {
-                                if (item.canRead()) {
-                                    currentDir = item
-                                    renderCurrentTab()
+                            triggerHaptic(0.75f)
+                            if (item.isDirectory) {
+                                if (srv == null && sftpTreeMode) {
+                                    if (expandedTreePaths.contains(item.path)) {
+                                        expandedTreePaths.remove(item.path)
+                                    } else {
+                                        expandedTreePaths.add(item.path)
+                                    }
+                                    renderSftpTab()
+                                } else if (srv == null) {
+                                    val f = File(item.path)
+                                    if (f.canRead()) {
+                                        localCurrentDir = f
+                                        renderSftpTab()
+                                    }
                                 } else {
-                                    Toast.makeText(this@TermuxActivity, "Нет прав чтения", Toast.LENGTH_SHORT).show()
+                                    remoteCurrentPath = item.path
+                                    renderSftpTab()
                                 }
                             } else {
-                                showFileActionsDialog(item)
+                                openEntryMenu(item)
                             }
                         }
+                        setOnLongClickListener {
+                            triggerHaptic(1.2f)
+                            openEntryMenu(item)
+                            true
+                        }
                     }
-                    listCol.addView(rowCard)
+
+                    if (sftpTreeMode && srv == null && item.isDirectory) {
+                        row.addView(TextView(this).apply {
+                            text = if (item.isExpanded) "▾" else "▸"
+                            setTextColor(COLOR_TEXT_DIM)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                            setPadding(0, 0, dp(6), 0)
+                        })
+                    }
+
+                    // Folder / Document Icon matching sftp.png
+                    val iconTv = TextView(this).apply {
+                        text = if (item.isDirectory) "📁" else "📄"
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                        setPadding(0, 0, dp(14), 0)
+                    }
+                    row.addView(iconTv)
+
+                    val metaCol = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    }
+                    metaCol.addView(TextView(this).apply {
+                        text = item.name
+                        setSingleLine(true)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    })
+                    if (!item.isDirectory) {
+                        val sub = buildString {
+                            append(formatSize(item.sizeBytes))
+                            val dt = formatTimestamp(item.modifiedEpochMs)
+                            if (dt.isNotEmpty()) append(" • ").append(dt)
+                            if (item.permissions.isNotEmpty()) append(" • ").append(item.permissions)
+                        }
+                        metaCol.addView(TextView(this).apply {
+                            text = sub
+                            setSingleLine(true)
+                            setTextColor(COLOR_TEXT_DIM)
+                            typeface = Typeface.MONOSPACE
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                            setPadding(0, dp(2), 0, 0)
+                        })
+                    }
+                    row.addView(metaCol)
+
+                    val menuBtn = TextView(this).apply {
+                        text = "⋮"
+                        setTextColor(COLOR_TEXT_DIM)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                        setPadding(dp(12), dp(4), dp(8), dp(4))
+                        setOnClickListener {
+                            triggerHaptic(0.8f)
+                            openEntryMenu(item)
+                        }
+                    }
+                    row.addView(menuBtn)
+                    rowsCol.addView(row)
+
+                    // Subtle 0.5dp divider matching SftpFileList.kt
+                    rowsCol.addView(View(this).apply {
+                        setBackgroundColor(0x4D2E3440)
+                        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
+                    })
                 }
             }
+
+            // 4. SftpBottomActionBar (FloatingPill that morphs into PillSearchInput) + Squircle Upload FAB
+            val floatingPill = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = pillBg(COLOR_EXPRESSIVE_PILL_BG, COLOR_BORDER, dp(28))
+                elevation = dpF(6f)
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(54),
+                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                ).apply {
+                    bottomMargin = dp(18)
+                }
+            }
+
+            fun makePillDivider(): View {
+                return View(this).apply {
+                    setBackgroundColor(COLOR_BORDER)
+                    layoutParams = LinearLayout.LayoutParams(dp(1), dp(20)).apply {
+                        setMargins(dp(4), 0, dp(4), 0)
+                    }
+                }
+            }
+
+            fun makePillIconBtn(symbol: String, active: Boolean = false, onClick: () -> Unit): TextView {
+                return TextView(this).apply {
+                    text = symbol
+                    gravity = Gravity.CENTER
+                    setTextColor(if (active) COLOR_EXPRESSIVE_WARM_ACCENT else COLOR_TEXT_BRIGHT)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    setPadding(dp(12), dp(6), dp(12), dp(6))
+                    setOnClickListener {
+                        triggerHaptic(0.8f)
+                        onClick()
+                    }
+                }
+            }
+
+            if (sftpSearchActive) {
+                floatingPill.addView(makePillIconBtn("←") {
+                    sftpSearchActive = false
+                    sftpSearchQuery = ""
+                    renderSftpTab()
+                })
+                val searchEt = EditText(this).apply {
+                    setText(sftpSearchQuery)
+                    hint = "Search files…"
+                    setHintTextColor(COLOR_TEXT_DIM)
+                    setTextColor(COLOR_TEXT_BRIGHT)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setSingleLine(true)
+                    background = null
+                    layoutParams = LinearLayout.LayoutParams(dp(190), ViewGroup.LayoutParams.WRAP_CONTENT)
+                }
+                floatingPill.addView(searchEt)
+                floatingPill.addView(makePillIconBtn("🔍", true) {
+                    sftpSearchQuery = searchEt.text.toString()
+                    renderSftpTab()
+                })
+                if (sftpSearchQuery.isNotEmpty()) {
+                    floatingPill.addView(makePillIconBtn("✕") {
+                        sftpSearchQuery = ""
+                        renderSftpTab()
+                    })
+                }
+            } else {
+                floatingPill.addView(makePillIconBtn("🔍") {
+                    sftpSearchActive = true
+                    renderSftpTab()
+                })
+                floatingPill.addView(makePillDivider())
+                floatingPill.addView(makePillIconBtn("🌿", sftpTreeMode) {
+                    sftpTreeMode = !sftpTreeMode
+                    renderSftpTab()
+                })
+                floatingPill.addView(makePillDivider())
+                floatingPill.addView(makePillIconBtn("＋") {
+                    val (cDlg, cSheet) = createExpressiveDialog(360)
+                    cSheet.addView(TextView(this).apply {
+                        text = "Создать в текущей папке"
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setPadding(0, 0, 0, dp(8))
+                    })
+                    val nameEt = EditText(this).apply {
+                        hint = "Имя файла или папки"
+                        setHintTextColor(COLOR_TEXT_DIM)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        setSingleLine(true)
+                        background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(10))
+                        setPadding(dp(12), dp(8), dp(12), dp(8))
+                    }
+                    cSheet.addView(nameEt)
+                    val bRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.END
+                        setPadding(0, dp(10), 0, 0)
+                    }
+                    bRow.addView(makeExpressiveChip("Файл", false) {
+                        val n = nameEt.text.toString().trim()
+                        if (n.isNotEmpty()) {
+                            if (srv == null) File(localCurrentDir, n).createNewFile()
+                            else runRemoteSshCommandSync(srv, "touch ${shellEscapeSingle("$remoteCurrentPath/$n")}")
+                            renderSftpTab()
+                        }
+                        cDlg.dismiss()
+                    })
+                    bRow.addView(makeExpressiveChip("Папка", true, COLOR_EXPRESSIVE_WARM_ACCENT, COLOR_EXPRESSIVE_WARM_CONTAINER) {
+                        val n = nameEt.text.toString().trim()
+                        if (n.isNotEmpty()) {
+                            if (srv == null) File(localCurrentDir, n).mkdirs()
+                            else runRemoteSshCommandSync(srv, "mkdir -p ${shellEscapeSingle("$remoteCurrentPath/$n")}")
+                            renderSftpTab()
+                        }
+                        cDlg.dismiss()
+                    })
+                    cSheet.addView(bRow)
+                    cDlg.show()
+                })
+                floatingPill.addView(makePillDivider())
+                floatingPill.addView(makePillIconBtn("↻") {
+                    renderSftpTab()
+                })
+            }
+            contentFrame.addView(floatingPill)
+
+            // Bottom-Right Squircle Upload FAB ("⬆") matching sftp.png
+            val uploadFab = TextView(this).apply {
+                text = "⬆"
+                gravity = Gravity.CENTER
+                setTextColor(COLOR_EXPRESSIVE_WARM_ACCENT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+                background = pillBg(COLOR_EXPRESSIVE_WARM_CONTAINER, COLOR_EXPRESSIVE_WARM_ACCENT, dp(18))
+                elevation = dpF(6f)
+                layoutParams = FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END).apply {
+                    marginEnd = dp(18)
+                    bottomMargin = dp(18)
+                }
+                setOnClickListener {
+                    triggerHaptic(1.0f)
+                    val (uDlg, uSheet) = createExpressiveDialog(400)
+                    uSheet.addView(TextView(this@TermuxActivity).apply {
+                        text = if (srv == null) "Импорт файла в ${localCurrentDir.name}" else "Загрузить файл на ${srv.label} (SFTP)"
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setPadding(0, 0, 0, dp(8))
+                    })
+                    val srcEt = EditText(this@TermuxActivity).apply {
+                        setText("/sdcard/Download/")
+                        hint = "Локальный путь к файлу (/sdcard/Download/...)"
+                        setHintTextColor(COLOR_TEXT_DIM)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setSingleLine(true)
+                        background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(10))
+                        setPadding(dp(12), dp(8), dp(12), dp(8))
+                    }
+                    uSheet.addView(srcEt)
+                    val bRow = LinearLayout(this@TermuxActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.END
+                        setPadding(0, dp(12), 0, 0)
+                    }
+                    bRow.addView(makeExpressiveChip("Отмена", false) { uDlg.dismiss() })
+                    bRow.addView(makeExpressiveChip("Загрузить", true, COLOR_EXPRESSIVE_WARM_ACCENT, COLOR_EXPRESSIVE_WARM_CONTAINER) {
+                        val srcFile = File(srcEt.text.toString().trim())
+                        if (!srcFile.exists() || !srcFile.isFile) {
+                            Toast.makeText(this@TermuxActivity, "Файл не найден: ${srcFile.absolutePath}", Toast.LENGTH_SHORT).show()
+                            return@makeExpressiveChip
+                        }
+                        uDlg.dismiss()
+                        if (srv == null) {
+                            try {
+                                srcFile.copyTo(File(localCurrentDir, srcFile.name), overwrite = true)
+                                Toast.makeText(this@TermuxActivity, "Скопировано: ${srcFile.name}", Toast.LENGTH_SHORT).show()
+                                renderSftpTab()
+                            } catch (e: Throwable) {
+                                Toast.makeText(this@TermuxActivity, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            val prefixDir = "/data/data/com.termuxx/file/usr"
+                            val askPrefix = prepareAskPassEnvPrefix(srv)
+                            val scpArgs = buildSshBaseArgs(srv, batchMode = false).replace("-p ", "-P ")
+                            val dstRemote = if (remoteCurrentPath == "/") "/${srcFile.name}" else "$remoteCurrentPath/${srcFile.name}"
+                            dlg.dismiss()
+                            createSession(false, runStartupCmd = false)
+                            val cmd = "${askPrefix}$prefixDir/bin/scp $scpArgs ${shellEscapeSingle(srcFile.absolutePath)} ${srv.username}@${srv.host}:${shellEscapeSingle(dstRemote)} && echo 'Uploaded to $dstRemote'\n"
+                            terminalSurface.postDelayed({ nativeSendText(cmd, false) }, 120L)
+                        }
+                    })
+                    uSheet.addView(bRow)
+                    uDlg.show()
+                }
+            }
+            contentFrame.addView(uploadFab)
         }
 
+        // ====================================================================
+        // TAB 2: Packages Manager (dpkg / apt with Material 3 Expressive Segmented Cards)
+        // ====================================================================
         fun renderPackagesTab() {
-            contentContainer.removeAllViews()
+            contentFrame.removeAllViews()
+            val outer = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+            contentFrame.addView(outer)
+
             val installed = parseInstalledDpkgPackages()
             val totalKb = installed.sumOf { it.sizeKb }
 
-            contentContainer.addView(TextView(this).apply {
-                text = "Установлено пакетов: ${installed.size} · Объём: ${formatSize(totalKb * 1024L)}"
-                setTextColor(COLOR_TEXT_DIM)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                setPadding(dp(2), dp(2), dp(2), dp(6))
-            })
-
-            // Global package actions: Update & Upgrade All, Clean Cache
-            val (actScroll, actRow) = makeHorizontalChipRow()
-            actRow.addView(makeExpressiveChip("Обновить все (apt upgrade)", true) {
-                dlg.dismiss()
-                nativeSendText("apt update && apt upgrade -y\n", false)
-            })
-            actRow.addView(makeExpressiveChip("Проверить обновления", false) {
-                dlg.dismiss()
-                nativeSendText("apt update && apt list --upgradable\n", false)
-            })
-            actRow.addView(makeExpressiveChip("Очистить кэш", false) {
-                dlg.dismiss()
-                nativeSendText("apt clean && apt autoremove -y\n", false)
-            })
-            contentContainer.addView(actScroll)
-
-            // Quick install bar
-            val installBar = LinearLayout(this).apply {
+            val summaryCard = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dp(6), 0, dp(4))
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                background = pillBg(COLOR_EXPRESSIVE_WARM_CONTAINER, COLOR_EXPRESSIVE_WARM_ACCENT, dp(18))
             }
-            val pkgInput = EditText(this).apply {
-                hint = "Имя пакета для установки (напр. git, python)"
-                setHintTextColor(COLOR_TEXT_DIM)
+            summaryCard.addView(TextView(this).apply {
+                text = "Установлено пакетов: ${installed.size} (${formatSize(totalKb * 1024L)})"
                 setTextColor(COLOR_TEXT_BRIGHT)
                 typeface = Typeface.MONOSPACE
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(10))
-                setPadding(dp(10), dp(7), dp(10), dp(7))
-                setSingleLine(true)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginEnd = dp(6)
-                }
-            }
-            installBar.addView(pkgInput)
-            installBar.addView(makeExpressiveChip("+ Установить", true) {
-                val pkgName = pkgInput.text.toString().trim()
-                if (pkgName.isNotEmpty()) {
-                    dlg.dismiss()
-                    nativeSendText("apt install -y $pkgName\n", false)
-                }
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
-            contentContainer.addView(installBar)
+            summaryCard.addView(makeExpressiveChip("Обновить все", true, COLOR_EXPRESSIVE_WARM_ACCENT, 0x33000000) {
+                dlg.dismiss()
+                nativeSendText("pkg update -y && pkg upgrade -y\n", false)
+            })
+            outer.addView(summaryCard)
 
-            // One-tap catalog of popular packages
             val (catScroll, catRow) = makeHorizontalChipRow()
-            val popular = listOf("proot-distro", "tsu", "git", "python", "clang", "cmake", "neovim", "tmux", "htop", "fastfetch", "cmatrix", "curl", "openssh")
+            catScroll.setPadding(0, dp(8), 0, dp(6))
+            val popular = listOf("openssh", "proot-distro", "tsu", "git", "python", "clang", "cmake", "neovim", "tmux", "htop", "fastfetch", "curl")
             val installedSet = installed.map { it.name }.toHashSet()
             for (p in popular) {
                 if (!installedSet.contains(p)) {
                     catRow.addView(makeExpressiveChip("+ $p", false) {
                         dlg.dismiss()
-                        nativeSendText("apt install -y $p\n", false)
+                        nativeSendText("pkg install -y $p\n", false)
                     })
                 }
             }
-            contentContainer.addView(catScroll)
+            outer.addView(catScroll)
 
-            // Installed packages list with Remove button
             val pkgScroll = ScrollView(this).apply {
                 isVerticalScrollBarEnabled = false
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    dp(270)
-                ).apply {
-                    topMargin = dp(6)
-                }
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             }
             val pkgCol = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(4), 0, dp(24))
             }
             pkgScroll.addView(pkgCol)
-            contentContainer.addView(pkgScroll)
+            outer.addView(pkgScroll)
 
-            for (pkg in installed) {
+            for ((idx, pkg) in installed.withIndex()) {
                 val card = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(12), dp(8), dp(10), dp(8))
-                    background = pillBg(COLOR_CARD_BG, COLOR_BORDER, dp(12))
+                    setPadding(dp(14), dp(10), dp(12), dp(10))
+                    background = segmentedCardBg(idx, installed.size, COLOR_CARD_BG, COLOR_BORDER, 18f, 4f)
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
                     ).apply {
-                        bottomMargin = dp(5)
+                        bottomMargin = dp(2)
                     }
-
-                    val infoCol = LinearLayout(this@TermuxActivity).apply {
-                        orientation = LinearLayout.VERTICAL
-                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                    }
-                    infoCol.addView(TextView(this@TermuxActivity).apply {
-                        text = "${pkg.name} (${pkg.version})"
-                        setSingleLine(true)
-                        setTextColor(COLOR_TEXT_BRIGHT)
-                        typeface = Typeface.MONOSPACE
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    })
-                    infoCol.addView(TextView(this@TermuxActivity).apply {
-                        text = "${formatSize(pkg.sizeKb * 1024L)} · ${pkg.description}"
-                        setSingleLine(true)
-                        setTextColor(COLOR_TEXT_DIM)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
-                    })
-                    addView(infoCol)
-
-                    addView(makeExpressiveChip("Удалить", false, COLOR_ROOT, COLOR_ROOT_CONTAINER) {
-                        dlg.dismiss()
-                        nativeSendText("apt remove -y ${pkg.name}\n", false)
-                    })
                 }
+                val infoCol = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                infoCol.addView(TextView(this).apply {
+                    text = "${pkg.name} (${pkg.version})"
+                    setSingleLine(true)
+                    setTextColor(COLOR_TEXT_BRIGHT)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                })
+                infoCol.addView(TextView(this).apply {
+                    text = "${formatSize(pkg.sizeKb * 1024L)} • ${pkg.description}"
+                    setSingleLine(true)
+                    setTextColor(COLOR_TEXT_DIM)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                })
+                card.addView(infoCol)
+                card.addView(makeExpressiveChip("Удалить", false, COLOR_ROOT, COLOR_ROOT_CONTAINER) {
+                    dlg.dismiss()
+                    nativeSendText("apt remove -y ${pkg.name}\n", false)
+                })
                 pkgCol.addView(card)
             }
         }
 
-        renderCurrentTab = {
-            val isFiles = (activeTab == 0)
-            tabFilesBtn.setTextColor(if (isFiles) uiAccent else COLOR_TEXT)
-            tabFilesBtn.background = pillBg(
-                if (isFiles) uiAccentContainer else COLOR_CARD_BG,
-                if (isFiles) uiAccent else COLOR_BORDER,
-                dp(10)
+        renderActiveTab = {
+            val tabs = listOf(
+                Triple(tabServersCol, indServers, 0),
+                Triple(tabSftpCol, indSftp, 1),
+                Triple(tabPkgsCol, indPkgs, 2)
             )
-            tabPkgsBtn.setTextColor(if (!isFiles) uiAccent else COLOR_TEXT)
-            tabPkgsBtn.background = pillBg(
-                if (!isFiles) uiAccentContainer else COLOR_CARD_BG,
-                if (!isFiles) uiAccent else COLOR_BORDER,
-                dp(10)
-            )
-            if (isFiles) renderFilesTab() else renderPackagesTab()
+            val termTv = tabTermCol.getChildAt(0) as? TextView
+            termTv?.setTextColor(COLOR_TEXT_DIM)
+
+            for ((col, ind, idx) in tabs) {
+                val isSel = (activeTab == idx)
+                val tv = col.getChildAt(0) as? TextView
+                tv?.setTextColor(if (isSel) COLOR_EXPRESSIVE_WARM_ACCENT else COLOR_TEXT_DIM)
+                tv?.typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
+                ind.setBackgroundColor(if (isSel) COLOR_EXPRESSIVE_WARM_ACCENT else 0)
+            }
+            when (activeTab) {
+                0 -> renderServersTab()
+                1 -> renderSftpTab()
+                else -> renderPackagesTab()
+            }
         }
 
-        renderCurrentTab()
+        renderActiveTab()
+        dlg.setContentView(root)
         dlg.show()
     }
 
@@ -2156,7 +3593,7 @@ class TermuxActivity : Activity() {
         }
     }
 
-    internal fun createSession(asRoot: Boolean) {
+    internal fun createSession(asRoot: Boolean, runStartupCmd: Boolean = true) {
         if (nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir) != 2) return
         terminalSurface.stopTextSelection()
         val rows = max(5, terminalSurface.rows)
@@ -2171,6 +3608,14 @@ class TermuxActivity : Activity() {
         rebuildTabs()
         terminalSurface.resetScrollAndBlink()
         terminalSurface.invalidateAllRows()
+        if (!asRoot && runStartupCmd) {
+            val startup = prefs.getString(KEY_LOCAL_STARTUP_CMD, "")?.trim().orEmpty()
+            if (startup.isNotEmpty()) {
+                terminalSurface.postDelayed({
+                    nativeSendText("$startup\n", false)
+                }, 140L)
+            }
+        }
     }
 
     internal fun closeCurrentSession() {
@@ -2337,6 +3782,32 @@ class TermuxActivity : Activity() {
             cornerRadius = radiusPx.toFloat()
             val w = if (strokeWidthPx > 0) strokeWidthPx else max(1, dp(1))
             setStroke(w, stroke)
+        }
+    }
+
+    /**
+     * Material 3 Expressive Segmented Shape (ListItemDefaults.segmentedShapes):
+     * Top item: 22dp top corners, 4dp bottom corners.
+     * Middle item: 4dp all corners.
+     * Bottom item: 4dp top corners, 22dp bottom corners.
+     * Single item: 22dp all corners.
+     */
+    private fun segmentedCardBg(
+        index: Int,
+        total: Int,
+        fill: Int = COLOR_CARD_BG,
+        stroke: Int = COLOR_BORDER,
+        outerRadiusDp: Float = 22f,
+        innerRadiusDp: Float = 4f
+    ): GradientDrawable {
+        val outer = dpF(outerRadiusDp)
+        val inner = dpF(innerRadiusDp)
+        val topR = if (index <= 0) outer else inner
+        val botR = if (index >= total - 1) outer else inner
+        return GradientDrawable().apply {
+            setColor(fill)
+            cornerRadii = floatArrayOf(topR, topR, topR, topR, botR, botR, botR, botR)
+            setStroke(max(1, dp(1)), stroke)
         }
     }
 
@@ -3268,12 +4739,21 @@ class TermuxActivity : Activity() {
             currentInputConnection?.onNativeTextPasted(text)
         }
 
+        /**
+         * Native Gboard-Compatible InputConnection:
+         * - Uses `InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS` (WITHOUT
+         *   `TYPE_TEXT_VARIATION_VISIBLE_PASSWORD`, because password mode forces Gboard to treat the
+         *   entire line as a single password token instead of separate words!).
+         * - Tracks `terminalSentLine` vs `localBuffer` and sends only the exact character/backspace delta
+         *   to the PTY (`applyLocalBufferDiffToPty()`), so Gboard's native word-by-word Backspace swipe
+         *   (`1 word -> 2 words -> 3 words -> N words` proportional to swipe distance!) works 100% natively!
+         */
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
             outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
-                EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+                EditorInfo.IME_ACTION_NONE
 
             val initialText = nativeGetInputLineBeforeCursor()
             outAttrs.initialSelStart = initialText.length
@@ -3284,12 +4764,13 @@ class TermuxActivity : Activity() {
             return conn
         }
 
-        inner class TerminalInputConnection(initialText: String) : BaseInputConnection(this@TerminalSurface, false) {
+        inner class TerminalInputConnection(initialText: String) : BaseInputConnection(this@TerminalSurface, true) {
             private val localBuffer = SpannableStringBuilder(initialText)
+            private var terminalSentLine = initialText
             private var preDeleteCount = 0
             private var lastPreDeleteCount = 0
             private var lastPreDeleteUptimeMs = 0L
-            private var lastWordStepUptimeMs = 0L
+            private var batchDepth = 0
             private var lastLocalEditUptimeMs = 0L
             private var extractedTextRequest: ExtractedTextRequest? = null
             private var extractedTextToken = 0
@@ -3298,7 +4779,10 @@ class TermuxActivity : Activity() {
                 Selection.setSelection(localBuffer, initialText.length)
             }
 
+            override fun getEditable(): Editable = localBuffer
+
             private fun notifySelectionUpdate() {
+                if (batchDepth > 0) return
                 val curLen = localBuffer.length
                 val s = Selection.getSelectionStart(localBuffer).coerceIn(0, curLen)
                 val e = Selection.getSelectionEnd(localBuffer).coerceIn(0, curLen)
@@ -3325,13 +4809,14 @@ class TermuxActivity : Activity() {
             }
 
             internal fun syncWithTerminalGrid(notifyIme: Boolean) {
-                if (preDeleteCount > 0) return
+                if (preDeleteCount > 0 || batchDepth > 0) return
                 val now = SystemClock.uptimeMillis()
                 val gridLine = nativeGetInputLineBeforeCursor()
-                if (gridLine.length >= localBuffer.length || (now - lastLocalEditUptimeMs) > 35L) {
+                if (gridLine.length >= localBuffer.length || (now - lastLocalEditUptimeMs) > 45L) {
                     if (localBuffer.toString() != gridLine) {
                         localBuffer.clear()
                         localBuffer.append(gridLine)
+                        terminalSentLine = gridLine
                         Selection.setSelection(localBuffer, localBuffer.length)
                         if (notifyIme) {
                             notifySelectionUpdate()
@@ -3340,71 +4825,118 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            private fun appendCommittedString(str: String) {
-                val lastNl = max(str.lastIndexOf('\n'), str.lastIndexOf('\r'))
+            /**
+             * Diffs `terminalSentLine` (what is currently on the PTY command line) with `localBuffer`
+             * (what Gboard has edited/composed/deleted) and sends the minimal KEYCODE_DEL + text delta.
+             */
+            private fun applyLocalBufferDiffToPty() {
+                if (batchDepth > 0) return
+                val currentStr = localBuffer.toString()
+                val lastNl = max(currentStr.lastIndexOf('\n'), currentStr.lastIndexOf('\r'))
                 if (lastNl >= 0) {
-                    localBuffer.clear()
-                    if (lastNl + 1 < str.length) {
-                        localBuffer.append(str.substring(lastNl + 1))
+                    // Contains newline: send everything added after terminalSentLine
+                    val common = commonPrefixLength(terminalSentLine, currentStr)
+                    val delCount = (terminalSentLine.length - common).coerceAtLeast(0)
+                    for (i in 0 until delCount) {
+                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
                     }
-                } else {
-                    localBuffer.append(str)
+                    val toAdd = currentStr.substring(common)
+                    if (toAdd.isNotEmpty()) {
+                        nativeSendText(toAdd, toAdd.length > 1)
+                    }
+                    val tail = if (lastNl + 1 < currentStr.length) currentStr.substring(lastNl + 1) else ""
+                    localBuffer.clear()
+                    localBuffer.append(tail)
+                    Selection.setSelection(localBuffer, localBuffer.length)
+                    terminalSentLine = tail
+                    lastLocalEditUptimeMs = SystemClock.uptimeMillis()
+                    notifySelectionUpdate()
+                    return
                 }
-                Selection.setSelection(localBuffer, localBuffer.length)
+
+                val common = commonPrefixLength(terminalSentLine, currentStr)
+                val gridLine = nativeGetInputLineBeforeCursor()
+                val maxSafeDel = max(terminalSentLine.length, gridLine.length)
+                val delCount = (terminalSentLine.length - common).coerceIn(0, maxSafeDel)
+                for (i in 0 until delCount) {
+                    nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
+                }
+                val toAdd = currentStr.substring(common)
+                if (toAdd.isNotEmpty()) {
+                    nativeSendText(toAdd, toAdd.length > 1)
+                }
+                terminalSentLine = currentStr
                 lastLocalEditUptimeMs = SystemClock.uptimeMillis()
+                notifySelectionUpdate()
             }
 
-            private fun findPrevWordStart(text: CharSequence, fromIndex: Int): Int {
-                var i = fromIndex.coerceIn(0, text.length)
-                while (i > 0 && text[i - 1].isWhitespace()) {
-                    i--
-                }
-                while (i > 0 && !text[i - 1].isWhitespace()) {
-                    i--
+            private fun commonPrefixLength(a: String, b: String): Int {
+                val n = min(a.length, b.length)
+                var i = 0
+                while (i < n && a[i] == b[i]) {
+                    i++
                 }
                 return i
             }
 
-            private fun performControlledDelete(requestedCount: Int) {
+            private fun activeOrRecentPreDeleteCount(): Int {
+                if (preDeleteCount > 0) return preDeleteCount
                 val now = SystemClock.uptimeMillis()
-                val wasSwipePreDelete = preDeleteCount > 0 ||
-                    (lastPreDeleteCount > 0 && (now - lastPreDeleteUptimeMs) <= 65L && requestedCount > 1)
-                val activeCount = when {
-                    preDeleteCount > 0 -> preDeleteCount
-                    lastPreDeleteCount > 0 && (now - lastPreDeleteUptimeMs) <= 65L && requestedCount > 1 -> lastPreDeleteCount
-                    else -> requestedCount
+                if (lastPreDeleteCount > 0 && (now - lastPreDeleteUptimeMs) <= 75L) {
+                    return lastPreDeleteCount
                 }
+                return 0
+            }
+
+            private fun consumeActivePreDeleteIntoLocalBuffer(): Boolean {
+                val del = activeOrRecentPreDeleteCount()
+                if (del <= 0) return false
                 preDeleteCount = 0
                 lastPreDeleteCount = 0
                 nativeSetPreDeleteCount(0)
-
-                val gridLine = nativeGetInputLineBeforeCursor()
-                val maxEditable = max(localBuffer.length, gridLine.length)
-                val actualDel = if (wasSwipePreDelete || requestedCount > 1) {
-                    activeCount.coerceIn(0, maxEditable)
-                } else {
-                    max(0, activeCount)
-                }
-                if (actualDel > 0) {
-                    for (i in 0 until actualDel) {
-                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
-                    }
-                    val newLen = max(0, localBuffer.length - actualDel)
-                    localBuffer.delete(newLen, localBuffer.length)
-                    Selection.setSelection(localBuffer, newLen)
-                    lastLocalEditUptimeMs = now
-                }
-                notifySelectionUpdate()
+                BaseInputConnection.removeComposingSpans(localBuffer)
+                val curLen = localBuffer.length
+                val newLen = max(0, curLen - del)
+                localBuffer.delete(newLen, curLen)
+                Selection.setSelection(localBuffer, newLen)
+                return true
             }
 
             internal fun onNativeTextPasted(pasted: String) {
                 if (preDeleteCount > 0) {
                     preDeleteCount = 0
-                    lastPreDeleteCount = 0
                     nativeSetPreDeleteCount(0)
                 }
-                appendCommittedString(pasted)
+                val lastNl = max(pasted.lastIndexOf('\n'), pasted.lastIndexOf('\r'))
+                if (lastNl >= 0) {
+                    val tail = if (lastNl + 1 < pasted.length) pasted.substring(lastNl + 1) else ""
+                    localBuffer.clear()
+                    localBuffer.append(tail)
+                } else {
+                    localBuffer.append(pasted)
+                }
+                terminalSentLine = localBuffer.toString()
+                Selection.setSelection(localBuffer, localBuffer.length)
+                lastLocalEditUptimeMs = SystemClock.uptimeMillis()
                 notifySelectionUpdate()
+            }
+
+            override fun beginBatchEdit(): Boolean {
+                batchDepth++
+                return super.beginBatchEdit()
+            }
+
+            override fun endBatchEdit(): Boolean {
+                if (batchDepth > 0) batchDepth--
+                val res = super.endBatchEdit()
+                if (batchDepth == 0) {
+                    if (preDeleteCount == 0) {
+                        applyLocalBufferDiffToPty()
+                    } else {
+                        notifySelectionUpdate()
+                    }
+                }
+                return res
             }
 
             override fun getExtractedText(request: ExtractedTextRequest?, flags: Int): ExtractedText {
@@ -3431,101 +4963,64 @@ class TermuxActivity : Activity() {
 
             override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence {
                 syncWithTerminalGrid(false)
-                val curLen = localBuffer.length
-                val s = Selection.getSelectionStart(localBuffer)
-                val e = Selection.getSelectionEnd(localBuffer)
-                val cursor = if (s in 0..curLen && e in 0..curLen) min(s, e) else curLen
-                val take = min(max(0, n), cursor)
-                return localBuffer.subSequence(cursor - take, cursor)
+                return super.getTextBeforeCursor(n, flags) ?: ""
             }
 
             override fun getTextAfterCursor(n: Int, flags: Int): CharSequence {
                 syncWithTerminalGrid(false)
-                val curLen = localBuffer.length
-                val s = Selection.getSelectionStart(localBuffer)
-                val e = Selection.getSelectionEnd(localBuffer)
-                val rightEdge = if (s in 0..curLen && e in 0..curLen) max(s, e) else curLen
-                val take = min(max(0, n), max(0, curLen - rightEdge))
-                return localBuffer.subSequence(rightEdge, rightEdge + take)
+                return super.getTextAfterCursor(n, flags) ?: ""
             }
 
             override fun getSelectedText(flags: Int): CharSequence {
-                val s = Selection.getSelectionStart(localBuffer)
-                val e = Selection.getSelectionEnd(localBuffer)
-                val curLen = localBuffer.length
-                if (s in 0..curLen && e in 0..curLen && s != e) {
-                    return localBuffer.subSequence(min(s, e), max(s, e))
-                }
-                return ""
+                return super.getSelectedText(flags) ?: ""
             }
 
             override fun setSelection(start: Int, end: Int): Boolean {
-                if (preDeleteCount == 0) {
+                if (preDeleteCount == 0 && batchDepth == 0) {
                     syncWithTerminalGrid(false)
                 }
                 val curLen = localBuffer.length
-                if (curLen == 0) {
-                    preDeleteCount = 0
-                    lastPreDeleteCount = 0
-                    nativeSetPreDeleteCount(0)
-                    Selection.setSelection(localBuffer, 0, 0)
-                    notifySelectionUpdate()
-                    return true
+                val s = start.coerceIn(0, curLen)
+                val e = end.coerceIn(0, curLen)
+                if (s != e) {
+                    BaseInputConnection.removeComposingSpans(localBuffer)
                 }
-                val reqMin = min(start, end).coerceIn(0, curLen)
-                val reqMax = max(start, end).coerceIn(0, curLen)
-                val rawCount = max(0, reqMax - reqMin)
+                super.setSelection(s, e)
+                val newCount = max(0, max(s, e) - min(s, e))
                 val now = SystemClock.uptimeMillis()
-
-                if (rawCount == 0) {
-                    if (preDeleteCount > 0) {
-                        lastPreDeleteCount = preDeleteCount
-                        lastPreDeleteUptimeMs = now
-                    }
-                    preDeleteCount = 0
-                    nativeSetPreDeleteCount(0)
-                    Selection.setSelection(localBuffer, curLen, curLen)
-                    notifySelectionUpdate()
-                    return true
-                }
-
-                val currentStart = (curLen - preDeleteCount).coerceIn(0, curLen)
-                val targetStart = reqMin
-
-                val effectiveStart = when {
-                    targetStart > currentStart -> {
-                        lastWordStepUptimeMs = now
-                        targetStart
-                    }
-                    targetStart < currentStart -> {
-                        val nextWordStart = findPrevWordStart(localBuffer, currentStart)
-                        if (preDeleteCount == 0 || (now - lastWordStepUptimeMs) >= 95L) {
-                            lastWordStepUptimeMs = now
-                            max(targetStart, nextWordStart)
-                        } else {
-                            currentStart
-                        }
-                    }
-                    else -> currentStart
-                }
-
-                val newCount = (curLen - effectiveStart).coerceIn(0, curLen)
-                if (newCount != preDeleteCount) {
-                    preDeleteCount = newCount
+                if (newCount == 0 && preDeleteCount > 0) {
+                    lastPreDeleteCount = preDeleteCount
+                    lastPreDeleteUptimeMs = now
+                } else if (newCount > 0) {
                     lastPreDeleteCount = newCount
                     lastPreDeleteUptimeMs = now
-                    nativeSetPreDeleteCount(newCount)
-                    triggerHaptic(0.5f)
                 }
-                Selection.setSelection(localBuffer, effectiveStart, curLen)
+                if (newCount != preDeleteCount) {
+                    preDeleteCount = newCount
+                    nativeSetPreDeleteCount(newCount)
+                    if (newCount > 0) {
+                        triggerHaptic(0.5f)
+                    }
+                }
                 notifySelectionUpdate()
                 return true
             }
 
             override fun deleteSurroundingText(leftLength: Int, rightLength: Int): Boolean {
                 stopTextSelection()
-                if (leftLength > 0 || preDeleteCount > 0 || lastPreDeleteCount > 0) {
-                    performControlledDelete(max(0, leftLength))
+                if (activeOrRecentPreDeleteCount() > 0) {
+                    consumeActivePreDeleteIntoLocalBuffer()
+                    applyLocalBufferDiffToPty()
+                } else if (localBuffer.isEmpty() && leftLength > 0) {
+                    // Fallback for alt-screen TUI apps (vim / nano) when localBuffer is empty
+                    if (nativeGetInputLineBeforeCursor().isEmpty() && (nativeGetModesMask() and 1) != 0) {
+                        for (i in 0 until leftLength) {
+                            nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
+                        }
+                    }
+                } else {
+                    super.deleteSurroundingText(leftLength, rightLength)
+                    applyLocalBufferDiffToPty()
                 }
                 if (rightLength > 0) {
                     for (i in 0 until rightLength) {
@@ -3544,13 +5039,18 @@ class TermuxActivity : Activity() {
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
                 val str = text?.toString() ?: ""
                 stopTextSelection()
-                if (preDeleteCount > 0) {
-                    performControlledDelete(preDeleteCount)
-                }
-                if (str.isNotEmpty()) {
-                    nativeSendText(str, str.length > 1)
-                    appendCommittedString(str)
-                    notifySelectionUpdate()
+                val shouldConsumePreDel = if (str.isEmpty()) activeOrRecentPreDeleteCount() > 0 else preDeleteCount > 0
+                if (shouldConsumePreDel) {
+                    consumeActivePreDeleteIntoLocalBuffer()
+                    if (str.isNotEmpty()) {
+                        localBuffer.append(str)
+                        Selection.setSelection(localBuffer, localBuffer.length)
+                    }
+                    applyLocalBufferDiffToPty()
+                } else {
+                    lastPreDeleteCount = 0
+                    super.commitText(str, newCursorPosition)
+                    applyLocalBufferDiffToPty()
                 }
                 rearmLockedModifiersIfNeeded()
                 resetScrollAndBlink()
@@ -3558,12 +5058,34 @@ class TermuxActivity : Activity() {
             }
 
             override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                return commitText(text, newCursorPosition)
+                val str = text?.toString() ?: ""
+                stopTextSelection()
+                val shouldConsumePreDel = if (str.isEmpty()) activeOrRecentPreDeleteCount() > 0 else preDeleteCount > 0
+                if (shouldConsumePreDel) {
+                    consumeActivePreDeleteIntoLocalBuffer()
+                    if (str.isNotEmpty()) {
+                        localBuffer.append(str)
+                        Selection.setSelection(localBuffer, localBuffer.length)
+                    }
+                    applyLocalBufferDiffToPty()
+                } else {
+                    lastPreDeleteCount = 0
+                    super.setComposingText(str, newCursorPosition)
+                    applyLocalBufferDiffToPty()
+                }
+                rearmLockedModifiersIfNeeded()
+                resetScrollAndBlink()
+                return true
             }
 
-            override fun setComposingRegion(start: Int, end: Int): Boolean = true
+            override fun setComposingRegion(start: Int, end: Int): Boolean {
+                val curLen = localBuffer.length
+                return super.setComposingRegion(start.coerceIn(0, curLen), end.coerceIn(0, curLen))
+            }
 
-            override fun finishComposingText(): Boolean = true
+            override fun finishComposingText(): Boolean {
+                return super.finishComposingText()
+            }
 
             override fun commitCorrection(correctionInfo: CorrectionInfo?): Boolean = true
 
@@ -3575,19 +5097,22 @@ class TermuxActivity : Activity() {
                 textAttribute: TextAttribute?
             ): Boolean {
                 stopTextSelection()
-                val curLen = localBuffer.length
-                val s = start.coerceIn(0, curLen)
-                val e = end.coerceIn(0, curLen)
-                val rangeDel = max(0, max(s, e) - min(s, e))
-                if (preDeleteCount > 0 || rangeDel > 0) {
-                    performControlledDelete(if (preDeleteCount > 0) preDeleteCount else rangeDel)
+                if (activeOrRecentPreDeleteCount() > 0) {
+                    consumeActivePreDeleteIntoLocalBuffer()
+                } else {
+                    val curLen = localBuffer.length
+                    val s = min(start, end).coerceIn(0, curLen)
+                    val e = max(start, end).coerceIn(0, curLen)
+                    if (e > s) {
+                        localBuffer.delete(s, e)
+                    }
                 }
                 val sText = text.toString()
                 if (sText.isNotEmpty()) {
-                    nativeSendText(sText, true)
-                    appendCommittedString(sText)
-                    notifySelectionUpdate()
+                    localBuffer.append(sText)
                 }
+                Selection.setSelection(localBuffer, localBuffer.length)
+                applyLocalBufferDiffToPty()
                 rearmLockedModifiersIfNeeded()
                 resetScrollAndBlink()
                 return true
@@ -3618,15 +5143,27 @@ class TermuxActivity : Activity() {
             override fun sendKeyEvent(event: KeyEvent): Boolean {
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     if (event.keyCode == KeyEvent.KEYCODE_DEL) {
-                        performControlledDelete(1)
+                        if (preDeleteCount > 0) {
+                            consumeActivePreDeleteIntoLocalBuffer()
+                            applyLocalBufferDiffToPty()
+                        } else if (localBuffer.isNotEmpty()) {
+                            BaseInputConnection.removeComposingSpans(localBuffer)
+                            val newLen = max(0, localBuffer.length - 1)
+                            localBuffer.delete(newLen, localBuffer.length)
+                            Selection.setSelection(localBuffer, newLen)
+                            applyLocalBufferDiffToPty()
+                        } else {
+                            nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
+                        }
                         resetScrollAndBlink()
                         return true
                     }
                     if (event.keyCode == KeyEvent.KEYCODE_ENTER || event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                        BaseInputConnection.removeComposingSpans(localBuffer)
                         localBuffer.clear()
+                        terminalSentLine = ""
                         Selection.setSelection(localBuffer, 0)
                         preDeleteCount = 0
-                        lastPreDeleteCount = 0
                         nativeSetPreDeleteCount(0)
                         lastLocalEditUptimeMs = SystemClock.uptimeMillis()
                         this@TerminalSurface.onKeyDown(event.keyCode, event)
@@ -3634,18 +5171,24 @@ class TermuxActivity : Activity() {
                         return true
                     }
                     if (preDeleteCount > 0) {
-                        performControlledDelete(preDeleteCount)
+                        consumeActivePreDeleteIntoLocalBuffer()
+                        applyLocalBufferDiffToPty()
                     }
                     val unicode = event.getUnicodeChar(event.metaState and KeyEvent.META_CTRL_MASK.inv())
                     val isModActive = (event.metaState and (KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON)) != 0 ||
                         (nativeGetModifierMask() != 0)
                     if (!isModActive) {
                         if (event.keyCode == KeyEvent.KEYCODE_SPACE) {
+                            BaseInputConnection.removeComposingSpans(localBuffer)
                             localBuffer.append(' ')
+                            terminalSentLine += " "
                             Selection.setSelection(localBuffer, localBuffer.length)
                             lastLocalEditUptimeMs = SystemClock.uptimeMillis()
                         } else if (unicode >= 0x20 && unicode != 0x7F) {
-                            localBuffer.append(unicode.toChar())
+                            BaseInputConnection.removeComposingSpans(localBuffer)
+                            val ch = unicode.toChar()
+                            localBuffer.append(ch)
+                            terminalSentLine += ch
                             Selection.setSelection(localBuffer, localBuffer.length)
                             lastLocalEditUptimeMs = SystemClock.uptimeMillis()
                         }
