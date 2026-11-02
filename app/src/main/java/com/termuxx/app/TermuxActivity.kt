@@ -1708,7 +1708,7 @@ class TermuxActivity : Activity() {
             val (bmScroll, bmRow) = makeHorizontalChipRow()
             val bookmarks = listOf(
                 "Домашняя (~)" to File("/data/data/com.termuxx/file/home"),
-                "Usr ($PREFIX)" to File("/data/data/com.termuxx/file/usr"),
+                "Usr (\$PREFIX)" to File("/data/data/com.termuxx/file/usr"),
                 "Данные приложения" to File(applicationInfo.dataDir),
                 "Дистрибутивы" to File("/data/data/com.termuxx/file/usr/var/lib/proot-distro/installed-rootfs"),
                 "SDCard" to Environment.getExternalStorageDirectory()
