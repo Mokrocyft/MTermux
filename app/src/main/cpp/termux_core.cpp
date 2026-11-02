@@ -3047,21 +3047,10 @@ Java_com_termuxx_app_TermuxActivity_nativeSendText(
             i++;
         } else if (c == '\n') {
             sanitized.push_back('\r');
-        } else if (isPaste && (c == 0x1B || (c >= 0x80 && c <= 0x9F))) {
+        } else if (isPaste && c == 0x1B) {
             continue;
         } else {
             sanitized.push_back(static_cast<char>(c));
-        }
-    }
-
-    if (isPaste || sanitized.size() > 1) {
-        // Trim accidental leading spaces on pasted commands if at start of input so ignorespace never drops history
-        size_t firstNonSpace = 0;
-        while (firstNonSpace < sanitized.size() && sanitized[firstNonSpace] == ' ') {
-            firstNonSpace++;
-        }
-        if (firstNonSpace > 0 && firstNonSpace < sanitized.size()) {
-            sanitized.erase(0, firstNonSpace);
         }
     }
 
@@ -3170,6 +3159,27 @@ Java_com_termuxx_app_TermuxActivity_nativeClearDirtyFlags(JNIEnv* /*env*/, jclas
     }
 }
 
+static int findPromptEndColOnRow(const Row& row, int cursorCol) noexcept {
+    int maxC = std::min(cursorCol, static_cast<int>(row.cells.size()));
+    int rowSize = static_cast<int>(row.cells.size());
+    for (int c = 0; c < maxC; ++c) {
+        if (row.cells[static_cast<size_t>(c)].codepoint == 0x203A) {
+            return (c + 1 < rowSize && row.cells[static_cast<size_t>(c + 1)].codepoint == ' ')
+                ? std::min(maxC, c + 2)
+                : std::min(maxC, c + 1);
+        }
+    }
+    for (int c = 0; c < maxC; ++c) {
+        uint32_t cp = row.cells[static_cast<size_t>(c)].codepoint;
+        if (cp == '$' || cp == '#' || cp == '>') {
+            return (c + 1 < rowSize && row.cells[static_cast<size_t>(c + 1)].codepoint == ' ')
+                ? std::min(maxC, c + 2)
+                : std::min(maxC, c + 1);
+        }
+    }
+    return 0;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     JNIEnv* env,
@@ -3202,8 +3212,9 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
 
     if (bgPtr && glPtr) {
         const bool isCursorRow = (logicalY == engine->mCursorRow);
+        const int promptEndCol = isCursorRow ? findPromptEndColOnRow(row, engine->mCursorCol) : 0;
         const int preDelStart = (isCursorRow && engine->mPreDeleteCount > 0)
-            ? std::max(0, engine->mCursorCol - engine->mPreDeleteCount)
+            ? std::clamp(engine->mCursorCol - engine->mPreDeleteCount, promptEndCol, engine->mCursorCol)
             : -1;
         const int preDelEnd = (isCursorRow && engine->mPreDeleteCount > 0)
             ? engine->mCursorCol
@@ -3282,7 +3293,13 @@ Java_com_termuxx_app_TermuxActivity_nativeSetPreDeleteCount(JNIEnv* /*env*/, jcl
     auto eng = getActiveEngineSafe();
     if (!eng) return;
     eng->lock();
-    int clamped = std::max(0, static_cast<int>(count));
+    int maxDeletable = 0;
+    if (eng->mCursorRow >= 0 && eng->mCursorRow < eng->mRows) {
+        const Row& row = eng->activeGrid()[static_cast<size_t>(eng->mCursorRow)];
+        int startC = findPromptEndColOnRow(row, eng->mCursorCol);
+        maxDeletable = std::max(0, eng->mCursorCol - startC);
+    }
+    int clamped = std::clamp(static_cast<int>(count), 0, maxDeletable);
     if (eng->mPreDeleteCount != clamped) {
         eng->mPreDeleteCount = clamped;
         if (eng->mCursorRow >= 0 && eng->mCursorRow < eng->mRows) {
@@ -3303,26 +3320,12 @@ Java_com_termuxx_app_TermuxActivity_nativeGetInputLineBeforeCursor(JNIEnv* env, 
     if (eng->mCursorRow >= 0 && eng->mCursorRow < eng->mRows) {
         const Row& row = eng->activeGrid()[static_cast<size_t>(eng->mCursorRow)];
         int maxC = std::min(eng->mCursorCol, static_cast<int>(row.cells.size()));
-        int startC = 0;
-        // Find end of shell prompt (e.g., › or $ or # or > followed by space) from the start of the line
-        for (int c = 0; c < maxC; ++c) {
-            uint32_t cp = row.cells[static_cast<size_t>(c)].codepoint;
-            if (cp == 0x203A || cp == '$' || cp == '#' || cp == '>') {
-                if (c + 1 < maxC && row.cells[static_cast<size_t>(c + 1)].codepoint == ' ') {
-                    startC = c + 2;
-                    break;
-                } else if (c + 1 <= maxC) {
-                    startC = c + 1;
-                    break;
-                }
-            }
-        }
+        int startC = findPromptEndColOnRow(row, eng->mCursorCol);
         for (int c = startC; c < maxC; ++c) {
             const Cell& cell = row.cells[static_cast<size_t>(c)];
             if (cell.flags & FLAG_WIDE_TRAIL) continue;
-            if (cell.codepoint != 0) {
-                appendUtf8(line, cell.codepoint);
-            }
+            uint32_t cp = (cell.codepoint == 0) ? ' ' : cell.codepoint;
+            appendUtf8(line, cp);
         }
     }
     eng->unlock();

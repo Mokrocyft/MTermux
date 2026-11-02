@@ -54,9 +54,13 @@ import android.view.Window
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.CorrectionInfo
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedText
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import android.view.inputmethod.SurroundingText
 import android.view.inputmethod.TextAttribute
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -480,6 +484,10 @@ class TermuxActivity : Activity() {
 
     internal fun dispatchExtraKeyWithHoldSupport(actionSpec: String) {
         terminalSurface.stopTextSelection()
+        if (actionSpec == "PASTE" || actionSpec == "CLIP") {
+            pasteFromClipboard()
+            return
+        }
         if (ctrlLocked && (nativeGetModifierMask() and 1) == 0) {
             nativeDispatchCustomKey("CTRL")
         }
@@ -495,6 +503,7 @@ class TermuxActivity : Activity() {
         }
         syncModifierButtons(mask)
         terminalSurface.resetScrollAndBlink()
+        terminalSurface.postDelayed({ terminalSurface.syncInputConnectionWithGrid() }, 25L)
     }
 
     internal fun rearmLockedModifiersIfNeeded() {
@@ -2499,22 +2508,6 @@ class TermuxActivity : Activity() {
             updateMetrics(false)
             scheduleBlinkLoop()
 
-            setOnReceiveContentListener(arrayOf("text/*")) { _, payload ->
-                val clip = payload.clip
-                val sb = StringBuilder()
-                for (i in 0 until clip.itemCount) {
-                    val str = clip.getItemAt(i).coerceToText(context)
-                    if (!str.isNullOrEmpty()) {
-                        if (sb.isNotEmpty()) sb.append('\n')
-                        sb.append(str)
-                    }
-                }
-                if (sb.isNotEmpty()) {
-                    pasteTextNatively(sb.toString())
-                }
-                null
-            }
-
             gestureDetector = GestureDetector(
                 context,
                 object : GestureDetector.SimpleOnGestureListener() {
@@ -2617,6 +2610,7 @@ class TermuxActivity : Activity() {
         internal fun onActivityResume() {
             activityResumed = true
             scheduleBlinkLoop()
+            postDelayed({ syncInputConnectionWithGrid() }, 30L)
         }
 
         internal fun onActivityPause() {
@@ -3261,7 +3255,11 @@ class TermuxActivity : Activity() {
          *    `setSelection(start, end)` and we highlight those exact words in the terminal via
          *    `nativeSetPreDeleteCount(end - start)` before deleting them on release!
          */
-                private var currentInputConnection: TerminalInputConnection? = null
+        private var currentInputConnection: TerminalInputConnection? = null
+
+        internal fun syncInputConnectionWithGrid() {
+            currentInputConnection?.syncWithTerminalGrid(true)
+        }
 
         internal fun pasteTextNatively(text: String) {
             if (text.isEmpty()) return
@@ -3278,7 +3276,6 @@ class TermuxActivity : Activity() {
                 EditorInfo.IME_FLAG_NO_EXTRACT_UI
 
             val initialText = nativeGetInputLineBeforeCursor()
-            outAttrs.setInitialSurroundingSubText(initialText, 0)
             outAttrs.initialSelStart = initialText.length
             outAttrs.initialSelEnd = initialText.length
 
@@ -3287,40 +3284,168 @@ class TermuxActivity : Activity() {
             return conn
         }
 
-        inner class TerminalInputConnection(initialText: String) : BaseInputConnection(this@TerminalSurface, true) {
+        inner class TerminalInputConnection(initialText: String) : BaseInputConnection(this@TerminalSurface, false) {
             private val localBuffer = SpannableStringBuilder(initialText)
             private var preDeleteCount = 0
+            private var lastPreDeleteCount = 0
+            private var lastPreDeleteUptimeMs = 0L
+            private var lastWordStepUptimeMs = 0L
+            private var lastLocalEditUptimeMs = 0L
+            private var extractedTextRequest: ExtractedTextRequest? = null
+            private var extractedTextToken = 0
 
             init {
                 Selection.setSelection(localBuffer, initialText.length)
             }
 
+            private fun notifySelectionUpdate() {
+                val curLen = localBuffer.length
+                val s = Selection.getSelectionStart(localBuffer).coerceIn(0, curLen)
+                val e = Selection.getSelectionEnd(localBuffer).coerceIn(0, curLen)
+                val imm = context.getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.updateSelection(this@TerminalSurface, s, e, -1, -1)
+                if (extractedTextRequest != null) {
+                    imm?.updateExtractedText(this@TerminalSurface, extractedTextToken, buildExtractedText())
+                }
+            }
+
+            private fun buildExtractedText(): ExtractedText {
+                val curLen = localBuffer.length
+                val s = Selection.getSelectionStart(localBuffer).coerceIn(0, curLen)
+                val e = Selection.getSelectionEnd(localBuffer).coerceIn(0, curLen)
+                return ExtractedText().apply {
+                    text = localBuffer.toString()
+                    startOffset = 0
+                    partialStartOffset = -1
+                    partialEndOffset = -1
+                    selectionStart = s
+                    selectionEnd = e
+                    flags = 0
+                }
+            }
+
+            internal fun syncWithTerminalGrid(notifyIme: Boolean) {
+                if (preDeleteCount > 0) return
+                val now = SystemClock.uptimeMillis()
+                val gridLine = nativeGetInputLineBeforeCursor()
+                if (gridLine.length >= localBuffer.length || (now - lastLocalEditUptimeMs) > 35L) {
+                    if (localBuffer.toString() != gridLine) {
+                        localBuffer.clear()
+                        localBuffer.append(gridLine)
+                        Selection.setSelection(localBuffer, localBuffer.length)
+                        if (notifyIme) {
+                            notifySelectionUpdate()
+                        }
+                    }
+                }
+            }
+
+            private fun appendCommittedString(str: String) {
+                val lastNl = max(str.lastIndexOf('\n'), str.lastIndexOf('\r'))
+                if (lastNl >= 0) {
+                    localBuffer.clear()
+                    if (lastNl + 1 < str.length) {
+                        localBuffer.append(str.substring(lastNl + 1))
+                    }
+                } else {
+                    localBuffer.append(str)
+                }
+                Selection.setSelection(localBuffer, localBuffer.length)
+                lastLocalEditUptimeMs = SystemClock.uptimeMillis()
+            }
+
+            private fun findPrevWordStart(text: CharSequence, fromIndex: Int): Int {
+                var i = fromIndex.coerceIn(0, text.length)
+                while (i > 0 && text[i - 1].isWhitespace()) {
+                    i--
+                }
+                while (i > 0 && !text[i - 1].isWhitespace()) {
+                    i--
+                }
+                return i
+            }
+
+            private fun performControlledDelete(requestedCount: Int) {
+                val now = SystemClock.uptimeMillis()
+                val wasSwipePreDelete = preDeleteCount > 0 ||
+                    (lastPreDeleteCount > 0 && (now - lastPreDeleteUptimeMs) <= 65L && requestedCount > 1)
+                val activeCount = when {
+                    preDeleteCount > 0 -> preDeleteCount
+                    lastPreDeleteCount > 0 && (now - lastPreDeleteUptimeMs) <= 65L && requestedCount > 1 -> lastPreDeleteCount
+                    else -> requestedCount
+                }
+                preDeleteCount = 0
+                lastPreDeleteCount = 0
+                nativeSetPreDeleteCount(0)
+
+                val gridLine = nativeGetInputLineBeforeCursor()
+                val maxEditable = max(localBuffer.length, gridLine.length)
+                val actualDel = if (wasSwipePreDelete || requestedCount > 1) {
+                    activeCount.coerceIn(0, maxEditable)
+                } else {
+                    max(0, activeCount)
+                }
+                if (actualDel > 0) {
+                    for (i in 0 until actualDel) {
+                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
+                    }
+                    val newLen = max(0, localBuffer.length - actualDel)
+                    localBuffer.delete(newLen, localBuffer.length)
+                    Selection.setSelection(localBuffer, newLen)
+                    lastLocalEditUptimeMs = now
+                }
+                notifySelectionUpdate()
+            }
+
             internal fun onNativeTextPasted(pasted: String) {
                 if (preDeleteCount > 0) {
                     preDeleteCount = 0
+                    lastPreDeleteCount = 0
                     nativeSetPreDeleteCount(0)
                 }
-                localBuffer.append(pasted)
-                Selection.setSelection(localBuffer, localBuffer.length)
+                appendCommittedString(pasted)
+                notifySelectionUpdate()
             }
 
-            override fun getEditable(): Editable = localBuffer
+            override fun getExtractedText(request: ExtractedTextRequest?, flags: Int): ExtractedText {
+                syncWithTerminalGrid(false)
+                if ((flags and InputConnection.GET_EXTRACTED_TEXT_MONITOR) != 0 && request != null) {
+                    extractedTextRequest = request
+                    extractedTextToken = request.token
+                }
+                return buildExtractedText()
+            }
+
+            override fun getSurroundingText(beforeLength: Int, afterLength: Int, flags: Int): SurroundingText {
+                syncWithTerminalGrid(false)
+                val curLen = localBuffer.length
+                val s = Selection.getSelectionStart(localBuffer).coerceIn(0, curLen)
+                val e = Selection.getSelectionEnd(localBuffer).coerceIn(0, curLen)
+                val minSel = min(s, e)
+                val maxSel = max(s, e)
+                val start = max(0, minSel - max(0, beforeLength))
+                val end = min(curLen, maxSel + max(0, afterLength))
+                val sub = localBuffer.subSequence(start, end)
+                return SurroundingText(sub, minSel - start, maxSel - start, start)
+            }
 
             override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence {
+                syncWithTerminalGrid(false)
                 val curLen = localBuffer.length
                 val s = Selection.getSelectionStart(localBuffer)
                 val e = Selection.getSelectionEnd(localBuffer)
                 val cursor = if (s in 0..curLen && e in 0..curLen) min(s, e) else curLen
-                val take = min(n, cursor)
+                val take = min(max(0, n), cursor)
                 return localBuffer.subSequence(cursor - take, cursor)
             }
 
             override fun getTextAfterCursor(n: Int, flags: Int): CharSequence {
+                syncWithTerminalGrid(false)
                 val curLen = localBuffer.length
                 val s = Selection.getSelectionStart(localBuffer)
                 val e = Selection.getSelectionEnd(localBuffer)
                 val rightEdge = if (s in 0..curLen && e in 0..curLen) max(s, e) else curLen
-                val take = min(n, max(0, curLen - rightEdge))
+                val take = min(max(0, n), max(0, curLen - rightEdge))
                 return localBuffer.subSequence(rightEdge, rightEdge + take)
             }
 
@@ -3335,29 +3460,72 @@ class TermuxActivity : Activity() {
             }
 
             override fun setSelection(start: Int, end: Int): Boolean {
+                if (preDeleteCount == 0) {
+                    syncWithTerminalGrid(false)
+                }
                 val curLen = localBuffer.length
-                val s = start.coerceIn(0, curLen)
-                val e = end.coerceIn(0, curLen)
-                Selection.setSelection(localBuffer, s, e)
-                val count = max(0, max(s, e) - min(s, e))
-                preDeleteCount = count
-                nativeSetPreDeleteCount(count)
+                if (curLen == 0) {
+                    preDeleteCount = 0
+                    lastPreDeleteCount = 0
+                    nativeSetPreDeleteCount(0)
+                    Selection.setSelection(localBuffer, 0, 0)
+                    notifySelectionUpdate()
+                    return true
+                }
+                val reqMin = min(start, end).coerceIn(0, curLen)
+                val reqMax = max(start, end).coerceIn(0, curLen)
+                val rawCount = max(0, reqMax - reqMin)
+                val now = SystemClock.uptimeMillis()
+
+                if (rawCount == 0) {
+                    if (preDeleteCount > 0) {
+                        lastPreDeleteCount = preDeleteCount
+                        lastPreDeleteUptimeMs = now
+                    }
+                    preDeleteCount = 0
+                    nativeSetPreDeleteCount(0)
+                    Selection.setSelection(localBuffer, curLen, curLen)
+                    notifySelectionUpdate()
+                    return true
+                }
+
+                val currentStart = (curLen - preDeleteCount).coerceIn(0, curLen)
+                val targetStart = reqMin
+
+                val effectiveStart = when {
+                    targetStart > currentStart -> {
+                        lastWordStepUptimeMs = now
+                        targetStart
+                    }
+                    targetStart < currentStart -> {
+                        val nextWordStart = findPrevWordStart(localBuffer, currentStart)
+                        if (preDeleteCount == 0 || (now - lastWordStepUptimeMs) >= 95L) {
+                            lastWordStepUptimeMs = now
+                            max(targetStart, nextWordStart)
+                        } else {
+                            currentStart
+                        }
+                    }
+                    else -> currentStart
+                }
+
+                val newCount = (curLen - effectiveStart).coerceIn(0, curLen)
+                if (newCount != preDeleteCount) {
+                    preDeleteCount = newCount
+                    lastPreDeleteCount = newCount
+                    lastPreDeleteUptimeMs = now
+                    nativeSetPreDeleteCount(newCount)
+                    triggerHaptic(0.5f)
+                }
+                Selection.setSelection(localBuffer, effectiveStart, curLen)
+                notifySelectionUpdate()
                 return true
             }
 
             override fun deleteSurroundingText(leftLength: Int, rightLength: Int): Boolean {
                 stopTextSelection()
-                val delLeft = if (preDeleteCount > 0) preDeleteCount else max(0, leftLength)
-                preDeleteCount = 0
-                nativeSetPreDeleteCount(0)
-
-                if (delLeft > 0) {
-                    for (i in 0 until delLeft) {
-                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
-                    }
-                    val newLen = max(0, localBuffer.length - delLeft)
-                    localBuffer.delete(newLen, localBuffer.length)
-                    Selection.setSelection(localBuffer, newLen)
+                if (leftLength > 0 || preDeleteCount > 0 || lastPreDeleteCount > 0) {
+                    performControlledDelete(max(0, leftLength))
                 }
                 if (rightLength > 0) {
                     for (i in 0 until rightLength) {
@@ -3369,44 +3537,35 @@ class TermuxActivity : Activity() {
                 return true
             }
 
+            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
+                return deleteSurroundingText(beforeLength, afterLength)
+            }
+
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
                 val str = text?.toString() ?: ""
                 stopTextSelection()
                 if (preDeleteCount > 0) {
-                    val del = preDeleteCount
-                    preDeleteCount = 0
-                    nativeSetPreDeleteCount(0)
-                    for (i in 0 until del) {
-                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
-                    }
-                    val newLen = max(0, localBuffer.length - del)
-                    localBuffer.delete(newLen, localBuffer.length)
+                    performControlledDelete(preDeleteCount)
                 }
                 if (str.isNotEmpty()) {
                     nativeSendText(str, str.length > 1)
-                    localBuffer.append(str)
+                    appendCommittedString(str)
+                    notifySelectionUpdate()
                 }
-                Selection.setSelection(localBuffer, localBuffer.length)
                 rearmLockedModifiersIfNeeded()
                 resetScrollAndBlink()
                 return true
             }
 
             override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                val comp = text?.toString() ?: ""
-                if (comp.isNotEmpty()) {
-                    return commitText(comp, newCursorPosition)
-                }
-                return true
+                return commitText(text, newCursorPosition)
             }
 
-            override fun finishComposingText(): Boolean {
-                if (preDeleteCount > 0) {
-                    preDeleteCount = 0
-                    nativeSetPreDeleteCount(0)
-                }
-                return true
-            }
+            override fun setComposingRegion(start: Int, end: Int): Boolean = true
+
+            override fun finishComposingText(): Boolean = true
+
+            override fun commitCorrection(correctionInfo: CorrectionInfo?): Boolean = true
 
             override fun replaceText(
                 start: Int,
@@ -3419,26 +3578,16 @@ class TermuxActivity : Activity() {
                 val curLen = localBuffer.length
                 val s = start.coerceIn(0, curLen)
                 val e = end.coerceIn(0, curLen)
-                val toDel = if (preDeleteCount > 0) preDeleteCount else max(0, max(s, e) - min(s, e))
-                preDeleteCount = 0
-                nativeSetPreDeleteCount(0)
-
-                if (toDel > 0) {
-                    for (i in 0 until toDel) {
-                        nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
-                    }
-                    val delStart = min(s, e)
-                    val delEnd = min(curLen, delStart + toDel)
-                    if (delStart in 0..curLen && delEnd in delStart..curLen) {
-                        localBuffer.delete(delStart, delEnd)
-                    }
+                val rangeDel = max(0, max(s, e) - min(s, e))
+                if (preDeleteCount > 0 || rangeDel > 0) {
+                    performControlledDelete(if (preDeleteCount > 0) preDeleteCount else rangeDel)
                 }
                 val sText = text.toString()
                 if (sText.isNotEmpty()) {
                     nativeSendText(sText, true)
-                    localBuffer.append(sText)
+                    appendCommittedString(sText)
+                    notifySelectionUpdate()
                 }
-                Selection.setSelection(localBuffer, localBuffer.length)
                 rearmLockedModifiersIfNeeded()
                 resetScrollAndBlink()
                 return true
@@ -3469,27 +3618,40 @@ class TermuxActivity : Activity() {
             override fun sendKeyEvent(event: KeyEvent): Boolean {
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     if (event.keyCode == KeyEvent.KEYCODE_DEL) {
-                        val del = if (preDeleteCount > 0) preDeleteCount else 1
-                        preDeleteCount = 0
-                        nativeSetPreDeleteCount(0)
-                        for (i in 0 until del) {
-                            nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
-                        }
-                        if (localBuffer.isNotEmpty()) {
-                            val newLen = max(0, localBuffer.length - del)
-                            localBuffer.delete(newLen, localBuffer.length)
-                            Selection.setSelection(localBuffer, newLen)
-                        }
+                        performControlledDelete(1)
                         resetScrollAndBlink()
                         return true
                     }
-                    if (event.keyCode == KeyEvent.KEYCODE_ENTER) {
+                    if (event.keyCode == KeyEvent.KEYCODE_ENTER || event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
                         localBuffer.clear()
                         Selection.setSelection(localBuffer, 0)
                         preDeleteCount = 0
+                        lastPreDeleteCount = 0
                         nativeSetPreDeleteCount(0)
+                        lastLocalEditUptimeMs = SystemClock.uptimeMillis()
+                        this@TerminalSurface.onKeyDown(event.keyCode, event)
+                        notifySelectionUpdate()
+                        return true
+                    }
+                    if (preDeleteCount > 0) {
+                        performControlledDelete(preDeleteCount)
+                    }
+                    val unicode = event.getUnicodeChar(event.metaState and KeyEvent.META_CTRL_MASK.inv())
+                    val isModActive = (event.metaState and (KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON)) != 0 ||
+                        (nativeGetModifierMask() != 0)
+                    if (!isModActive) {
+                        if (event.keyCode == KeyEvent.KEYCODE_SPACE) {
+                            localBuffer.append(' ')
+                            Selection.setSelection(localBuffer, localBuffer.length)
+                            lastLocalEditUptimeMs = SystemClock.uptimeMillis()
+                        } else if (unicode >= 0x20 && unicode != 0x7F) {
+                            localBuffer.append(unicode.toChar())
+                            Selection.setSelection(localBuffer, localBuffer.length)
+                            lastLocalEditUptimeMs = SystemClock.uptimeMillis()
+                        }
                     }
                     this@TerminalSurface.onKeyDown(event.keyCode, event)
+                    notifySelectionUpdate()
                 }
                 return true
             }
