@@ -11,6 +11,9 @@
 #include <fcntl.h>
 #include <math.h>
 #include <poll.h>
+#include <sys/eventfd.h>
+#include <netinet/ip.h>
+#include <thread>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/resource.h>
@@ -977,6 +980,7 @@ public:
     bool mOsc52Changed = false;
 
     int mPtyFd = -1;
+    int mWakeEventFd = -1;
     int mShellPid = -1;
     bool mIsRoot = false;
     bool mStarted = false;
@@ -2172,15 +2176,26 @@ public:
 
         while (mRunning.load(std::memory_order_acquire)) {
             int fd = mPtyFd;
+            int wakeFd = mWakeEventFd;
             if (fd < 0) break;
 
-            struct pollfd pfd{};
-            pfd.fd = fd;
-            pfd.events = POLLIN | POLLERR | POLLHUP;
-            int timeoutMs = (mModes.load(std::memory_order_relaxed) & MODE_SYNC_OUTPUT) ? 16 : -1;
-            int prc = poll(&pfd, 1, timeoutMs);
+            struct pollfd pfds[2]{};
+            pfds[0].fd = fd;
+            pfds[0].events = POLLIN | POLLERR | POLLHUP;
+            nfds_t nfds = 1;
+            if (wakeFd >= 0) {
+                pfds[1].fd = wakeFd;
+                pfds[1].events = POLLIN;
+                nfds = 2;
+            }
+            int timeoutMs = (mModes.load(std::memory_order_relaxed) & MODE_SYNC_OUTPUT) ? 16 : 250;
+            int prc = poll(pfds, nfds, timeoutMs);
+            if (!mRunning.load(std::memory_order_acquire)) break;
             if (prc < 0) {
                 if (errno == EINTR) continue;
+                break;
+            }
+            if (nfds == 2 && (pfds[1].revents & POLLIN)) {
                 break;
             }
             if (prc == 0) {
@@ -2191,7 +2206,7 @@ public:
                 continue;
             }
 
-            if (pfd.revents & (POLLIN | POLLERR | POLLHUP)) {
+            if (pfds[0].revents & (POLLIN | POLLERR | POLLHUP)) {
                 ssize_t n = read(fd, buf, sizeof(buf));
                 if (n <= 0) {
                     if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
@@ -2249,19 +2264,48 @@ public:
         }
     }
 
-    void stopSession() noexcept {
+    void signalStopImmediate() noexcept {
         mRunning.store(false, std::memory_order_release);
+        if (mWakeEventFd >= 0) {
+            uint64_t one = 1;
+            (void)write(mWakeEventFd, &one, sizeof(one));
+        }
+        int fd = mPtyFd;
+        if (fd >= 0) {
+            pid_t fgPgrp = tcgetpgrp(fd);
+            if (fgPgrp > 0) {
+                kill(-fgPgrp, SIGHUP);
+                kill(-fgPgrp, SIGTERM);
+                kill(-fgPgrp, SIGKILL);
+            }
+        }
         if (mShellPid > 0) {
             kill(-mShellPid, SIGHUP);
-            kill(mShellPid, SIGHUP);
+            kill(-mShellPid, SIGTERM);
+            kill(-mShellPid, SIGKILL);
+            kill(mShellPid, SIGKILL);
         }
-        if (mPtyFd >= 0) {
-            close(mPtyFd);
-            mPtyFd = -1;
+    }
+
+    void stopSession() noexcept {
+        signalStopImmediate();
+        int fd = mPtyFd;
+        mPtyFd = -1;
+        if (fd >= 0) {
+            close(fd);
         }
         if (mThreadStarted) {
             pthread_join(mReaderThread, nullptr);
             mThreadStarted = false;
+        }
+        if (mWakeEventFd >= 0) {
+            close(mWakeEventFd);
+            mWakeEventFd = -1;
+        }
+        if (mShellPid > 0) {
+            int st = 0;
+            (void)waitpid(mShellPid, &st, WNOHANG);
+            mShellPid = -1;
         }
     }
 
@@ -2360,7 +2404,7 @@ static bool startSessionProcess(
         argStrings.push_back("-sh");
     }
 
-    int ptm = open("/dev/ptmx", O_RDWR | O_CLOEXEC);
+    int ptm = open("/dev/ptmx", O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
     if (ptm < 0) return false;
 
     if (grantpt(ptm) != 0 || unlockpt(ptm) != 0) { close(ptm); return false; }
@@ -2441,6 +2485,7 @@ static bool startSessionProcess(
     }
 
     engine->mPtyFd = ptm;
+    engine->mWakeEventFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     engine->mShellPid = static_cast<int>(pid);
     engine->mRunning.store(true, std::memory_order_release);
 
@@ -2703,7 +2748,10 @@ Java_com_termuxx_app_TermuxActivity_nativeCloseSession(JNIEnv* /*env*/, jclass /
     pthread_mutex_unlock(&gGlobalMutex);
 
     if (toClose) {
-        toClose->stopSession();
+        toClose->signalStopImmediate();
+        std::thread([toClose]() {
+            toClose->stopSession();
+        }).detach();
     }
     return rem;
 }
@@ -3434,43 +3482,62 @@ Java_com_termuxx_app_TermuxActivity_nativePingHostMs(
         return -1;
     }
 
+    // Happy Eyeballs (RFC 8305) concurrent low-latency TCP connect across candidate addresses
+    std::vector<int> socks;
+    std::vector<struct pollfd> pfds;
+    struct timespec t0{}, t1{};
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     int rttMs = -1;
-    for (struct addrinfo* rp = res; rp != nullptr; rp = rp->ai_next) {
+
+    for (struct addrinfo* rp = res; rp != nullptr && socks.size() < 6; rp = rp->ai_next) {
         int sock = socket(rp->ai_family, rp->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC, rp->ai_protocol);
         if (sock < 0) continue;
 
         int one = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
-        struct timespec t0{}, t1{};
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-
-        int rc = connect(sock, rp->ai_addr, rp->ai_addrlen);
-        bool connected = false;
-        if (rc == 0) {
-            connected = true;
-        } else if (errno == EINPROGRESS) {
-            struct pollfd pfd{sock, POLLOUT, 0};
-            int pr = poll(&pfd, 1, maxWaitMs);
-            if (pr > 0 && (pfd.revents & POLLOUT)) {
-                int soErr = 0;
-                socklen_t len = sizeof(soErr);
-                if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soErr, &len) == 0 && soErr == 0) {
-                    connected = true;
-                }
-            }
+#ifdef TCP_QUICKACK
+        setsockopt(sock, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
+#endif
+        if (rp->ai_family == AF_INET) {
+            int tos = IPTOS_LOWDELAY;
+            setsockopt(sock, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
         }
 
-        if (connected) {
+        int rc = connect(sock, rp->ai_addr, rp->ai_addrlen);
+        if (rc == 0) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
             long long diffNs = (static_cast<long long>(t1.tv_sec - t0.tv_sec) * 1000000000LL) +
                                static_cast<long long>(t1.tv_nsec - t0.tv_nsec);
             rttMs = std::max(1, static_cast<int>((diffNs + 500000LL) / 1000000LL));
             close(sock);
             break;
+        } else if (errno == EINPROGRESS) {
+            socks.push_back(sock);
+            pfds.push_back(pollfd{sock, POLLOUT, 0});
+        } else {
+            close(sock);
         }
-        close(sock);
     }
+
+    if (rttMs < 0 && !pfds.empty()) {
+        int pr = poll(pfds.data(), static_cast<nfds_t>(pfds.size()), maxWaitMs);
+        if (pr > 0) {
+            for (size_t i = 0; i < pfds.size(); ++i) {
+                if (pfds[i].revents & POLLOUT) {
+                    int soErr = 0;
+                    socklen_t len = sizeof(soErr);
+                    if (getsockopt(pfds[i].fd, SOL_SOCKET, SO_ERROR, &soErr, &len) == 0 && soErr == 0) {
+                        clock_gettime(CLOCK_MONOTONIC, &t1);
+                        long long diffNs = (static_cast<long long>(t1.tv_sec - t0.tv_sec) * 1000000000LL) +
+                                           static_cast<long long>(t1.tv_nsec - t0.tv_nsec);
+                        rttMs = std::max(1, static_cast<int>((diffNs + 500000LL) / 1000000LL));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    for (int s : socks) close(s);
 
     freeaddrinfo(res);
     return rttMs;
@@ -3538,7 +3605,6 @@ Java_com_termuxx_app_TermuxActivity_nativeBuildSshCommand(
         cmd += " -o ServerAliveInterval=" + std::to_string(static_cast<int>(keepAliveSec));
         cmd += " -o ServerAliveCountMax=3";
     }
-    cmd += " -o StrictHostKeyChecking=accept-new";
     if (!customFlags.empty()) {
         cmd += " " + customFlags;
     }
@@ -3751,9 +3817,11 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
     std::string muxPath = std::string(TMP_PATH) + "/.ssh_mux_%C";
 
     std::string sshArgs = "-p " + std::to_string(p) +
-        " -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8"
+        " -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6"
         " -o ControlMaster=auto -o ControlPath=" + shellEscapeSingleCpp(muxPath) +
-        " -o ControlPersist=300 -C";
+        " -o ControlPersist=900 -o IPQoS=lowdelay -o TCPKeepAlive=yes"
+        " -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+        " -o Ciphers=chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-gcm@openssh.com,aes128-ctr";
     if (authType != 0) sshArgs += " -o BatchMode=yes";
     if (authType == 2) sshArgs += " -A";
     if (authType == 1 && !secret.empty()) {
@@ -3776,7 +3844,7 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
                      shellEscapeSingleCpp(remoteSh) + " 2>&1";
 
     int pipefd[2];
-    if (pipe2(pipefd, O_CLOEXEC) != 0) {
+    if (pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) != 0) {
         return env->NewStringUTF("ERR\nНе удалось создать канал pipe()");
     }
 
@@ -3790,7 +3858,10 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
         return env->NewStringUTF("ERR\nОшибка fork()");
     }
     if (pid == 0) {
+        setsid();
         close(pipefd[0]);
+        int flags = fcntl(pipefd[1], F_GETFL, 0);
+        if (flags >= 0) fcntl(pipefd[1], F_SETFL, flags & ~O_NONBLOCK);
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
@@ -3800,15 +3871,38 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
 
     close(pipefd[1]);
     std::string output;
-    char buf[8192];
-    ssize_t n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
-        output.append(buf, static_cast<size_t>(n));
-        if (output.size() > 512 * 1024) break;
+    output.reserve(16384);
+    char buf[16384];
+    struct pollfd pfd{pipefd[0], POLLIN | POLLERR | POLLHUP, 0};
+    int elapsedMs = 0;
+    constexpr int kMaxWaitMs = 12000;
+    while (elapsedMs < kMaxWaitMs) {
+        int pr = poll(&pfd, 1, 250);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) {
+            elapsedMs += 250;
+            continue;
+        }
+        ssize_t n = read(pipefd[0], buf, sizeof(buf));
+        if (n > 0) {
+            output.append(buf, static_cast<size_t>(n));
+            if (output.size() > 1024 * 1024) break;
+        } else if (n == 0) {
+            break;
+        } else if (errno != EAGAIN && errno != EINTR) {
+            break;
+        }
     }
     close(pipefd[0]);
 
     int status = 0;
+    if (elapsedMs >= kMaxWaitMs) {
+        kill(-pid, SIGKILL);
+        kill(pid, SIGKILL);
+    }
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) break;
     }
