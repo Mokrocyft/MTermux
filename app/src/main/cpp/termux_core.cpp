@@ -3926,4 +3926,216 @@ Java_com_termuxx_app_TermuxActivity_nativeGetTranscriptText(JNIEnv* env, jclass 
     return env->NewStringUTF(out.c_str());
 }
 
+
+// ============================================================================
+// Material 3 Expressive ColorSpec 2026 Perceptual OKLCH Dynamic Scheme Engine
+// Supports styles: 0 = Tonal Spot, 1 = Neutral, 2 = Vibrant, 3 = Expressive
+// ============================================================================
+namespace {
+
+inline float srgbToLinear(float c) noexcept {
+    return (c <= 0.04045f) ? (c / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+inline float linearToSrgb(float c) noexcept {
+    c = std::clamp(c, 0.0f, 1.0f);
+    return (c <= 0.0031308f) ? (12.92f * c) : (1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f);
+}
+
+struct OklchColor {
+    float L;
+    float C;
+    float hDeg;
+};
+
+inline OklchColor argbToOklch(uint32_t argb) noexcept {
+    float r = srgbToLinear(static_cast<float>((argb >> 16) & 0xFF) / 255.0f);
+    float g = srgbToLinear(static_cast<float>((argb >> 8) & 0xFF) / 255.0f);
+    float b = srgbToLinear(static_cast<float>(argb & 0xFF) / 255.0f);
+
+    float l = 0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b;
+    float m = 0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b;
+    float s = 0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b;
+
+    float l_ = std::cbrt(l);
+    float m_ = std::cbrt(m);
+    float s_ = std::cbrt(s);
+
+    float L = 0.2104542553f * l_ + 0.7936177850f * m_ - 0.0040720468f * s_;
+    float A = 1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_;
+    float B = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_;
+
+    float C = std::hypot(A, B);
+    float h = std::atan2(B, A) * (180.0f / 3.14159265358979323846f);
+    if (h < 0.0f) h += 360.0f;
+    return {L, C, h};
+}
+
+inline jint oklchToArgb(float L, float C, float hDeg) noexcept {
+    L = std::clamp(L, 0.0f, 1.0f);
+    float hRad = hDeg * (3.14159265358979323846f / 180.0f);
+    float cosH = std::cos(hRad);
+    float sinH = std::sin(hRad);
+
+    // Binary search gamut clip on chroma so high-chroma Vibrant/Expressive tones never clip ugly
+    float curC = std::max(0.0f, C);
+    float rLin = 0.0f, gLin = 0.0f, bLin = 0.0f;
+    for (int iter = 0; iter < 6; ++iter) {
+        float a = curC * cosH;
+        float b = curC * sinH;
+
+        float l_ = L + 0.3963377774f * a + 0.2158037573f * b;
+        float m_ = L - 0.1055613458f * a - 0.0638541728f * b;
+        float s_ = L - 0.0894841775f * a - 1.2914855480f * b;
+
+        float l = l_ * l_ * l_;
+        float m = m_ * m_ * m_;
+        float s = s_ * s_ * s_;
+
+        rLin = +4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s;
+        gLin = -1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s;
+        bLin = -0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s;
+
+        if (rLin >= -0.001f && rLin <= 1.001f &&
+            gLin >= -0.001f && gLin <= 1.001f &&
+            bLin >= -0.001f && bLin <= 1.001f) {
+            break;
+        }
+        curC *= 0.82f;
+    }
+
+    uint32_t R = static_cast<uint32_t>( std::clamp(std::lround(linearToSrgb(rLin) * 255.0f), 0L, 255L) );
+    uint32_t G = static_cast<uint32_t>( std::clamp(std::lround(linearToSrgb(gLin) * 255.0f), 0L, 255L) );
+    uint32_t B = static_cast<uint32_t>( std::clamp(std::lround(linearToSrgb(bLin) * 255.0f), 0L, 255L) );
+    return static_cast<jint>(0xFF000000u | (R << 16) | (G << 8) | B);
+}
+
+inline float wrapHue(float h) noexcept {
+    float r = std::fmod(h, 360.0f);
+    return (r < 0.0f) ? (r + 360.0f) : r;
+}
+
+} // namespace
+
+JNIEXPORT jintArray JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeGenerateColorSpec2026Palette(
+    JNIEnv* env, jclass /*clazz*/, jint seedArgb, jint styleIndex
+) {
+    OklchColor seed = argbToOklch(static_cast<uint32_t>(seedArgb));
+    float H = seed.hDeg;
+    float baseC = std::clamp(seed.C, 0.06f, 0.20f);
+
+    float hPrimary = H;
+    float cPrimary = 0.125f;
+    float hSecondary = wrapHue(H + 14.0f);
+    float cSecondary = 0.055f;
+    float hTertiary = wrapHue(H + 56.0f);
+    float cTertiary = 0.095f;
+    float hNeutral = H;
+    float cNeutral = 0.015f;
+
+    switch (styleIndex) {
+        case 0: // Tonal Spot (ColorSpec 2026 default balanced Material 3 Expressive)
+            hPrimary = H;
+            cPrimary = std::clamp(baseC * 1.08f, 0.105f, 0.148f);
+            hSecondary = wrapHue(H + 15.0f);
+            cSecondary = cPrimary * 0.46f;
+            hTertiary = wrapHue(H + 58.0f);
+            cTertiary = cPrimary * 0.82f;
+            hNeutral = H;
+            cNeutral = 0.016f;
+            break;
+
+        case 1: // Neutral (ColorSpec 2026 Spritz / low-chroma refined neutral)
+            hPrimary = H;
+            cPrimary = 0.042f;
+            hSecondary = wrapHue(H + 8.0f);
+            cSecondary = 0.026f;
+            hTertiary = wrapHue(H + 32.0f);
+            cTertiary = 0.048f;
+            hNeutral = H;
+            cNeutral = 0.007f;
+            break;
+
+        case 2: // Vibrant (ColorSpec 2026 high-chroma dynamic energy)
+            hPrimary = H;
+            cPrimary = std::clamp(baseC * 1.45f, 0.155f, 0.215f);
+            hSecondary = wrapHue(H + 24.0f);
+            cSecondary = 0.092f;
+            hTertiary = wrapHue(H + 46.0f);
+            cTertiary = 0.138f;
+            hNeutral = wrapHue(H + 6.0f);
+            cNeutral = 0.025f;
+            break;
+
+        case 3: // Expressive (ColorSpec 2026 bold hue-shifted triad)
+        default:
+            hPrimary = wrapHue(H + 28.0f);
+            cPrimary = std::clamp(baseC * 1.32f, 0.142f, 0.195f);
+            hSecondary = wrapHue(H + 105.0f);
+            cSecondary = 0.082f;
+            hTertiary = wrapHue(H + 160.0f);
+            cTertiary = 0.135f;
+            hNeutral = wrapHue(H + 14.0f);
+            cNeutral = 0.021f;
+            break;
+    }
+
+    jint tokens[14];
+    tokens[0]  = oklchToArgb(0.79f, cPrimary, hPrimary);              // primary
+    tokens[1]  = oklchToArgb(0.22f, cPrimary * 0.55f, hPrimary);      // onPrimary
+    tokens[2]  = oklchToArgb(0.31f, cPrimary * 0.78f, hPrimary);      // primaryContainer
+    tokens[3]  = oklchToArgb(0.91f, cPrimary * 0.42f, hPrimary);      // onPrimaryContainer
+    tokens[4]  = oklchToArgb(0.77f, cSecondary, hSecondary);          // secondary
+    tokens[5]  = oklchToArgb(0.29f, cSecondary * 0.78f, hSecondary);  // secondaryContainer
+    tokens[6]  = oklchToArgb(0.81f, cTertiary, hTertiary);            // tertiary
+    tokens[7]  = oklchToArgb(0.32f, cTertiary * 0.78f, hTertiary);    // tertiaryContainer
+    tokens[8]  = oklchToArgb(0.135f, cNeutral, hNeutral);             // surface (Settings / Hub page bg)
+    tokens[9]  = oklchToArgb(0.185f, cNeutral * 1.15f, hNeutral);     // surfaceContainerLow (Segmented cards)
+    tokens[10] = oklchToArgb(0.215f, cNeutral * 1.25f, hNeutral);     // surfaceContainer (Floating bar)
+    tokens[11] = oklchToArgb(0.265f, cNeutral * 1.35f, hNeutral);     // surfaceContainerHigh (Dialogs / Track)
+    tokens[12] = oklchToArgb(0.325f, cNeutral * 1.45f, hNeutral);     // outlineVariant (Card borders)
+    tokens[13] = oklchToArgb(0.195f, cNeutral * 1.20f, hNeutral);     // previewSquare (ColorPreviewCanvas bg)
+
+    jintArray result = env->NewIntArray(14);
+    if (result) {
+        env->SetIntArrayRegion(result, 0, 14, tokens);
+    }
+    return result;
+}
+
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeDiscoverCustomFonts(JNIEnv* env, jclass /*clazz*/) {
+    applyOryonSmartAffinity(true);
+    std::vector<std::string> searchDirs = {
+        "/data/data/com.termuxx/file/home/.termux",
+        "/data/data/com.termuxx/file/home",
+        "/sdcard/Download",
+        "/sdcard/Fonts",
+        "/sdcard/Documents"
+    };
+    std::string out;
+    for (const auto& dirPath : searchDirs) {
+        DIR* dir = opendir(dirPath.c_str());
+        if (!dir) continue;
+        struct dirent* ent = nullptr;
+        while ((ent = readdir(dir)) != nullptr) {
+            std::string name(ent->d_name);
+            if (name.size() < 5) continue;
+            std::string ext = name.substr(name.size() - 4);
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (ext == ".ttf" || ext == ".otf") {
+                std::string fullPath = dirPath + "/" + name;
+                struct stat st{};
+                if (stat(fullPath.c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 4096) {
+                    out += name + "\t" + fullPath + "\n";
+                }
+            }
+        }
+        closedir(dir);
+    }
+    return env->NewStringUTF(out.c_str());
+}
+
 } // extern "C"
