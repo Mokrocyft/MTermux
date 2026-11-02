@@ -4,8 +4,8 @@ ndk = "30.0.16248370"
 compileSdk = "37"
 minSdk = "37"
 targetSdk = "37"
-appVersionCode = "400"
-appVersionName = "4.0.0-android17-cxx23"
+appVersionCode = "500"
+appVersionName = "5.0.0"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

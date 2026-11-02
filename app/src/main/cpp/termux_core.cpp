@@ -3357,7 +3357,7 @@ static std::string normalizeForwardSpecCpp(const std::string& spec) {
         if (c == ':') colons++;
     }
     if (colons == 0) {
-        // Port only (e.g. "54321") -> "54321:127.0.0.1:54321"
+        // Port only (e.g. "54321") -> "8080:127.0.0.1:80"
         return t + ":127.0.0.1:" + t;
     } else if (colons == 1) {
         // "54321:80" -> "54321:127.0.0.1:80"
