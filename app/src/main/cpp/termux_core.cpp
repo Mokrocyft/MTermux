@@ -147,6 +147,7 @@ constexpr int AMETA_CTRL_ON  = 4096;
 // Event-driven JNI UI wakeup state
 static JavaVM* gJvm = nullptr;
 static int gDefaultCursorShape = 0;
+static int gDefaultMaxScrollback = 4000;
 static pthread_mutex_t gViewMutex = PTHREAD_MUTEX_INITIALIZER;
 static jobject gSurfaceView = nullptr;
 static jmethodID gPostInvalidateId = nullptr;
@@ -821,6 +822,15 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     symlink(PREFIX_PATH, "/data/data/com.termuxx/files/usr");
     unlink("/data/data/com.termuxx/files/home");
     symlink(HOME_PATH, "/data/data/com.termuxx/files/home");
+
+    // Pre-select default Termux mirror group if not yet chosen so `pkg` never warns or pings 70 mirrors
+    const char* chosenMirrorsPath = "/data/data/com.termuxx/file/usr/etc/termux/chosen_mirrors";
+    const char* defaultMirrorsDir = "/data/data/com.termuxx/file/usr/etc/termux/mirrors/default";
+    struct stat cmSt{};
+    if (lstat(chosenMirrorsPath, &cmSt) != 0 && access(defaultMirrorsDir, F_OK) == 0) {
+        unlink(chosenMirrorsPath);
+        symlink(defaultMirrorsDir, chosenMirrorsPath);
+    }
 
     ensureExecutablePermissionsInDir(BIN_PATH);
     ensureExecutablePermissionsInDir("/data/data/com.termuxx/file/usr/libexec");
@@ -3833,8 +3843,27 @@ Java_com_termuxx_app_TermuxActivity_nativeGetInstalledPackages(JNIEnv* env, jcla
         std::string version;
         std::string sizeKb;
         std::string desc;
+        bool isCore;
     };
     std::vector<PkgEntry> pkgs;
+
+    auto isBaseBootstrapPkg = [](const std::string& n) -> bool {
+        static const char* const kCoreNames[] = {
+            "apt", "attr", "bash", "bzip2", "ca-certificates", "command-not-found",
+            "coreutils", "curl", "dash", "debianutils", "dialog", "diffutils",
+            "dos2unix", "dpkg", "ed", "findutils", "gpgv", "grep", "gzip",
+            "inetutils", "less", "lsof", "nano", "ncurses", "ncurses-ui-libs",
+            "net-tools", "openssl", "patch", "pcre2", "procps", "psmisc",
+            "readline", "resolv-conf", "sed", "tar", "termux-am", "termux-am-socket",
+            "termux-core", "termux-exec", "termux-keyring", "termux-licenses",
+            "termux-tools", "unzip", "util-linux", "xxd", "xz-utils", "zlib"
+        };
+        if (n.rfind("lib", 0) == 0) return true;
+        for (const char* c : kCoreNames) {
+            if (n == c) return true;
+        }
+        return false;
+    };
 
     size_t pos = 0;
     while (pos < content.size()) {
@@ -3842,7 +3871,7 @@ Java_com_termuxx_app_TermuxActivity_nativeGetInstalledPackages(JNIEnv* env, jcla
         if (endBlock == std::string::npos) endBlock = content.size();
         std::string_view block(content.data() + pos, endBlock - pos);
 
-        std::string pkg, ver, status, sizeKb = "0", desc;
+        std::string pkg, ver, status, sizeKb = "0", desc, essential, priority;
         size_t lpos = 0;
         while (lpos < block.size()) {
             size_t lend = block.find('\n', lpos);
@@ -3853,22 +3882,29 @@ Java_com_termuxx_app_TermuxActivity_nativeGetInstalledPackages(JNIEnv* env, jcla
             else if (line.rfind("Status: ", 0) == 0) status = std::string(line.substr(8));
             else if (line.rfind("Installed-Size: ", 0) == 0) sizeKb = std::string(line.substr(16));
             else if (line.rfind("Description: ", 0) == 0) desc = std::string(line.substr(13));
+            else if (line.rfind("Essential: ", 0) == 0) essential = std::string(line.substr(11));
+            else if (line.rfind("Priority: ", 0) == 0) priority = std::string(line.substr(10));
             lpos = lend + 1;
         }
         if (!pkg.empty() && status.find("installed") != std::string::npos) {
-            pkgs.push_back(PkgEntry{trimCpp(pkg), trimCpp(ver), trimCpp(sizeKb), trimCpp(desc)});
+            std::string cleanName = trimCpp(pkg);
+            std::string cleanEss = trimCpp(essential);
+            std::string cleanPrio = trimCpp(priority);
+            bool core = (cleanEss == "yes") || (cleanPrio == "required") || (cleanPrio == "important") || isBaseBootstrapPkg(cleanName);
+            pkgs.push_back(PkgEntry{cleanName, trimCpp(ver), trimCpp(sizeKb), trimCpp(desc), core});
         }
         pos = endBlock + 2;
     }
 
     std::sort(pkgs.begin(), pkgs.end(), [](const PkgEntry& a, const PkgEntry& b) {
+        if (a.isCore != b.isCore) return !a.isCore; // User-installed removable packages first!
         return a.name < b.name;
     });
 
     std::string out;
-    out.reserve(pkgs.size() * 64);
+    out.reserve(pkgs.size() * 72);
     for (const auto& p : pkgs) {
-        out += p.name + "\t" + p.version + "\t" + p.sizeKb + "\t" + p.desc + "\n";
+        out += p.name + "\t" + p.version + "\t" + p.sizeKb + "\t" + p.desc + "\t" + (p.isCore ? "1" : "0") + "\n";
     }
     return env->NewStringUTF(out.c_str());
 }
@@ -4136,6 +4172,27 @@ Java_com_termuxx_app_TermuxActivity_nativeDiscoverCustomFonts(JNIEnv* env, jclas
         closedir(dir);
     }
     return env->NewStringUTF(out.c_str());
+}
+
+
+JNIEXPORT void JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeSetMaxScrollback(JNIEnv* /*env*/, jclass /*clazz*/, jint maxLines) {
+    int clamped = std::clamp<int>(maxLines, 500, 50000);
+    pthread_mutex_lock(&gGlobalMutex);
+    gDefaultMaxScrollback = clamped;
+    for (auto& eng : gSessions) {
+        if (eng) {
+            eng->lock();
+            eng->mMaxScrollback = clamped;
+            if (static_cast<int>(eng->mScrollback.size()) > clamped) {
+                eng->mScrollback.clear();
+                eng->mScrollbackHead = 0;
+                eng->mScrollbackCount = 0;
+            }
+            eng->unlock();
+        }
+    }
+    pthread_mutex_unlock(&gGlobalMutex);
 }
 
 } // extern "C"

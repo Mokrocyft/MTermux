@@ -160,6 +160,10 @@ def main():
                 'Dir::Cache::archives "/data/data/com.termuxx/cach/apt/archives";\n'
             )
 
+        # Ensure default mirror symlink is pre-selected so pkg never warns "No mirror or mirror group selected"
+        if "etc/termux/chosen_mirrors" not in symlinks_map:
+            symlinks_map["etc/termux/chosen_mirrors"] = "/data/data/com.termuxx/file/usr/etc/termux/mirrors/default"
+
         # Write updated SYMLINKS.txt with com.termuxx/file paths
         if symlinks_map:
             with open(symlinks_path, "w", encoding="utf-8") as f:
@@ -228,6 +232,34 @@ def slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, deb_url):
     usr_src = os.path.join(data_dir, PREFIX_IN_DEB)
     if not os.path.isdir(usr_src):
         return False
+
+    # Clean up old files of this package before unpacking the new version so obsolete dirs (e.g. share/doc/nghttp2) are empty
+    old_list_file = os.path.join(extract_dir, "var/lib/dpkg/info", f"{pkg_name}.list")
+    old_dirs = []
+    if os.path.exists(old_list_file):
+        with open(old_list_file, "r", encoding="utf-8", errors="ignore") as olf:
+            for line in olf:
+                p = line.strip()
+                for pref in ("/data/data/com.termux/files/usr/", "/data/data/com.termuxx/file/usr/"):
+                    if p.startswith(pref):
+                        rel_old = p[len(pref):]
+                        if not rel_old:
+                            continue
+                        if rel_old in symlinks_map:
+                            del symlinks_map[rel_old]
+                        full_old = os.path.join(extract_dir, rel_old)
+                        if os.path.isfile(full_old) or os.path.islink(full_old):
+                            try:
+                                os.remove(full_old)
+                            except OSError:
+                                pass
+                        elif os.path.isdir(full_old):
+                            old_dirs.append(full_old)
+        for d in sorted(old_dirs, key=len, reverse=True):
+            try:
+                os.rmdir(d)
+            except OSError:
+                pass
 
     list_entries = []
     for root, dirs, files in os.walk(usr_src):

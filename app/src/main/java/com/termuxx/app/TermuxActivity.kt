@@ -74,6 +74,8 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import android.window.BackEvent
+import android.window.OnBackAnimationCallback
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import com.termuxx.R
@@ -85,6 +87,7 @@ import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.max
@@ -115,9 +118,17 @@ private const val KEY_UI_THEME_INDEX = "ui_theme_index_v1"
 private const val KEY_COLOR_SEED_V2 = "color_seed_v2"
 private const val KEY_MONET_STYLE_V2 = "monet_style_v2" // 0: Tonal Spot, 1: Neutral, 2: Vibrant, 3: Expressive (ColorSpec 2026)
 private const val KEY_FONT_SCALE = "font_scale_v1"
-private const val KEY_FONT_PRESET = "font_preset_v1" // 0: JB Mono 400, 1: JB Mono 300, 2: JB Mono 500, 3: JB Mono 600, 4: JB Mono 700, 5: System Monospace, 6: Serif Monospace, 7: Custom .ttf/.otf
+private const val KEY_USE_SYSTEM_COLOR = "use_system_color_v1"
+private const val KEY_FONT_PRESET = "font_preset_v2" // 0: System UI Default, 1: System Monospace, 2: JB Mono Regular, 3: JB Mono Light, 4: JB Mono Medium, 5: JB Mono SemiBold, 6: JB Mono Bold, 7: Custom .ttf/.otf
 private const val KEY_CUSTOM_FONT_PATH = "custom_font_path_v1"
 private const val KEY_FONT_LIGATURES = "font_ligatures_v1"
+private const val KEY_LINE_SPACING_PCT = "line_spacing_pct_v1" // 85..135 (default 100)
+private const val KEY_SCROLLBACK_LINES = "scrollback_lines_v1" // default 4000
+private const val KEY_COPY_ON_SELECT = "copy_on_select_v1"
+private const val KEY_KEEP_SCREEN_ON = "keep_screen_on_v1"
+private const val KEY_APP_LANG = "app_lang_v1" // 0: Auto, 1: RU, 2: EN
+internal const val ACTION_EXIT_APP = "com.termuxx.ACTION_EXIT_APP"
+private const val COLOR_PASTEL_RED = 0xFFF28B82.toInt()
 
 // Precise Cursor & Animation Preference Keys
 private const val KEY_CURSOR_SHAPE = "cursor_shape_v2"
@@ -191,22 +202,22 @@ private val MONET_STYLES_2026 = arrayOf(
     MonetStyleOption(
         0,
         "Tonal Spot",
-        "ColorSpec 2026 • Сбалансированная палитра с мягкими тональными переходами и умеренным акцентом"
+        "Сбалансированная палитра с мягкими тональными переходами"
     ),
     MonetStyleOption(
         1,
         "Neutral",
-        "ColorSpec 2026 • Спокойная минималистичная схема с деликатным оттенком основного цвета"
+        "Спокойная минималистичная схема с деликатным оттенком"
     ),
     MonetStyleOption(
         2,
         "Vibrant",
-        "ColorSpec 2026 • Насыщенная и энергичная палитра с высокой хроматичностью акцентов"
+        "Насыщенная палитра с высокой хроматичностью акцентов"
     ),
     MonetStyleOption(
         3,
         "Expressive",
-        "ColorSpec 2026 • Выразительное сочетание смещённых оттенков с глубоким контрастом контейнеров"
+        "Выразительное сочетание оттенков с глубоким контрастом"
     )
 )
 
@@ -261,7 +272,8 @@ private data class DpkgPackageInfo(
     val name: String,
     val version: String,
     val sizeKb: Long,
-    val description: String
+    val description: String,
+    val isCore: Boolean = false
 )
 
 internal data class SshServerProfile(
@@ -306,8 +318,30 @@ class TermuxActivity : Activity() {
     internal lateinit var terminalSurface: TerminalSurface
     private val modifierButtons = ArrayList<TextView>(4)
 
+    internal var useSystemDynamicColor: Boolean = true
+    internal var appLangPref: Int = 0 // 0 = System Auto, 1 = RU, 2 = EN
+    internal var copyOnSelect: Boolean = false
+    internal var keepScreenOnPref: Boolean = false
     internal var colorSeedArgb: Int = COLORBLENDR_SEEDS[0].seedArgb
-    internal var monetStyleIndex: Int = 0 // 0: Tonal Spot, 1: Neutral, 2: Vibrant, 3: Expressive (ColorSpec 2026)
+    internal var monetStyleIndex: Int = 0 // 0: Tonal Spot, 1: Neutral, 2: Vibrant, 3: Expressive
+
+    internal fun isEnglish(): Boolean {
+        return when (appLangPref) {
+            1 -> false
+            2 -> true
+            else -> !Locale.getDefault().language.lowercase().startsWith("ru")
+        }
+    }
+
+    internal fun tr(ru: String, en: String): String = if (isEnglish()) en else ru
+
+    internal fun getSystemDynamicSeedColor(): Int {
+        return try {
+            getColor(android.R.color.system_accent1_400)
+        } catch (_: Throwable) {
+            COLORBLENDR_SEEDS[0].seedArgb
+        }
+    }
     internal var colorSpecTokens: IntArray = intArrayOf(
         0xFF8AB4F8.toInt(), // [0] primary
         0xFF0A2540.toInt(), // [1] onPrimary
@@ -341,7 +375,8 @@ class TermuxActivity : Activity() {
 
     internal fun refreshColorSpec2026FromCpp() {
         try {
-            val generated = nativeGenerateColorSpec2026Palette(colorSeedArgb, monetStyleIndex.coerceIn(0, 3))
+            val effectiveSeed = if (useSystemDynamicColor) getSystemDynamicSeedColor() else colorSeedArgb
+            val generated = nativeGenerateColorSpec2026Palette(effectiveSeed, monetStyleIndex.coerceIn(0, 3))
             if (generated.size >= 14) {
                 colorSpecTokens = generated
             }
@@ -372,8 +407,17 @@ class TermuxActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        activeInstance = this
+        if (intent?.action == ACTION_EXIT_APP) {
+            exitAppCompletely()
+            return
+        }
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        colorSeedArgb = prefs.getInt(KEY_COLOR_SEED_V2, COLORBLENDR_SEEDS[0].seedArgb)
+        useSystemDynamicColor = prefs.getBoolean(KEY_USE_SYSTEM_COLOR, true)
+        appLangPref = prefs.getInt(KEY_APP_LANG, 0).coerceIn(0, 2)
+        copyOnSelect = prefs.getBoolean(KEY_COPY_ON_SELECT, false)
+        keepScreenOnPref = prefs.getBoolean(KEY_KEEP_SCREEN_ON, false)
+        colorSeedArgb = prefs.getInt(KEY_COLOR_SEED_V2, getSystemDynamicSeedColor())
         monetStyleIndex = prefs.getInt(KEY_MONET_STYLE_V2, 0).coerceIn(0, 3)
         refreshColorSpec2026FromCpp()
         hapticEnabled = prefs.getBoolean(KEY_HAPTIC_ENABLED, DEFAULT_HAPTIC_ENABLED)
@@ -442,11 +486,11 @@ class TermuxActivity : Activity() {
                 onLongClick = { terminalSurface.showTranscriptCopyDialog() }
             )
         )
-        // Single unified Material Design 3 Hub icon leading to Servers (SSH), SFTP & Packages
+        // Single unified Material Design 3 Hub icon in pure white (#FFFFFF)
         headerBar.addView(
             makeHeaderIconButton(
                 icon = M3Icon.HUB_GRID,
-                tintColor = uiAccent,
+                tintColor = 0xFFFFFFFF.toInt(),
                 onClick = { showWorkspaceHubDialog(initialTab = 0) },
                 onLongClick = { showWorkspaceHubDialog(initialTab = 1) }
             )
@@ -454,12 +498,15 @@ class TermuxActivity : Activity() {
         headerBar.addView(
             makeHeaderIconButton(
                 icon = M3Icon.SETTINGS,
+                tintColor = COLOR_TEXT_BRIGHT,
                 onClick = { showCategorizedSettingsDialog() }
             )
         )
+        // Close button in pastel red (#F28B82)
         headerBar.addView(
             makeHeaderIconButton(
                 icon = M3Icon.CLOSE,
+                tintColor = COLOR_PASTEL_RED,
                 onClick = { closeCurrentSession() }
             )
         )
@@ -507,15 +554,45 @@ class TermuxActivity : Activity() {
 
         applySafeWindowInsets(rootLayout, extraTopDp = 4, extraBottomDp = 0)
 
+        if (keepScreenOnPref) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
         val initCursorShape = prefs.getInt(KEY_CURSOR_SHAPE, DEFAULT_CURSOR_SHAPE)
         nativeSetDefaultCursorShape(min(2, initCursorShape))
+        val initScrollback = prefs.getInt(KEY_SCROLLBACK_LINES, 4000)
+        nativeSetMaxScrollback(initScrollback)
         rebuildTabs()
         nativeRegisterSurface(terminalSurface)
         nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
 
-        rootLayout.postDelayed({
-            ensureNotificationsAndKeepAlive()
-        }, 350L)
+        // Start foreground notification immediately upon opening the app (zero delay!)
+        ensureNotificationsAndKeepAlive()
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent?.action == ACTION_EXIT_APP) {
+            exitAppCompletely()
+        }
+    }
+
+    internal fun exitAppCompletely() {
+        try {
+            stopService(Intent(this, KeepAliveService::class.java))
+            val nm = getSystemService(NotificationManager::class.java)
+            nm?.cancelAll()
+        } catch (_: Throwable) {
+        }
+        try {
+            nativeDestroyAll()
+        } catch (_: Throwable) {
+        }
+        try {
+            finishAndRemoveTask()
+        } catch (_: Throwable) {
+            finish()
+        }
+        kotlin.system.exitProcess(0)
     }
 
     /**
@@ -536,17 +613,16 @@ class TermuxActivity : Activity() {
     }
 
     private fun ensureNotificationsAndKeepAlive() {
+        // Always start KeepAliveService immediately so the notification appears right away
+        startForegroundKeepAlive()
         try {
             if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(
                     arrayOf(Manifest.permission.POST_NOTIFICATIONS),
                     REQ_POST_NOTIFICATIONS
                 )
-            } else {
-                startForegroundKeepAlive()
             }
         } catch (_: Throwable) {
-            startForegroundKeepAlive()
         }
     }
 
@@ -780,7 +856,7 @@ class TermuxActivity : Activity() {
 
     // ========================================================================
     // Material 3 Expressive / ArchiveTune / BakaSU / ColorBlendr Design Engine
-    // (ColorSpec 2026 + Full-Page Settings + AOSP 17 Transitions + M3 Switch & Slider)
+    // (Borderless Surfaces + Predictive Back + BakaSU Morphing Indicator + EN/RU)
     // ========================================================================
     private fun blendColor(c1: Int, c2: Int, ratio: Float): Int {
         val t = ratio.coerceIn(0f, 1f)
@@ -796,17 +872,23 @@ class TermuxActivity : Activity() {
         return (alpha.coerceIn(0, 255) shl 24) or (color and 0x00FFFFFF)
     }
 
+    /**
+     * Borderless Tonal Surface Drawable (`stroke = 0` — no contour/outline anywhere outside Terminal!).
+     */
+    private fun tonalBg(fill: Int, radiusPx: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(fill)
+            cornerRadius = radiusPx.toFloat()
+        }
+    }
+
     // Android 17 AOSP Emphasized Spatial Curve: cubic-bezier(0.2, 0.0, 0.0, 1.0)
     private val aosp17SpatialInterpolator by lazy {
         PathInterpolator(0.2f, 0.0f, 0.0f, 1.0f)
     }
 
-    /**
-     * Animates a page or container transition using the Android 17 AOSP Shared-Axis X
-     * spatial motion curve (cubic-bezier 0.2, 0.0, 0.0, 1.0, 300ms).
-     */
     private fun animateAosp17PageTransition(target: View, forward: Boolean = true) {
-        val dist = max(dpF(56f), resources.displayMetrics.widthPixels * 0.16f)
+        val dist = max(dpF(48f), resources.displayMetrics.widthPixels * 0.14f)
         target.translationX = if (forward) dist else -dist
         target.alpha = 0f
         target.scaleX = 0.975f
@@ -816,40 +898,26 @@ class TermuxActivity : Activity() {
             .alpha(1f)
             .scaleX(1f)
             .scaleY(1f)
-            .setDuration(290L)
+            .setDuration(270L)
             .setInterpolator(aosp17SpatialInterpolator)
             .start()
     }
 
     /**
-     * ArchiveTune / BakaSU / ColorBlendr style Floating Material 3 Pill Surface
-     * using dynamic ColorSpec 2026 `surfaceContainer` + `primaryContainer` tint.
+     * Borderless Material 3 Expressive Floating Toolbar / FAB Surface (BakaSU / ArchiveTune style).
      */
-    private fun makeArchiveTuneGlassDrawable(
+    private fun makeM3FloatingSurfaceDrawable(
         radiusPx: Int,
         tintWithAccent: Boolean = false
     ): GradientDrawable {
-        val topBase = if (tintWithAccent) {
-            withAlpha(blendColor(uiSurfaceHigh, uiAccentContainer, 0.72f), 242)
+        val fillCol = if (tintWithAccent) {
+            uiAccentContainer
         } else {
-            withAlpha(blendColor(uiSurfaceContainer, uiSurfaceHigh, 0.45f), 236)
+            withAlpha(blendColor(uiSurfaceContainer, uiSurfaceHigh, 0.65f), 245)
         }
-        val botBase = if (tintWithAccent) {
-            withAlpha(blendColor(uiSurfaceContainer, uiAccentContainer, 0.58f), 232)
-        } else {
-            withAlpha(uiSurfaceContainer, 228)
-        }
-        val borderCol = if (tintWithAccent) {
-            withAlpha(uiAccent, 175)
-        } else {
-            withAlpha(blendColor(uiOutlineVariant, uiAccent, 0.28f), 140)
-        }
-        return GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(topBase, botBase)
-        ).apply {
+        return GradientDrawable().apply {
+            setColor(fillCol)
             cornerRadius = radiusPx.toFloat()
-            setStroke(max(1, dp(1)), borderCol)
         }
     }
 
@@ -894,11 +962,7 @@ class TermuxActivity : Activity() {
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(22), dp(20), dp(22), dp(18))
-            background = GradientDrawable().apply {
-                setColor(uiSurfaceHigh)
-                cornerRadius = dpF(28f)
-                setStroke(max(1, dp(1)), uiOutlineVariant)
-            }
+            background = tonalBg(uiSurfaceHigh, dp(28))
         }
         dlg.setContentView(sheet)
         animateAosp17PageTransition(sheet, forward = true)
@@ -906,8 +970,8 @@ class TermuxActivity : Activity() {
     }
 
     /**
-     * BakaSU-style Material 3 Choose Dialog (`SettingsChooseDialogFrame` + `RadioButton` + `SegmentedColumn`).
-     * Used for choosing Cursor Shape, Cursor Blink Animation, Terminal Font, Keyboard Preset, etc.
+     * BakaSU-style Material 3 Choose Dialog (`SettingsChooseDialogFrame` + `RadioButton` + `SegmentedColumn`)
+     * with zero border outlines.
      */
     private fun showBakaSuChooseDialog(
         title: String,
@@ -922,7 +986,6 @@ class TermuxActivity : Activity() {
 
         var currentIndex = selectedIndex.coerceIn(0, items.lastIndex)
 
-        // Centered headlineSmall Title (exact match to BakaSU SettingsChooseDialogFrame)
         sheet.addView(TextView(this).apply {
             text = title
             gravity = Gravity.CENTER
@@ -955,8 +1018,7 @@ class TermuxActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(16), dp(14), dp(16), dp(14))
                     val fillCol = if (isSel) uiAccentContainer else uiSurfaceLow
-                    val strokeCol = if (isSel) uiAccent else uiOutlineVariant
-                    background = segmentedCardBg(i, items.size, fillCol, strokeCol, 18f, 5f)
+                    background = segmentedCardBg(i, items.size, fillCol, 0, 18f, 5f)
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
@@ -971,7 +1033,6 @@ class TermuxActivity : Activity() {
                     }
                 }
 
-                // Material 3 RadioButton
                 row.addView(
                     M3RadioButtonView(this, checked = isSel).apply {
                         layoutParams = LinearLayout.LayoutParams(dp(24), dp(24)).apply {
@@ -1005,14 +1066,13 @@ class TermuxActivity : Activity() {
         }
         rebuildOptionRows()
 
-        // Bottom TextButtons (Cancel | OK) like BakaSU SettingsChooseDialogFrame
         val footer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
             setPadding(0, dp(14), 0, 0)
         }
         footer.addView(TextView(this).apply {
-            text = "Отмена"
+            text = tr("Отмена", "Cancel")
             setTextColor(uiAccent)
             typeface = Typeface.DEFAULT_BOLD
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
@@ -1024,11 +1084,11 @@ class TermuxActivity : Activity() {
             }
         })
         footer.addView(TextView(this).apply {
-            text = "ОК"
+            text = tr("ОК", "OK")
             setTextColor(uiOnAccent)
             typeface = Typeface.DEFAULT_BOLD
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-            background = pillBg(uiAccent, uiAccent, dp(18))
+            background = tonalBg(uiAccent, dp(18))
             setPadding(dp(20), dp(9), dp(20), dp(9))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1047,9 +1107,6 @@ class TermuxActivity : Activity() {
         dlg.show()
     }
 
-    /**
-     * Material 3 RadioButton custom canvas view (`20dp` ring + `10dp` inner dot when selected).
-     */
     internal inner class M3RadioButtonView(
         context: Context,
         var checked: Boolean
@@ -1077,8 +1134,7 @@ class TermuxActivity : Activity() {
     }
 
     /**
-     * Material 3 Expressive Switch (`52dp x 32dp` capsule track, expanding thumb with `✓` / `✕` icons)
-     * matching BakaSU (`SettingsSwitchWidget.kt`), ArchiveTune (`SwitchPreference`), and ColorBlendr (`SwitchItem.kt`).
+     * Material 3 Expressive Switch (`52dp x 32dp` borderless capsule track, expanding thumb with `✓` / `✕` icons).
      */
     internal inner class M3ExpressiveSwitchView(
         context: Context,
@@ -1092,9 +1148,6 @@ class TermuxActivity : Activity() {
         private var pressProgress: Float = 0f
         private val trackRect = RectF()
         private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-        }
         private val thumbPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
         }
@@ -1158,12 +1211,6 @@ class TermuxActivity : Activity() {
             trackPaint.color = trackCol
             canvas.drawRoundRect(trackRect, corner, corner, trackPaint)
 
-            if (progress < 0.98f) {
-                strokePaint.strokeWidth = dpF(1.8f)
-                strokePaint.color = withAlpha(uiOutlineVariant, ((1f - progress) * 255).roundToInt())
-                canvas.drawRoundRect(trackRect, corner, corner, strokePaint)
-            }
-
             val minX = pad + corner
             val maxX = w - pad - corner
             val cx = minX + (maxX - minX) * progress
@@ -1177,7 +1224,6 @@ class TermuxActivity : Activity() {
             iconPaint.strokeWidth = dpF(1.85f)
             iconPath.reset()
             if (progress >= 0.5f) {
-                // Checkmark icon inside thumb
                 iconPaint.color = uiAccent
                 val s = dpF(4.2f)
                 iconPath.moveTo(cx - s * 0.85f, cy + s * 0.05f)
@@ -1185,7 +1231,6 @@ class TermuxActivity : Activity() {
                 iconPath.lineTo(cx + s * 0.95f, cy - s * 0.65f)
                 canvas.drawPath(iconPath, iconPaint)
             } else {
-                // Close 'X' icon inside thumb
                 iconPaint.color = uiSurfaceHigh
                 val s = dpF(3.3f)
                 canvas.drawLine(cx - s, cy - s, cx + s, cy + s, iconPaint)
@@ -1195,10 +1240,7 @@ class TermuxActivity : Activity() {
     }
 
     /**
-     * BakaSU / ArchiveTune Material 3 Expressive Thick Split-Track Slider (`KeyPointSlider.kt`):
-     * - 16dp tall rounded track split into active and inactive segments
-     * - 6dp clear gap around a 4dp x 28dp vertical pill handle (expands to 32dp on drag)
-     * - 4dp stop indicator dot at the end of the inactive track
+     * BakaSU / ArchiveTune Material 3 Expressive Thick Split-Track Slider (`KeyPointSlider.kt`).
      */
     internal inner class M3ExpressiveSliderView(
         context: Context,
@@ -1310,19 +1352,15 @@ class TermuxActivity : Activity() {
             val gapStart = (thumbX - thumbW * 0.5f - gap).coerceIn(minX, maxX)
             val gapEnd = (thumbX + thumbW * 0.5f + gap).coerceIn(minX, maxX)
 
-            // Active left segment
             drawSegment(canvas, minX, gapStart, trackTop, trackH, outerR, innerR, uiAccent)
-            // Inactive right segment
             drawSegment(canvas, gapEnd, maxX, trackTop, trackH, innerR, outerR, uiSurfaceHigh)
 
-            // End stop-indicator dot inside inactive track (exact BakaSU KeyPointSlider detail)
             val stopX = maxX - outerR
             if (stopX > gapEnd + dpF(4f)) {
                 paint.color = uiAccent
                 canvas.drawCircle(stopX, centerY, dpF(2.2f), paint)
             }
 
-            // Vertical Pill Handle
             paint.color = uiAccent
             rect.set(
                 thumbX - thumbW * 0.5f,
@@ -1334,10 +1372,6 @@ class TermuxActivity : Activity() {
         }
     }
 
-    /**
-     * ColorBlendr `ColorPreviewCanvas` (`12dp` rounded square + `180°` half-circle primary +
-     * two `90°` quarter-circles secondary & tertiary) for `StylePreviewCard`.
-     */
     internal inner class ColorPreviewCanvasView(
         context: Context,
         private val tokens: IntArray,
@@ -1366,15 +1400,12 @@ class TermuxActivity : Activity() {
             val pad = if (isSwatchWithCenter) dpF(6f) else dpF(9f)
             rect.set(pad, pad, w - pad, h - pad)
 
-            // Top half-circle (180deg sweep 180deg) -> Primary
             paint.color = tokens.getOrElse(0) { uiAccent }
             canvas.drawArc(rect, 180f, 180f, true, paint)
 
-            // Bottom-left quarter-circle (90deg sweep 90deg) -> Secondary
             paint.color = tokens.getOrElse(4) { uiSecondary }
             canvas.drawArc(rect, 90f, 90f, true, paint)
 
-            // Bottom-right quarter-circle (0deg sweep 90deg) -> Tertiary
             paint.color = tokens.getOrElse(6) { uiTertiary }
             canvas.drawArc(rect, 0f, 90f, true, paint)
 
@@ -1412,9 +1443,9 @@ class TermuxActivity : Activity() {
             typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             setPadding(dp(14), dp(7), dp(14), dp(7))
             setTextColor(if (selected) accentColor else COLOR_TEXT)
-            background = pillBg(
+            // Zero border outline (borderless tonal capsule)
+            background = tonalBg(
                 if (selected) containerColor else uiSurfaceLow,
-                if (selected) accentColor else uiOutlineVariant,
                 dp(12)
             )
             layoutParams = LinearLayout.LayoutParams(
@@ -1459,9 +1490,6 @@ class TermuxActivity : Activity() {
         }
     }
 
-    /**
-     * BakaSU / ArchiveTune / ColorBlendr Segmented Slider Card using `M3ExpressiveSliderView`.
-     */
     private fun makeSeekBarCard(
         icon: M3Icon,
         labelPrefix: String,
@@ -1475,7 +1503,7 @@ class TermuxActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(14), dp(18), dp(10))
-            background = segmentedCardBg(index, total, uiSurfaceLow, uiOutlineVariant, 22f, 5f)
+            background = segmentedCardBg(index, total, uiSurfaceLow, 0, 22f, 5f)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1488,7 +1516,7 @@ class TermuxActivity : Activity() {
                 gravity = Gravity.CENTER_VERTICAL
             }
             val iconBox = FrameLayout(this@TermuxActivity).apply {
-                background = pillBg(uiAccentContainer, uiAccentContainer, dp(12))
+                background = tonalBg(uiAccentContainer, dp(12))
                 layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
                     marginEnd = dp(14)
                 }
@@ -1508,7 +1536,7 @@ class TermuxActivity : Activity() {
                 setTextColor(uiAccent)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                background = pillBg(uiAccentContainer, uiAccentContainer, dp(99))
+                background = tonalBg(uiAccentContainer, dp(99))
                 setPadding(dp(12), dp(4), dp(12), dp(4))
             }
             topRow.addView(titleTv)
@@ -1535,9 +1563,6 @@ class TermuxActivity : Activity() {
         }
     }
 
-    /**
-     * BakaSU `SettingsSwitchWidget` / ColorBlendr `SwitchItem` Segmented Row with `M3ExpressiveSwitchView`.
-     */
     private fun makeBakaSuSwitchCard(
         icon: M3Icon,
         title: String,
@@ -1553,13 +1578,12 @@ class TermuxActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(18), dp(15), dp(18), dp(15))
             background = if (isMasterSwitch) {
-                pillBg(
+                tonalBg(
                     if (checked) uiAccentContainer else uiSurfaceLow,
-                    if (checked) uiAccent else uiOutlineVariant,
                     dp(28)
                 )
             } else {
-                segmentedCardBg(index, total, uiSurfaceLow, uiOutlineVariant, 22f, 5f)
+                segmentedCardBg(index, total, uiSurfaceLow, 0, 22f, 5f)
             }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1570,8 +1594,7 @@ class TermuxActivity : Activity() {
 
             addView(
                 FrameLayout(this@TermuxActivity).apply {
-                    background = pillBg(
-                        if (isMasterSwitch && checked) uiAccent else uiAccentContainer,
+                    background = tonalBg(
                         if (isMasterSwitch && checked) uiAccent else uiAccentContainer,
                         dp(12)
                     )
@@ -1626,10 +1649,6 @@ class TermuxActivity : Activity() {
         }
     }
 
-    /**
-     * BakaSU `SettingsChooseWidget` / ArchiveTune `ListPreference` Segmented Row that opens
-     * `showBakaSuChooseDialog` when tapped.
-     */
     private fun makeBakaSuChooseCard(
         icon: M3Icon,
         title: String,
@@ -1646,7 +1665,7 @@ class TermuxActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(18), dp(15), dp(18), dp(15))
-            background = segmentedCardBg(index, total, uiSurfaceLow, uiOutlineVariant, 22f, 5f)
+            background = segmentedCardBg(index, total, uiSurfaceLow, 0, 22f, 5f)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1656,7 +1675,7 @@ class TermuxActivity : Activity() {
 
             addView(
                 FrameLayout(this@TermuxActivity).apply {
-                    background = pillBg(uiAccentContainer, uiAccentContainer, dp(12))
+                    background = tonalBg(uiAccentContainer, dp(12))
                     layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
                         marginEnd = dp(14)
                     }
@@ -1684,21 +1703,14 @@ class TermuxActivity : Activity() {
                     setPadding(0, dp(2), 0, 0)
                 })
             }
-            // ArchiveTune / BakaSU Value Chip
-            col.addView(TextView(this@TermuxActivity).apply {
-                text = currentValText
-                setTextColor(uiAccent)
-                typeface = Typeface.DEFAULT_BOLD
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                background = pillBg(uiAccentContainer, uiAccentContainer, dp(99))
-                setPadding(dp(12), dp(4), dp(12), dp(4))
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    topMargin = dp(6)
-                }
-            })
+            if (currentValText.isNotBlank()) {
+                col.addView(TextView(this@TermuxActivity).apply {
+                    text = currentValText
+                    setTextColor(COLOR_TEXT)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setPadding(0, dp(4), 0, 0)
+                })
+            }
             addView(col)
 
             addView(
@@ -1722,7 +1734,8 @@ class TermuxActivity : Activity() {
     }
 
     // ========================================================================
-    // Full-Screen AOSP Material 3 Settings Page (ColorBlendr & BakaSU Style)
+    // Full-Screen AOSP Material 3 Settings Page with Predictive Back Gesture
+    // (Two-layer Stage: Home Menu underneath + Sub-page on top for live preview!)
     // ========================================================================
     private fun showCategorizedSettingsDialog() {
         val dlg = Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
@@ -1751,140 +1764,336 @@ class TermuxActivity : Activity() {
         }
         pageRoot.addView(mainCol)
 
-        // Top AOSP / BakaSU / ColorBlendr AppToolbar
+        // Minimalist Top AppToolbar (No "Material 3 Expressive" subtitle!)
         val toolbar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(8), dp(16), dp(10))
         }
         val backBtn = FrameLayout(this).apply {
-            background = pillBg(uiSurfaceContainer, uiOutlineVariant, dp(20))
+            background = tonalBg(uiSurfaceContainer, dp(20))
             layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
                 marginEnd = dp(14)
             }
             addView(MaterialIconView(this@TermuxActivity, M3Icon.ARROW_BACK, COLOR_TEXT_BRIGHT, 21f, 2.15f))
             attachSmoothPressAnimation(this, 0.90f)
         }
-        val titleCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
         val titleTv = TextView(this).apply {
-            text = "Настройки"
+            text = tr("Настройки", "Settings")
             setTextColor(COLOR_TEXT_BRIGHT)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
             typeface = Typeface.DEFAULT_BOLD
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val subtitleHeaderTv = TextView(this).apply {
-            text = "Material 3 Expressive • ColorSpec 2026"
-            setTextColor(COLOR_TEXT_DIM)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-            setPadding(0, dp(1), 0, 0)
-        }
-        titleCol.addView(titleTv)
-        titleCol.addView(subtitleHeaderTv)
-
         toolbar.addView(backBtn)
-        toolbar.addView(titleCol)
+        toolbar.addView(titleTv)
         mainCol.addView(toolbar)
 
-        val bodyScroll = ScrollView(this).apply {
-            isVerticalScrollBarEnabled = false
+        // Two-layer stage for Android 17 Predictive Back Gesture preview!
+        val stageFrame = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
                 1f
             )
         }
-        val bodyContainer = LinearLayout(this).apply {
+        val homeScroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        val homeContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(4), dp(16), dp(40))
         }
-        bodyScroll.addView(bodyContainer)
-        mainCol.addView(bodyScroll)
+        homeScroll.addView(homeContainer)
 
-        lateinit var showHomeCategories: (Boolean) -> Unit
+        val detailScroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            setBackgroundColor(uiSurface)
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        val detailContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(4), dp(16), dp(40))
+        }
+        detailScroll.addView(detailContainer)
+
+        stageFrame.addView(homeScroll)
+        stageFrame.addView(detailScroll)
+        mainCol.addView(stageFrame)
+
+        var inSubPage = false
+        lateinit var rebuildHomeMenu: () -> Unit
+
+        fun openSubPageWithTransition(subPageTitle: String, populate: () -> Unit) {
+            inSubPage = true
+            titleTv.text = subPageTitle
+            detailContainer.removeAllViews()
+            populate()
+            detailScroll.scrollTo(0, 0)
+            detailScroll.visibility = View.VISIBLE
+            val w = max(resources.displayMetrics.widthPixels.toFloat(), dpF(320f))
+            detailScroll.translationX = w * 0.24f
+            detailScroll.alpha = 0f
+            detailScroll.scaleX = 0.97f
+            detailScroll.scaleY = 0.97f
+            detailScroll.animate()
+                .translationX(0f)
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .setDuration(280L)
+                .setInterpolator(aosp17SpatialInterpolator)
+                .start()
+
+            homeScroll.animate()
+                .translationX(-w * 0.20f)
+                .scaleX(0.94f)
+                .scaleY(0.94f)
+                .alpha(0.45f)
+                .setDuration(280L)
+                .setInterpolator(aosp17SpatialInterpolator)
+                .start()
+        }
+
+        fun navigateBackToHomeMenu() {
+            if (!inSubPage) {
+                dlg.dismiss()
+                return
+            }
+            inSubPage = false
+            titleTv.text = tr("Настройки", "Settings")
+            rebuildHomeMenu()
+            val w = max(resources.displayMetrics.widthPixels.toFloat(), dpF(320f))
+            homeScroll.animate()
+                .translationX(0f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .alpha(1f)
+                .setDuration(260L)
+                .setInterpolator(aosp17SpatialInterpolator)
+                .start()
+            detailScroll.animate()
+                .translationX(w * 0.85f)
+                .scaleX(0.92f)
+                .scaleY(0.92f)
+                .alpha(0f)
+                .setDuration(250L)
+                .setInterpolator(aosp17SpatialInterpolator)
+                .withEndAction {
+                    if (!inSubPage) {
+                        detailScroll.visibility = View.GONE
+                        detailScroll.translationX = 0f
+                        detailScroll.scaleX = 1f
+                        detailScroll.scaleY = 1f
+                        detailScroll.alpha = 1f
+                    }
+                }
+                .start()
+        }
+
+        backBtn.setOnClickListener {
+            triggerHaptic(0.8f)
+            navigateBackToHomeMenu()
+        }
+
+        // Android 14-17 Predictive Back Animation Callback:
+        // Previews the previous Settings menu underneath while swiping Back in a sub-page,
+        // and returns to the previous Settings menu instead of jumping to the Terminal!
+        val predictiveBackCallback = object : OnBackAnimationCallback {
+            override fun onBackStarted(backEvent: BackEvent) {
+                homeScroll.animate().cancel()
+                detailScroll.animate().cancel()
+                pageRoot.animate().cancel()
+            }
+
+            override fun onBackProgressed(backEvent: BackEvent) {
+                val p = backEvent.progress.coerceIn(0f, 1f)
+                val w = max(resources.displayMetrics.widthPixels.toFloat(), dpF(320f))
+                val dir = if (backEvent.swipeEdge == BackEvent.EDGE_RIGHT) -1f else 1f
+                if (inSubPage) {
+                    // Reveal homeScroll underneath while sliding detailScroll away!
+                    detailScroll.translationX = dir * p * w * 0.68f
+                    val sc = 1f - p * 0.08f
+                    detailScroll.scaleX = sc
+                    detailScroll.scaleY = sc
+                    detailScroll.alpha = 1f - p * 0.25f
+
+                    homeScroll.translationX = -dir * w * 0.20f * (1f - p)
+                    val hSc = 0.94f + 0.06f * p
+                    homeScroll.scaleX = hSc
+                    homeScroll.scaleY = hSc
+                    homeScroll.alpha = 0.45f + 0.55f * p
+                } else {
+                    // On root Settings menu: preview returning to Terminal!
+                    pageRoot.translationX = dir * p * w * 0.22f
+                    val rSc = 1f - p * 0.09f
+                    pageRoot.scaleX = rSc
+                    pageRoot.scaleY = rSc
+                    pageRoot.alpha = 1f - p * 0.35f
+                }
+            }
+
+            override fun onBackCancelled() {
+                val w = max(resources.displayMetrics.widthPixels.toFloat(), dpF(320f))
+                if (inSubPage) {
+                    detailScroll.animate()
+                        .translationX(0f)
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .alpha(1f)
+                        .setDuration(200L)
+                        .setInterpolator(aosp17SpatialInterpolator)
+                        .start()
+                    homeScroll.animate()
+                        .translationX(-w * 0.20f)
+                        .scaleX(0.94f)
+                        .scaleY(0.94f)
+                        .alpha(0.45f)
+                        .setDuration(200L)
+                        .setInterpolator(aosp17SpatialInterpolator)
+                        .start()
+                } else {
+                    pageRoot.animate()
+                        .translationX(0f)
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .alpha(1f)
+                        .setDuration(200L)
+                        .setInterpolator(aosp17SpatialInterpolator)
+                        .start()
+                }
+            }
+
+            override fun onBackInvoked() {
+                triggerHaptic(0.75f)
+                if (inSubPage) {
+                    navigateBackToHomeMenu()
+                } else {
+                    dlg.dismiss()
+                }
+            }
+        }
+
+        dlg.onBackInvokedDispatcher.registerOnBackInvokedCallback(
+            OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+            predictiveBackCallback
+        )
+        dlg.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+                if (inSubPage) {
+                    triggerHaptic(0.75f)
+                    navigateBackToHomeMenu()
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
 
         fun applyNewColorThemeEverywhere() {
             refreshColorSpec2026FromCpp()
             pageRoot.setBackgroundColor(uiSurface)
+            detailScroll.setBackgroundColor(uiSurface)
             dlg.window?.setBackgroundDrawable(ColorDrawable(uiSurface))
-            backBtn.background = pillBg(uiSurfaceContainer, uiOutlineVariant, dp(20))
+            backBtn.background = tonalBg(uiSurfaceContainer, dp(20))
             rebuildTabs()
             rebuildExtraKeysBar()
             terminalSurface.postInvalidateOnAnimation()
         }
 
-        // Sub-page 1: Цвета и стиль палитры (ColorBlendr ColorSpec 2026)
+        // Sub-page 1: Цвета и палитра (System Dynamic Monet by default + ColorBlendr 4 styles)
         fun showColorsAndStylesPage() {
-            titleTv.text = "Цвета и палитра"
-            subtitleHeaderTv.text = "ColorSpec 2026 • Tonal Spot, Neutral, Vibrant, Expressive"
-            backBtn.setOnClickListener {
-                triggerHaptic(0.8f)
-                showHomeCategories(false)
-            }
+            fun populateColorsPage() {
+                detailContainer.removeAllViews()
+                detailContainer.addView(makeSectionLabel(tr("Источник цвета", "Color source")))
 
-            fun rebuildColorBlendrUI(animate: Boolean) {
-                bodyContainer.removeAllViews()
-                if (animate) animateAosp17PageTransition(bodyContainer, forward = true)
+                detailContainer.addView(
+                    makeBakaSuSwitchCard(
+                        icon = M3Icon.PALETTE,
+                        title = tr("Системные цвета (По умолчанию)", "System dynamic colors (Default)"),
+                        subtitle = tr("Использовать системную палитру обоев Android", "Use Android system wallpaper Monet colors"),
+                        checked = useSystemDynamicColor,
+                        isMasterSwitch = true
+                    ) { enabled ->
+                        useSystemDynamicColor = enabled
+                        prefs.edit().putBoolean(KEY_USE_SYSTEM_COLOR, enabled).apply()
+                        applyNewColorThemeEverywhere()
+                        populateColorsPage()
+                    }
+                )
 
-                bodyContainer.addView(makeSectionLabel("Базовый оттенок (Seed Color)"))
-
-                // ColorBlendr Swatch Grid Card (WallColorPreviewCanvas)
-                val swatchCard = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(18), dp(16), dp(18), dp(16))
-                    background = segmentedCardBg(0, 1, uiSurfaceLow, uiOutlineVariant, 24f, 5f)
-                }
-                val (swatchScroll, swatchRow) = makeHorizontalChipRow()
-                for (seedOpt in COLORBLENDR_SEEDS) {
-                    val previewTokens = nativeGenerateColorSpec2026Palette(seedOpt.seedArgb, monetStyleIndex)
-                    val isSel = (colorSeedArgb == seedOpt.seedArgb)
-                    val swatchWrap = LinearLayout(this).apply {
+                if (!useSystemDynamicColor) {
+                    detailContainer.addView(makeSectionLabel(tr("Базовый оттенок", "Seed color")))
+                    val swatchCard = LinearLayout(this).apply {
                         orientation = LinearLayout.VERTICAL
-                        gravity = Gravity.CENTER_HORIZONTAL
-                        setPadding(dp(6), dp(4), dp(6), dp(4))
-                        attachSmoothPressAnimation(this, 0.90f)
-                        setOnClickListener {
-                            triggerHaptic(0.85f)
-                            colorSeedArgb = seedOpt.seedArgb
-                            prefs.edit().putInt(KEY_COLOR_SEED_V2, colorSeedArgb).apply()
-                            applyNewColorThemeEverywhere()
-                            rebuildColorBlendrUI(false)
+                        setPadding(dp(18), dp(16), dp(18), dp(16))
+                        background = segmentedCardBg(0, 1, uiSurfaceLow, 0, 24f, 5f)
+                    }
+                    val (swatchScroll, swatchRow) = makeHorizontalChipRow()
+                    for (seedOpt in COLORBLENDR_SEEDS) {
+                        val previewTokens = nativeGenerateColorSpec2026Palette(seedOpt.seedArgb, monetStyleIndex)
+                        val isSel = (colorSeedArgb == seedOpt.seedArgb)
+                        val swatchWrap = LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            gravity = Gravity.CENTER_HORIZONTAL
+                            setPadding(dp(6), dp(4), dp(6), dp(4))
+                            attachSmoothPressAnimation(this, 0.90f)
+                            setOnClickListener {
+                                triggerHaptic(0.85f)
+                                colorSeedArgb = seedOpt.seedArgb
+                                prefs.edit().putInt(KEY_COLOR_SEED_V2, colorSeedArgb).apply()
+                                applyNewColorThemeEverywhere()
+                                populateColorsPage()
+                            }
                         }
+                        val swatchCanvas = ColorPreviewCanvasView(
+                            this,
+                            tokens = previewTokens,
+                            isSwatchWithCenter = true,
+                            seedCenterColor = seedOpt.seedArgb,
+                            isSwatchSelected = isSel
+                        ).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(50), dp(50))
+                        }
+                        swatchWrap.addView(swatchCanvas)
+                        swatchRow.addView(swatchWrap)
                     }
-                    val swatchCanvas = ColorPreviewCanvasView(
-                        this,
-                        tokens = previewTokens,
-                        isSwatchWithCenter = true,
-                        seedCenterColor = seedOpt.seedArgb,
-                        isSwatchSelected = isSel
-                    ).apply {
-                        layoutParams = LinearLayout.LayoutParams(dp(50), dp(50))
-                    }
-                    swatchWrap.addView(swatchCanvas)
-                    swatchRow.addView(swatchWrap)
+                    swatchCard.addView(swatchScroll)
+                    detailContainer.addView(swatchCard)
                 }
-                swatchCard.addView(swatchScroll)
-                bodyContainer.addView(swatchCard)
 
-                // ColorBlendr StylePreviewCard List for the 4 Palette Styles (ColorSpec 2026)
-                bodyContainer.addView(makeSectionLabel("Palette Style (ColorSpec 2026)"))
+                detailContainer.addView(makeSectionLabel("Palette style"))
+                val effectiveSeed = if (useSystemDynamicColor) getSystemDynamicSeedColor() else colorSeedArgb
+                val enDescriptions = arrayOf(
+                    "Balanced palette with soft tonal transitions",
+                    "Calm minimalist scheme with a subtle tint",
+                    "Energetic palette with high-chroma accents",
+                    "Bold hue-shifted triad with deep contrast"
+                )
                 for ((idx, styleOpt) in MONET_STYLES_2026.withIndex()) {
                     val isSel = (monetStyleIndex == styleOpt.index)
-                    val styleTokens = nativeGenerateColorSpec2026Palette(colorSeedArgb, styleOpt.index)
+                    val styleTokens = nativeGenerateColorSpec2026Palette(effectiveSeed, styleOpt.index)
 
                     val styleCard = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(18), dp(15), dp(18), dp(15))
                         val fillCol = if (isSel) styleTokens[2] else uiSurfaceLow
-                        val strokeCol = if (isSel) styleTokens[0] else uiOutlineVariant
                         background = segmentedCardBg(
                             idx,
                             MONET_STYLES_2026.size,
                             fillCol,
-                            strokeCol,
+                            0,
                             24f,
                             5f
                         )
@@ -1892,7 +2101,7 @@ class TermuxActivity : Activity() {
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
                         ).apply {
-                            bottomMargin = if (idx < MONET_STYLES_2026.lastIndex) dp(3) else dp(8)
+                            bottomMargin = if (idx < MONET_STYLES_2026.lastIndex) dp(2) else dp(8)
                         }
                         attachSmoothPressAnimation(this, 0.98f)
                         setOnClickListener {
@@ -1901,15 +2110,14 @@ class TermuxActivity : Activity() {
                                 monetStyleIndex = styleOpt.index
                                 prefs.edit().putInt(KEY_MONET_STYLE_V2, monetStyleIndex).apply()
                                 applyNewColorThemeEverywhere()
-                                rebuildColorBlendrUI(false)
+                                populateColorsPage()
                             }
                         }
                     }
 
-                    // 58dp ColorPreviewCanvas (just like ColorBlendr StylePreviewCard.kt!)
                     styleCard.addView(
                         ColorPreviewCanvasView(this, tokens = styleTokens).apply {
-                            layoutParams = LinearLayout.LayoutParams(dp(58), dp(58)).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(56), dp(56)).apply {
                                 marginEnd = dp(16)
                             }
                         }
@@ -1919,58 +2127,32 @@ class TermuxActivity : Activity() {
                         orientation = LinearLayout.VERTICAL
                         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                     }
-                    val titleRow = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                    }
-                    titleRow.addView(TextView(this).apply {
+                    textCol.addView(TextView(this).apply {
                         text = styleOpt.title
                         setTextColor(if (isSel) styleTokens[3] else COLOR_TEXT_BRIGHT)
                         typeface = Typeface.DEFAULT_BOLD
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
                     })
-                    titleRow.addView(TextView(this).apply {
-                        text = "2026"
-                        setTextColor(styleTokens[0])
-                        typeface = Typeface.DEFAULT_BOLD
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-                        background = pillBg(styleTokens[2], styleTokens[0], dp(6))
-                        setPadding(dp(6), dp(1), dp(6), dp(1))
-                        layoutParams = LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ).apply {
-                            marginStart = dp(8)
-                        }
-                    })
-                    textCol.addView(titleRow)
-
                     textCol.addView(TextView(this).apply {
-                        text = styleOpt.description
+                        text = tr(styleOpt.description, enDescriptions[idx])
                         setTextColor(if (isSel) withAlpha(styleTokens[3], 205) else COLOR_TEXT_DIM)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         setPadding(0, dp(3), 0, 0)
                     })
                     styleCard.addView(textCol)
-                    bodyContainer.addView(styleCard)
+                    detailContainer.addView(styleCard)
                 }
             }
 
-            rebuildColorBlendrUI(true)
+            openSubPageWithTransition(tr("Цвета и палитра", "Colors & palette")) {
+                populateColorsPage()
+            }
         }
 
-        // Sub-page 2: Шрифт и отображение терминала
+        // Sub-page 2: Шрифт, язык и терминал (System Font + Expanded Terminal Settings + Full EN/RU)
         fun showFontAndDisplayPage() {
-            titleTv.text = "Шрифт и терминал"
-            subtitleHeaderTv.text = "Гарнитура, лигатуры и масштаб текста"
-            backBtn.setOnClickListener {
-                triggerHaptic(0.8f)
-                showHomeCategories(false)
-            }
-
-            fun rebuildFontPage(animate: Boolean) {
-                bodyContainer.removeAllViews()
-                if (animate) animateAosp17PageTransition(bodyContainer, forward = true)
+            fun populateFontPage() {
+                detailContainer.removeAllViews()
 
                 val discoveredRaw = nativeDiscoverCustomFonts()
                 val discoveredFonts = ArrayList<Pair<String, String>>()
@@ -1981,48 +2163,49 @@ class TermuxActivity : Activity() {
                 }
 
                 val fontTitles = mutableListOf(
-                    "JetBrains Mono Regular (400)",
-                    "JetBrains Mono Light (300)",
-                    "JetBrains Mono Medium (500)",
-                    "JetBrains Mono SemiBold (600)",
-                    "JetBrains Mono Bold (700)",
-                    "Android System Monospace",
-                    "Serif Monospace"
+                    tr("Системный шрифт устройства", "System UI font"),
+                    tr("Системный моноширинный", "System Monospace"),
+                    "JetBrains Mono Regular",
+                    "JetBrains Mono Light",
+                    "JetBrains Mono Medium",
+                    "JetBrains Mono SemiBold",
+                    "JetBrains Mono Bold"
                 )
                 val fontDescs = mutableListOf<String?>(
-                    "Встроенный шрифт разработчика по умолчанию",
-                    "Тонкое начертание высокой плотности",
-                    "Средняя насыщенность (отличная читаемость на AMOLED)",
-                    "Полужирное контрастное начертание",
-                    "Жирное начертание",
-                    "Системный моноширинный шрифт AOSP (Roboto Mono)",
-                    "Классический моноширинный шрифт с засечками"
+                    tr("Шрифт вашей системы Android по умолчанию", "Default Android system-wide font"),
+                    tr("Встроенный системный моноширинный шрифт", "Built-in Android system monospace font"),
+                    tr("Классическое начертание (400)", "Standard developer weight (400)"),
+                    tr("Тонкое начертание (300)", "Light weight (300)"),
+                    tr("Средняя насыщенность (500)", "Medium weight (500)"),
+                    tr("Полужирное начертание (600)", "SemiBold weight (600)"),
+                    tr("Жирное начертание (700)", "Bold weight (700)")
                 )
                 for ((fName, fPath) in discoveredFonts) {
-                    fontTitles.add("Файл: $fName")
+                    fontTitles.add(tr("Файл: $fName", "File: $fName"))
                     fontDescs.add(fPath)
                 }
 
-                val curPreset = prefs.getInt(KEY_FONT_PRESET, 0)
+                val curPreset = prefs.getInt(KEY_FONT_PRESET, 2)
                 val curCustomPath = prefs.getString(KEY_CUSTOM_FONT_PATH, "") ?: ""
                 val selectedIdx = if (curPreset == 7 && curCustomPath.isNotEmpty()) {
                     val found = discoveredFonts.indexOfFirst { it.second == curCustomPath }
-                    if (found >= 0) 7 + found else 0
+                    if (found >= 0) 7 + found else 2
                 } else {
                     curPreset.coerceIn(0, 6)
                 }
 
-                bodyContainer.addView(makeSectionLabel("Типографика терминала"))
-                bodyContainer.addView(
+                detailContainer.addView(makeSectionLabel(tr("Шрифт и язык", "Font & language")))
+
+                detailContainer.addView(
                     makeBakaSuChooseCard(
                         icon = M3Icon.FONT,
-                        title = "Шрифт терминала",
-                        subtitle = "Выберите встроенное начертание или .ttf/.otf из памяти",
+                        title = tr("Шрифт терминала", "Terminal font"),
+                        subtitle = tr("Системный шрифт Android, JetBrains Mono или свой .ttf/.otf", "System font, JetBrains Mono, or custom .ttf/.otf"),
                         items = fontTitles,
                         descriptions = fontDescs,
                         selectedIndex = selectedIdx,
                         index = 0,
-                        total = 2
+                        total = 3
                     ) { chosen ->
                         if (chosen <= 6) {
                             prefs.edit()
@@ -2037,35 +2220,58 @@ class TermuxActivity : Activity() {
                                 .apply()
                         }
                         terminalSurface.reloadTerminalFont()
-                        rebuildFontPage(false)
+                        populateFontPage()
                     }
                 )
 
                 val ligsOn = prefs.getBoolean(KEY_FONT_LIGATURES, false)
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeBakaSuSwitchCard(
                         icon = M3Icon.TERMINAL,
-                        title = "Лигатуры шрифта (liga / calt)",
-                        subtitle = "Объединять операторы !=, ->, =>, :: в единые глифы",
+                        title = tr("Лигатуры шрифта", "Font ligatures"),
+                        subtitle = tr("Объединять операторы !=, ->, =>, :: в единые символы", "Combine operators !=, ->, =>, :: into single glyphs"),
                         checked = ligsOn,
                         index = 1,
-                        total = 2
+                        total = 3
                     ) { enabled ->
                         prefs.edit().putBoolean(KEY_FONT_LIGATURES, enabled).apply()
                         terminalSurface.reloadTerminalFont()
                     }
                 )
 
+                detailContainer.addView(
+                    makeBakaSuChooseCard(
+                        icon = M3Icon.HUB_GRID,
+                        title = tr("Язык интерфейса", "App language"),
+                        subtitle = tr("Язык всех меню, диалогов и уведомлений", "Language of all menus, dialogs, and notifications"),
+                        items = listOf(
+                            tr("Системный (Авто)", "System default"),
+                            "Русский",
+                            "English"
+                        ),
+                        selectedIndex = appLangPref.coerceIn(0, 2),
+                        index = 2,
+                        total = 3
+                    ) { chosen ->
+                        appLangPref = chosen
+                        prefs.edit().putInt(KEY_APP_LANG, chosen).apply()
+                        titleTv.text = tr("Шрифт и терминал", "Font & terminal")
+                        startForegroundKeepAlive()
+                        populateFontPage()
+                    }
+                )
+
+                detailContainer.addView(makeSectionLabel(tr("Масштаб и интервалы", "Scale & spacing")))
+
                 val curScalePct = (terminalSurface.fontScale * 100f).roundToInt().coerceIn(50, 220)
-                bodyContainer.addView(makeSectionLabel("Размер текста"))
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeSeekBarCard(
                         icon = M3Icon.SLIDERS,
-                        labelPrefix = "Масштаб шрифта терминала",
+                        labelPrefix = tr("Масштаб шрифта", "Font scale"),
                         initialProgress = (curScalePct - 50) / 5,
                         maxProgress = 34,
                         index = 0,
-                        total = 1,
+                        total = 2,
                         formatValue = { "${50 + it * 5}%" },
                         onChanged = { p ->
                             val newScale = (50 + p * 5) / 100f
@@ -2074,40 +2280,105 @@ class TermuxActivity : Activity() {
                         }
                     )
                 )
+
+                val curLineSpacing = prefs.getInt(KEY_LINE_SPACING_PCT, 100).coerceIn(85, 135)
+                detailContainer.addView(
+                    makeSeekBarCard(
+                        icon = M3Icon.CURSOR,
+                        labelPrefix = tr("Межстрочный интервал", "Line height"),
+                        initialProgress = curLineSpacing - 85,
+                        maxProgress = 50,
+                        index = 1,
+                        total = 2,
+                        formatValue = { "${85 + it}%" },
+                        onChanged = { p ->
+                            val pct = (85 + p).coerceIn(85, 135)
+                            prefs.edit().putInt(KEY_LINE_SPACING_PCT, pct).apply()
+                            terminalSurface.lineSpacingPct = pct
+                            terminalSurface.reloadTerminalFont()
+                        }
+                    )
+                )
+
+                detailContainer.addView(makeSectionLabel(tr("Поведение терминала", "Terminal behavior")))
+
+                val sbOptions = listOf(2000, 4000, 10000, 25000)
+                val curSb = prefs.getInt(KEY_SCROLLBACK_LINES, 4000)
+                val sbIdx = sbOptions.indexOf(curSb).let { if (it >= 0) it else 1 }
+                detailContainer.addView(
+                    makeBakaSuChooseCard(
+                        icon = M3Icon.STORAGE,
+                        title = tr("Буфер прокрутки (Scrollback)", "Scrollback buffer"),
+                        subtitle = tr("Количество сохраняемых строк истории вывода", "Number of history lines kept in memory"),
+                        items = sbOptions.map { tr("$it строк", "$it lines") },
+                        selectedIndex = sbIdx,
+                        index = 0,
+                        total = 3
+                    ) { chosen ->
+                        val lines = sbOptions[chosen]
+                        prefs.edit().putInt(KEY_SCROLLBACK_LINES, lines).apply()
+                        nativeSetMaxScrollback(lines)
+                        populateFontPage()
+                    }
+                )
+
+                detailContainer.addView(
+                    makeBakaSuSwitchCard(
+                        icon = M3Icon.COPY,
+                        title = tr("Автокопирование при выделении", "Copy on select"),
+                        subtitle = tr("Автоматически копировать выделенный текст в буфер обмена", "Automatically copy selected text to clipboard"),
+                        checked = copyOnSelect,
+                        index = 1,
+                        total = 3
+                    ) { enabled ->
+                        copyOnSelect = enabled
+                        prefs.edit().putBoolean(KEY_COPY_ON_SELECT, enabled).apply()
+                    }
+                )
+
+                detailContainer.addView(
+                    makeBakaSuSwitchCard(
+                        icon = M3Icon.EYE,
+                        title = tr("Не выключать экран", "Keep screen on"),
+                        subtitle = tr("Удерживать подсветку экрана во время работы терминала", "Prevent screen from sleeping while terminal is active"),
+                        checked = keepScreenOnPref,
+                        index = 2,
+                        total = 3
+                    ) { enabled ->
+                        keepScreenOnPref = enabled
+                        prefs.edit().putBoolean(KEY_KEEP_SCREEN_ON, enabled).apply()
+                        if (enabled) {
+                            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        } else {
+                            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        }
+                    }
+                )
             }
 
-            rebuildFontPage(true)
+            openSubPageWithTransition(tr("Шрифт и терминал", "Font & terminal")) {
+                populateFontPage()
+            }
         }
 
         // Sub-page 3: Курсор и анимации (VS Code)
         fun showCursorCategory() {
-            titleTv.text = "Курсор и анимации"
-            subtitleHeaderTv.text = "Стиль каретки, затухание и плавное скольжение VS Code"
-            backBtn.setOnClickListener {
-                triggerHaptic(0.8f)
-                showHomeCategories(false)
-            }
+            fun populateCursorPage() {
+                detailContainer.removeAllViews()
+                detailContainer.addView(makeSectionLabel(tr("Поведение каретки", "Caret behavior")))
 
-            fun rebuildCursorCategoryUI(animate: Boolean) {
-                bodyContainer.removeAllViews()
-                if (animate) animateAosp17PageTransition(bodyContainer, forward = true)
-
-                bodyContainer.addView(makeSectionLabel("Поведение каретки"))
-
-                val shapeNames = listOf("Блок (Скруглённый)", "Нижняя линия (Underline)", "Вертикальный луч (Bar)", "Полый контур (Outline)")
-                val shapeDescs = listOf(
-                    "Классический блок с настраиваемым радиусом скругления",
-                    "Горизонтальная линия под активным символом",
-                    "Тонкая вертикальная каретка как в редакторах кода",
-                    "Незаполненный скруглённый контур"
+                val shapeNames = listOf(
+                    tr("Блок (Скруглённый)", "Block (Rounded)"),
+                    tr("Нижняя линия (Underline)", "Underline"),
+                    tr("Вертикальный луч (Bar)", "Vertical Bar"),
+                    tr("Полый контур (Outline)", "Outline Block")
                 )
-                bodyContainer.addView(
+                body@ detailContainer.addView(
                     makeBakaSuChooseCard(
                         icon = M3Icon.CURSOR,
-                        title = "Форма курсора",
-                        subtitle = "Геометрия отображения каретки в терминале",
+                        title = tr("Форма курсора", "Cursor shape"),
+                        subtitle = tr("Геометрия отображения каретки в терминале", "Caret geometry in terminal"),
                         items = shapeNames,
-                        descriptions = shapeDescs,
                         selectedIndex = terminalSurface.cursorShapePref.coerceIn(0, 3),
                         index = 0,
                         total = 3
@@ -2116,31 +2387,23 @@ class TermuxActivity : Activity() {
                         prefs.edit().putInt(KEY_CURSOR_SHAPE, chosen).apply()
                         nativeSetDefaultCursorShape(min(2, chosen))
                         terminalSurface.resetScrollAndBlink()
-                        rebuildCursorCategoryUI(false)
+                        populateCursorPage()
                     }
                 )
 
                 val blinkNames = listOf(
-                    "Smooth (Плавное затухание VS Code)",
-                    "Phase (Косинусная волна VS Code)",
-                    "Expand (Вертикальное раскрытие VS Code)",
-                    "Blink (Классическое мигание)",
-                    "Solid (Постоянный без мигания)"
+                    "Smooth (VS Code)",
+                    "Phase (VS Code)",
+                    "Expand (VS Code)",
+                    "Blink",
+                    "Solid"
                 )
-                val blinkDescs = listOf(
-                    "Симметричное плавное затухание с удержанием на пиках",
-                    "Непрерывная мягкая пульсация яркости",
-                    "Плавное сжатие и раскрытие каретки по вертикали",
-                    "Чёткое дискретное переключение",
-                    "Статичный курсор без пульсации"
-                )
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeBakaSuChooseCard(
                         icon = M3Icon.SLIDERS,
-                        title = "Анимация мигания (VS Code)",
-                        subtitle = "Кривая затухания и пульсации каретки",
+                        title = tr("Анимация мигания", "Cursor blinking style"),
+                        subtitle = tr("Кривая затухания и пульсации каретки", "Caret fade and pulse curve"),
                         items = blinkNames,
-                        descriptions = blinkDescs,
                         selectedIndex = terminalSurface.cursorBlinkStyle.coerceIn(0, 4),
                         index = 1,
                         total = 3
@@ -2148,15 +2411,15 @@ class TermuxActivity : Activity() {
                         terminalSurface.cursorBlinkStyle = chosen
                         prefs.edit().putInt(KEY_CURSOR_BLINK_STYLE, chosen).apply()
                         terminalSurface.resetScrollAndBlink()
-                        rebuildCursorCategoryUI(false)
+                        populateCursorPage()
                     }
                 )
 
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeBakaSuSwitchCard(
                         icon = M3Icon.PING,
-                        title = "Плавное скольжение (Smooth Caret)",
-                        subtitle = "Пружинная интерполяция движения каретки как в VS Code",
+                        title = tr("Плавное скольжение (Smooth Caret)", "Smooth caret animation"),
+                        subtitle = tr("Пружинная интерполяция движения каретки как в VS Code", "Spring interpolation between characters like VS Code"),
                         checked = terminalSurface.cursorSmoothMove,
                         index = 2,
                         total = 3
@@ -2166,12 +2429,12 @@ class TermuxActivity : Activity() {
                     }
                 )
 
-                bodyContainer.addView(makeSectionLabel("Точная калибровка (Material 3 Sliders)"))
+                detailContainer.addView(makeSectionLabel(tr("Параметры анимации", "Animation parameters")))
 
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeSeekBarCard(
                         icon = M3Icon.EYE,
-                        labelPrefix = "Непрозрачность курсора",
+                        labelPrefix = tr("Непрозрачность курсора", "Cursor opacity"),
                         initialProgress = terminalSurface.cursorAlphaPct - 15,
                         maxProgress = 85,
                         index = 0,
@@ -2186,10 +2449,10 @@ class TermuxActivity : Activity() {
                     )
                 )
 
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeSeekBarCard(
                         icon = M3Icon.CURSOR,
-                        labelPrefix = "Радиус скругления углов",
+                        labelPrefix = tr("Радиус скругления углов", "Corner radius"),
                         initialProgress = terminalSurface.cursorRadiusTenths,
                         maxProgress = 60,
                         index = 1,
@@ -2203,15 +2466,15 @@ class TermuxActivity : Activity() {
                     )
                 )
 
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeSeekBarCard(
                         icon = M3Icon.SLIDERS,
-                        labelPrefix = "Скорость затухания",
+                        labelPrefix = tr("Скорость затухания", "Fade duration"),
                         initialProgress = (terminalSurface.cursorFadeMs - 200) / 10,
                         maxProgress = 100,
                         index = 2,
                         total = 4,
-                        formatValue = { "${200 + it * 10} мс" },
+                        formatValue = { "${200 + it * 10} ms" },
                         onChanged = { p ->
                             val ms = 200 + p * 10
                             terminalSurface.cursorFadeMs = ms
@@ -2221,15 +2484,15 @@ class TermuxActivity : Activity() {
                     )
                 )
 
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeSeekBarCard(
                         icon = M3Icon.PING,
-                        labelPrefix = "Длительность скольжения",
+                        labelPrefix = tr("Длительность скольжения", "Glide duration"),
                         initialProgress = (terminalSurface.cursorGlideMs - 30) / 5,
                         maxProgress = 38,
                         index = 3,
                         total = 4,
-                        formatValue = { "${30 + it * 5} мс" },
+                        formatValue = { "${30 + it * 5} ms" },
                         onChanged = { p ->
                             val ms = 30 + p * 5
                             terminalSurface.cursorGlideMs = ms
@@ -2239,18 +2502,13 @@ class TermuxActivity : Activity() {
                 )
             }
 
-            rebuildCursorCategoryUI(true)
+            openSubPageWithTransition(tr("Курсор и анимации", "Cursor & animations")) {
+                populateCursorPage()
+            }
         }
 
         // Sub-page 4: Клавиатура и бинды
         fun showKeyboardCategory() {
-            titleTv.text = "Клавиатура и бинды"
-            subtitleHeaderTv.text = "Настройка рядов нижней панели и собственных макросов"
-            backBtn.setOnClickListener {
-                triggerHaptic(0.8f)
-                showHomeCategories(false)
-            }
-
             val currentSpec = prefs.getString(KEY_EXTRA_KEYS_SPEC, DEFAULT_EXTRA_KEYS_SPEC)
                 ?: DEFAULT_EXTRA_KEYS_SPEC
             val lines = currentSpec.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
@@ -2279,10 +2537,8 @@ class TermuxActivity : Activity() {
                 terminalSurface.post { terminalSurface.syncSize() }
             }
 
-            fun rebuildKeyboardUI(animate: Boolean) {
-                bodyContainer.removeAllViews()
-                if (animate) animateAosp17PageTransition(bodyContainer, forward = true)
-
+            fun populateKeyboardPage() {
+                detailContainer.removeAllViews()
                 val targetList = if (activeEditRow == 0) row1Tokens else row2Tokens
 
                 fun loadPreset(specStr: String) {
@@ -2292,7 +2548,7 @@ class TermuxActivity : Activity() {
                     if (ls.isNotEmpty()) row1Tokens.addAll(ls[0].split("|"))
                     if (ls.size > 1) row2Tokens.addAll(ls[1].split("|"))
                     persistRows()
-                    rebuildKeyboardUI(false)
+                    populateKeyboardPage()
                 }
 
                 val curPresetIdx = when {
@@ -2302,23 +2558,17 @@ class TermuxActivity : Activity() {
                     else -> 0
                 }
 
-                bodyContainer.addView(makeSectionLabel("Раскладка панели"))
-                bodyContainer.addView(
+                detailContainer.addView(makeSectionLabel(tr("Раскладка панели", "Extra keys layout")))
+                detailContainer.addView(
                     makeBakaSuChooseCard(
                         icon = M3Icon.KEYBOARD,
-                        title = "Готовый профиль раскладки",
-                        subtitle = "Выберите шаблон нижней панели клавиш",
+                        title = tr("Готовый профиль раскладки", "Layout preset"),
+                        subtitle = tr("Выберите шаблон нижней панели клавиш", "Choose extra keys bar template"),
                         items = listOf(
-                            "1 ряд (Компактная)",
-                            "2 ряда (Расширенная)",
-                            "Vim / Tmux профиль",
-                            "Скрыть нижнюю панель"
-                        ),
-                        descriptions = listOf(
-                            "ESC, TAB, CTRL, ALT, дефис, слэш и стрелки",
-                            "Двухрядная панель с HOME, END, PGUP, PGDN",
-                            "Оптимизирована для навигации h/j/k/l и сплитов",
-                            "Полностью убрать дополнительную панель клавиш"
+                            tr("1 ряд (Компактная)", "1 row (Compact)"),
+                            tr("2 ряда (Расширенная)", "2 rows (Extended)"),
+                            "Vim / Tmux",
+                            tr("Скрыть нижнюю панель", "Hide extra keys bar")
                         ),
                         selectedIndex = curPresetIdx,
                         index = 0,
@@ -2333,26 +2583,29 @@ class TermuxActivity : Activity() {
                     }
                 )
 
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeBakaSuChooseCard(
                         icon = M3Icon.SLIDERS,
-                        title = "Редактируемый ряд",
-                        subtitle = "Выберите ряд для добавления или удаления кнопок",
-                        items = listOf("Ряд 1 (${row1Tokens.size} кл.)", "Ряд 2 (${row2Tokens.size} кл.)"),
+                        title = tr("Редактируемый ряд", "Edited row"),
+                        subtitle = tr("Выберите ряд для настройки кнопок", "Select row to customize"),
+                        items = listOf(
+                            tr("Ряд 1 (${row1Tokens.size})", "Row 1 (${row1Tokens.size})"),
+                            tr("Ряд 2 (${row2Tokens.size})", "Row 2 (${row2Tokens.size})")
+                        ),
                         selectedIndex = activeEditRow,
                         index = 1,
                         total = 2
                     ) { chosen ->
                         activeEditRow = chosen
-                        rebuildKeyboardUI(false)
+                        populateKeyboardPage()
                     }
                 )
 
-                bodyContainer.addView(makeSectionLabel("Кнопки ряда ${activeEditRow + 1}"))
+                detailContainer.addView(makeSectionLabel(tr("Кнопки ряда ${activeEditRow + 1}", "Row ${activeEditRow + 1} buttons")))
                 val activeKeysCard = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(dp(18), dp(14), dp(18), dp(14))
-                    background = segmentedCardBg(0, 2, uiSurfaceLow, uiOutlineVariant, 22f, 5f)
+                    background = segmentedCardBg(0, 2, uiSurfaceLow, 0, 22f, 5f)
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
@@ -2363,7 +2616,7 @@ class TermuxActivity : Activity() {
                 val (curScroll, curRow) = makeHorizontalChipRow()
                 if (targetList.isEmpty()) {
                     curRow.addView(TextView(this).apply {
-                        text = "Ряд пуст"
+                        text = tr("Ряд пуст", "Row is empty")
                         setTextColor(COLOR_TEXT_DIM)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                         setPadding(dp(4), dp(4), dp(4), dp(4))
@@ -2374,7 +2627,7 @@ class TermuxActivity : Activity() {
                         curRow.addView(makeExpressiveChip("$disp ✕", true) {
                             targetList.removeAt(idx)
                             persistRows()
-                            rebuildKeyboardUI(false)
+                            populateKeyboardPage()
                         })
                     }
                 }
@@ -2384,32 +2637,32 @@ class TermuxActivity : Activity() {
                     orientation = LinearLayout.HORIZONTAL
                     setPadding(0, dp(8), 0, 0)
                 }
-                actActionsRow.addView(makeExpressiveChip("+ Своя клавиша / макрос", true) {
+                actActionsRow.addView(makeExpressiveChip(tr("+ Своя клавиша", "+ Custom key"), true) {
                     val (bindDlg, bindSheet) = createExpressiveDialog(390)
                     bindSheet.addView(TextView(this).apply {
-                        text = "Привязка клавиши или команды"
+                        text = tr("Привязка клавиши или команды", "Bind key or command")
                         setTextColor(COLOR_TEXT_BRIGHT)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
                         typeface = Typeface.DEFAULT_BOLD
                         setPadding(0, 0, 0, dp(10))
                     })
                     val lblEdit = EditText(this).apply {
-                        hint = "Надпись на кнопке (напр. C-c или top)"
+                        hint = tr("Надпись (напр. C-c или top)", "Label (e.g. C-c or top)")
                         setHintTextColor(COLOR_TEXT_DIM)
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                        background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(14))
+                        background = tonalBg(uiSurfaceLow, dp(14))
                         setPadding(dp(14), dp(10), dp(14), dp(10))
                         setSingleLine(true)
                     }
                     val actEdit = EditText(this).apply {
-                        hint = "Действие (CTRL+C, ALT+B, htop\\n)"
+                        hint = tr("Действие (CTRL+C, ALT+B, htop\\n)", "Action (CTRL+C, ALT+B, htop\\n)")
                         setHintTextColor(COLOR_TEXT_DIM)
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                        background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(14))
+                        background = tonalBg(uiSurfaceLow, dp(14))
                         setPadding(dp(14), dp(10), dp(14), dp(10))
                         setSingleLine(true)
                         layoutParams = LinearLayout.LayoutParams(
@@ -2427,8 +2680,8 @@ class TermuxActivity : Activity() {
                         gravity = Gravity.END
                         setPadding(0, dp(14), 0, 0)
                     }
-                    btnBar.addView(makeExpressiveChip("Отмена", false) { bindDlg.dismiss() })
-                    btnBar.addView(makeExpressiveChip("Добавить", true) {
+                    btnBar.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { bindDlg.dismiss() })
+                    btnBar.addView(makeExpressiveChip(tr("Добавить", "Add"), true) {
                         val l = lblEdit.text.toString().trim().replace("|", "")
                         val a = actEdit.text.toString().trim().replace("|", "")
                         if (l.isNotEmpty() || a.isNotEmpty()) {
@@ -2439,28 +2692,28 @@ class TermuxActivity : Activity() {
                             }
                             targetList.add(tok)
                             persistRows()
-                            rebuildKeyboardUI(false)
+                            populateKeyboardPage()
                         }
                         bindDlg.dismiss()
                     })
                     bindSheet.addView(btnBar)
                     bindDlg.show()
                 })
-                actActionsRow.addView(makeExpressiveChip("Очистить ряд", false) {
+                actActionsRow.addView(makeExpressiveChip(tr("Очистить", "Clear row"), false) {
                     targetList.clear()
                     persistRows()
-                    rebuildKeyboardUI(false)
+                    populateKeyboardPage()
                 })
                 activeKeysCard.addView(actActionsRow)
-                bodyContainer.addView(activeKeysCard)
+                detailContainer.addView(activeKeysCard)
 
                 val catalogCard = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(dp(18), dp(14), dp(18), dp(14))
-                    background = segmentedCardBg(1, 2, uiSurfaceLow, uiOutlineVariant, 22f, 5f)
+                    background = segmentedCardBg(1, 2, uiSurfaceLow, 0, 22f, 5f)
                 }
                 catalogCard.addView(TextView(this).apply {
-                    text = "Быстрое добавление клавиш"
+                    text = tr("Быстрое добавление клавиш", "Quick add keys")
                     setTextColor(COLOR_TEXT_BRIGHT)
                     typeface = Typeface.DEFAULT_BOLD
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
@@ -2479,42 +2732,35 @@ class TermuxActivity : Activity() {
                     pRow.addView(makeExpressiveChip("+ $d", false) {
                         targetList.add(k)
                         persistRows()
-                        rebuildKeyboardUI(false)
+                        populateKeyboardPage()
                     })
                 }
                 catalogCard.addView(pScroll)
-                bodyContainer.addView(catalogCard)
+                detailContainer.addView(catalogCard)
             }
 
-            rebuildKeyboardUI(true)
+            openSubPageWithTransition(tr("Клавиатура и бинды", "Keyboard & bindings")) {
+                populateKeyboardPage()
+            }
         }
 
         // Sub-page 5: Тактильный отклик (Вибрация)
         fun showHapticsCategory() {
-            titleTv.text = "Тактильный отклик"
-            subtitleHeaderTv.text = "Точная настройка мощности и длительности виброимпульса"
-            backBtn.setOnClickListener {
-                triggerHaptic(0.8f)
-                showHomeCategories(false)
-            }
+            fun populateHapticsPage() {
+                detailContainer.removeAllViews()
 
-            fun rebuildHapticUI(animate: Boolean) {
-                bodyContainer.removeAllViews()
-                if (animate) animateAosp17PageTransition(bodyContainer, forward = true)
-
-                // ColorBlendr-style Master Switch Pill at top of Haptics page
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeBakaSuSwitchCard(
                         icon = M3Icon.VIBRATION,
-                        title = "Тактильный отклик",
-                        subtitle = if (hapticEnabled) "Вибрация активна во всём интерфейсе" else "Вибрация отключена",
+                        title = tr("Тактильный отклик", "Haptic feedback"),
+                        subtitle = if (hapticEnabled) tr("Вибрация активна", "Haptics enabled") else tr("Вибрация отключена", "Haptics disabled"),
                         checked = hapticEnabled,
                         isMasterSwitch = true
                     ) { next ->
                         hapticEnabled = next
                         prefs.edit().putBoolean(KEY_HAPTIC_ENABLED, next).apply()
                         if (next) triggerHaptic(1.0f)
-                        rebuildHapticUI(false)
+                        populateHapticsPage()
                     }
                 )
 
@@ -2524,16 +2770,16 @@ class TermuxActivity : Activity() {
                     hapticDurationMs == 14 && hapticAmplitude >= 220 -> 2
                     else -> 3
                 }
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeBakaSuChooseCard(
                         icon = M3Icon.PING,
-                        title = "Профиль тактильного отклика",
-                        subtitle = "Быстрый выбор характера виброотклика",
+                        title = tr("Профиль вибрации", "Haptic profile"),
+                        subtitle = tr("Характер тактильного отклика", "Tactile response preset"),
                         items = listOf(
-                            "Мягкий (6 мс • 30%)",
-                            "Упругий (8 мс • 55%)",
-                            "Мощный (14 мс • 90%)",
-                            "Пользовательский (${hapticDurationMs} мс • ${(hapticAmplitude * 100f / 255f).roundToInt()}%)"
+                            tr("Мягкий (6 мс • 30%)", "Soft (6 ms • 30%)"),
+                            tr("Упругий (8 мс • 55%)", "Crisp (8 ms • 55%)"),
+                            tr("Мощный (14 мс • 90%)", "Strong (14 ms • 90%)"),
+                            tr("Пользовательский", "Custom")
                         ),
                         selectedIndex = curProfIdx,
                         index = 0,
@@ -2562,19 +2808,19 @@ class TermuxActivity : Activity() {
                             .putInt(KEY_HAPTIC_AMPLITUDE, hapticAmplitude)
                             .apply()
                         triggerHaptic(1.0f)
-                        rebuildHapticUI(false)
+                        populateHapticsPage()
                     }
                 )
 
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeSeekBarCard(
                         icon = M3Icon.VIBRATION,
-                        labelPrefix = "Мощность импульса",
+                        labelPrefix = tr("Мощность импульса", "Impulse strength"),
                         initialProgress = hapticAmplitude - 1,
                         maxProgress = 254,
                         index = 1,
                         total = 3,
-                        formatValue = { "${((it + 1) * 100f / 255f).roundToInt()}% (${it + 1})" },
+                        formatValue = { "${((it + 1) * 100f / 255f).roundToInt()}%" },
                         onChanged = { p ->
                             hapticAmplitude = (p + 1).coerceIn(1, 255)
                             prefs.edit().putInt(KEY_HAPTIC_AMPLITUDE, hapticAmplitude).apply()
@@ -2582,15 +2828,15 @@ class TermuxActivity : Activity() {
                     )
                 )
 
-                bodyContainer.addView(
+                detailContainer.addView(
                     makeSeekBarCard(
                         icon = M3Icon.SLIDERS,
-                        labelPrefix = "Длительность импульса",
+                        labelPrefix = tr("Длительность импульса", "Impulse duration"),
                         initialProgress = hapticDurationMs - 1,
                         maxProgress = 39,
                         index = 2,
                         total = 3,
-                        formatValue = { "${it + 1} мс" },
+                        formatValue = { "${it + 1} ms" },
                         onChanged = { p ->
                             hapticDurationMs = (p + 1).coerceIn(1, 40)
                             prefs.edit().putInt(KEY_HAPTIC_DURATION_MS, hapticDurationMs).apply()
@@ -2599,13 +2845,15 @@ class TermuxActivity : Activity() {
                 )
             }
 
-            rebuildHapticUI(true)
+            openSubPageWithTransition(tr("Тактильный отклик", "Haptic feedback")) {
+                populateHapticsPage()
+            }
         }
 
+        // Clean borderless category card WITHOUT colored current-setting value badges!
         fun makeMainSettingsNavCard(
             title: String,
             subtitle: String,
-            valueBadge: String,
             icon: M3Icon,
             index: Int,
             total: Int,
@@ -2615,7 +2863,7 @@ class TermuxActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(18), dp(16), dp(18), dp(16))
-                background = segmentedCardBg(index, total, uiSurfaceLow, uiOutlineVariant, 24f, 5f)
+                background = segmentedCardBg(index, total, uiSurfaceLow, 0, 24f, 5f)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -2625,7 +2873,7 @@ class TermuxActivity : Activity() {
 
                 addView(
                     FrameLayout(this@TermuxActivity).apply {
-                        background = pillBg(uiAccentContainer, uiAccentContainer, dp(14))
+                        background = tonalBg(uiAccentContainer, dp(14))
                         layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
                             marginEnd = dp(16)
                         }
@@ -2651,13 +2899,6 @@ class TermuxActivity : Activity() {
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     setPadding(0, dp(2), 0, 0)
                 })
-                textCol.addView(TextView(this@TermuxActivity).apply {
-                    text = valueBadge
-                    setTextColor(uiAccent)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                    setPadding(0, dp(4), 0, 0)
-                })
                 addView(textCol)
 
                 addView(
@@ -2674,89 +2915,57 @@ class TermuxActivity : Activity() {
             }
         }
 
-        // Main Full-Page Settings Overview (4 categories)
-        showHomeCategories = { forwardAnim ->
-            titleTv.text = "Настройки"
-            subtitleHeaderTv.text = "Material 3 Expressive • ColorSpec 2026"
-            backBtn.setOnClickListener {
-                triggerHaptic(0.8f)
-                dlg.dismiss()
-            }
-            bodyContainer.removeAllViews()
-            if (forwardAnim) {
-                animateAosp17PageTransition(bodyContainer, forward = true)
-            } else {
-                animateAosp17PageTransition(bodyContainer, forward = false)
-            }
+        rebuildHomeMenu = {
+            homeContainer.removeAllViews()
 
-            bodyContainer.addView(makeSectionLabel("Оформление и интерфейс"))
+            homeContainer.addView(makeSectionLabel(tr("Оформление и интерфейс", "Appearance & UI")))
 
-            val curStyleTitle = MONET_STYLES_2026[monetStyleIndex.coerceIn(0, 3)].title
-            bodyContainer.addView(
+            homeContainer.addView(
                 makeMainSettingsNavCard(
-                    title = "Цвета и палитра",
-                    subtitle = "Стили ColorBlendr: Tonal Spot, Neutral, Vibrant, Expressive",
-                    valueBadge = "$curStyleTitle • ColorSpec 2026",
+                    title = tr("Цвета и палитра", "Colors & palette"),
+                    subtitle = tr("Системные цвета и стили палитры", "System colors and palette styles"),
                     icon = M3Icon.PALETTE,
                     index = 0,
                     total = 2
                 ) { showColorsAndStylesPage() }
             )
 
-            val fontPresetNames = arrayOf(
-                "JetBrains Mono Regular",
-                "JetBrains Mono Light",
-                "JetBrains Mono Medium",
-                "JetBrains Mono SemiBold",
-                "JetBrains Mono Bold",
-                "System Monospace",
-                "Serif Monospace",
-                "Пользовательский шрифт"
-            )
-            val curFontName = fontPresetNames[prefs.getInt(KEY_FONT_PRESET, 0).coerceIn(0, 7)]
-            val curScalePct = (terminalSurface.fontScale * 100f).roundToInt()
-            bodyContainer.addView(
+            homeContainer.addView(
                 makeMainSettingsNavCard(
-                    title = "Шрифт и терминал",
-                    subtitle = "Выбор шрифта терминала, лигатуры и масштаб текста",
-                    valueBadge = "$curFontName • $curScalePct%",
+                    title = tr("Шрифт и терминал", "Font & terminal"),
+                    subtitle = tr("Шрифт, язык, масштаб и параметры терминала", "Font, language, scale, and terminal options"),
                     icon = M3Icon.FONT,
                     index = 1,
                     total = 2
                 ) { showFontAndDisplayPage() }
             )
 
-            bodyContainer.addView(makeSectionLabel("Ввод и отклик"))
+            homeContainer.addView(makeSectionLabel(tr("Ввод и отклик", "Input & feedback")))
 
-            val styleNames = arrayOf("VS Code Smooth", "VS Code Phase", "VS Code Expand", "Blink", "Solid")
-            val curStyleName = styleNames[terminalSurface.cursorBlinkStyle.coerceIn(0, 4)]
-            bodyContainer.addView(
+            homeContainer.addView(
                 makeMainSettingsNavCard(
-                    title = "Курсор и анимации",
-                    subtitle = "Форма каретки, плавное скольжение и скорость затухания",
-                    valueBadge = "$curStyleName • ${terminalSurface.cursorAlphaPct}% • ${terminalSurface.cursorRadiusTenths / 10f}dp",
+                    title = tr("Курсор и анимации", "Cursor & animations"),
+                    subtitle = tr("Форма каретки, плавное скольжение и затухание", "Caret shape, smooth glide, and fade timing"),
                     icon = M3Icon.CURSOR,
                     index = 0,
                     total = 3
                 ) { showCursorCategory() }
             )
 
-            bodyContainer.addView(
+            homeContainer.addView(
                 makeMainSettingsNavCard(
-                    title = "Клавиатура и бинды",
-                    subtitle = "Настройка рядов нижней панели, спецклавиш и макросов",
-                    valueBadge = "Кастомизация клавиш",
+                    title = tr("Клавиатура и бинды", "Keyboard & bindings"),
+                    subtitle = tr("Настройка рядов нижней панели и макросов", "Customize extra keys rows and macros"),
                     icon = M3Icon.KEYBOARD,
                     index = 1,
                     total = 3
                 ) { showKeyboardCategory() }
             )
 
-            bodyContainer.addView(
+            homeContainer.addView(
                 makeMainSettingsNavCard(
-                    title = "Тактильный отклик",
-                    subtitle = "Настройка мощности и длительности вибрации в мс",
-                    valueBadge = if (hapticEnabled) "Вкл • ${hapticDurationMs} мс • ${(hapticAmplitude * 100f / 255f).roundToInt()}%" else "Отключён",
+                    title = tr("Тактильный отклик", "Haptic feedback"),
+                    subtitle = tr("Настройка мощности и длительности вибрации", "Configure vibration strength and duration"),
                     icon = M3Icon.VIBRATION,
                     index = 2,
                     total = 3
@@ -2764,13 +2973,14 @@ class TermuxActivity : Activity() {
             )
         }
 
-        showHomeCategories(true)
+        rebuildHomeMenu()
+        animateAosp17PageTransition(homeContainer, forward = true)
         dlg.setContentView(pageRoot)
         dlg.show()
     }
 
     // ========================================================================
-    // Safe WindowInsets, BakaSU Pull-to-Refresh & Material Design 3 Vector Icons
+    // Safe WindowInsets, BakaSU Morphing LoadingIndicator & Material 3 Icons
     // ========================================================================
     internal fun applySafeWindowInsets(
         targetView: View,
@@ -2813,6 +3023,66 @@ class TermuxActivity : Activity() {
         targetView.post { targetView.requestApplyInsets() }
     }
 
+    /**
+     * Exact Material 3 Expressive `PullToRefreshDefaults.LoadingIndicator` morphing shape view
+     * used in BakaSU (`DynamicManagerScreen.kt`, `ModulePage.kt`).
+     * Smoothly morphs between 4-lobed clover, 7-pointed starburst cookie, 5-lobed flower,
+     * 6-lobed seal, and rounded triangle while rotating inside a borderless primaryContainer circle.
+     */
+    internal inner class BakaSuMorphingIndicatorView(context: Context) : View(context) {
+        var morphPhase: Float = 0f
+            set(value) {
+                field = value
+                invalidate()
+            }
+
+        private val shapePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+        private val morphPath = Path()
+
+        // Lobe counts for Material 3 Expressive LoadingIndicator sequence
+        private val lobes = intArrayOf(4, 7, 5, 6, 3)
+        private val amps = floatArrayOf(0.16f, 0.18f, 0.15f, 0.14f, 0.14f)
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val cx = width * 0.5f
+            val cy = height * 0.5f
+            val baseR = min(cx, cy) * 0.58f
+            if (baseR <= 1f) return
+
+            val totalStages = lobes.size
+            val norm = ((morphPhase % totalStages) + totalStages) % totalStages
+            val idx0 = norm.toInt() % totalStages
+            val idx1 = (idx0 + 1) % totalStages
+            val rawT = norm - norm.toInt()
+            // Smoothstep interpolation between shape keyframes
+            val t = rawT * rawT * (3f - 2f * rawT)
+
+            val k0 = lobes[idx0].toFloat()
+            val k1 = lobes[idx1].toFloat()
+            val a0 = amps[idx0]
+            val a1 = amps[idx1]
+            val rotRad = morphPhase * 1.35f
+
+            morphPath.reset()
+            val steps = 72
+            for (i in 0..steps) {
+                val theta = (i.toFloat() / steps.toFloat()) * (2f * Math.PI.toFloat())
+                val w0 = 1f + a0 * cos(k0 * theta)
+                val w1 = 1f + a1 * cos(k1 * theta)
+                val r = baseR * (w0 * (1f - t) + w1 * t)
+                val px = cx + r * cos(theta + rotRad)
+                val py = cy + r * sin(theta + rotRad)
+                if (i == 0) morphPath.moveTo(px, py) else morphPath.lineTo(px, py)
+            }
+            morphPath.close()
+            shapePaint.color = uiAccent
+            canvas.drawPath(morphPath, shapePaint)
+        }
+    }
+
     internal inner class BakaSuPullToRefreshLayout(
         context: Context,
         val scrollView: ScrollView,
@@ -2832,7 +3102,7 @@ class TermuxActivity : Activity() {
         private var currentPullPx = 0f
 
         private val indicatorBadge: FrameLayout
-        private val indicatorIcon: MaterialIconView
+        private val morphIndicator: BakaSuMorphingIndicatorView
 
         init {
             clipChildren = false
@@ -2842,27 +3112,20 @@ class TermuxActivity : Activity() {
                 LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             )
 
-            indicatorIcon = MaterialIconView(
-                context,
-                icon = M3Icon.REFRESH,
-                tintColor = uiAccent,
-                iconSizeDp = 22f,
-                strokeWidthDp = 2.25f
-            )
+            morphIndicator = BakaSuMorphingIndicatorView(context)
             indicatorBadge = FrameLayout(context).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
-                    setColor(blendColor(uiSurfaceHigh, uiAccentContainer, 0.72f))
-                    setStroke(max(1, dp(1)), uiAccent)
+                    setColor(uiAccentContainer)
                 }
                 elevation = dpF(8f)
-                layoutParams = LayoutParams(dp(44), dp(44), Gravity.TOP or Gravity.CENTER_HORIZONTAL)
-                translationY = -dpF(54f)
-                scaleX = 0.25f
-                scaleY = 0.25f
+                layoutParams = LayoutParams(dp(46), dp(46), Gravity.TOP or Gravity.CENTER_HORIZONTAL)
+                translationY = -dpF(56f)
+                scaleX = 0.2f
+                scaleY = 0.2f
                 alpha = 0f
                 addView(
-                    indicatorIcon,
+                    morphIndicator,
                     LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER)
                 )
             }
@@ -2914,11 +3177,11 @@ class TermuxActivity : Activity() {
                     val progress = (currentPullPx / triggerDistancePx).coerceIn(0f, 1.35f)
 
                     indicatorBadge.translationY = -dpF(48f) + currentPullPx
-                    val sc = (0.3f + progress * 0.7f).coerceIn(0.3f, 1.05f)
+                    val sc = (0.25f + progress * 0.75f).coerceIn(0.25f, 1.05f)
                     indicatorBadge.scaleX = sc
                     indicatorBadge.scaleY = sc
                     indicatorBadge.alpha = (progress * 1.25f).coerceIn(0f, 1f)
-                    indicatorIcon.rotation = progress * 240f
+                    morphIndicator.morphPhase = progress * 2.2f
                     scrollView.translationY = currentPullPx * 0.34f
 
                     if (progress >= 1.0f && !thresholdCrossed) {
@@ -2941,19 +3204,20 @@ class TermuxActivity : Activity() {
                                 .scaleX(1.0f)
                                 .scaleY(1.0f)
                                 .alpha(1.0f)
-                                .setDuration(160L)
-                                .setInterpolator(DecelerateInterpolator())
+                                .setDuration(180L)
+                                .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
                             scrollView.animate()
                                 .translationY(dpF(26f))
-                                .setDuration(160L)
-                                .setInterpolator(DecelerateInterpolator())
+                                .setDuration(180L)
+                                .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
-                            ValueAnimator.ofFloat(indicatorIcon.rotation, indicatorIcon.rotation + 360f).apply {
-                                duration = 380L
+                            val startPhase = morphIndicator.morphPhase
+                            ValueAnimator.ofFloat(startPhase, startPhase + 3.6f).apply {
+                                duration = 560L
                                 interpolator = DecelerateInterpolator()
                                 addUpdateListener { anim ->
-                                    indicatorIcon.rotation = anim.animatedValue as Float
+                                    morphIndicator.morphPhase = anim.animatedValue as Float
                                 }
                                 start()
                             }
@@ -2961,30 +3225,32 @@ class TermuxActivity : Activity() {
                                 onRefreshTriggered()
                                 isRefreshing = false
                                 indicatorBadge.animate()
-                                    .translationY(-dpF(54f))
-                                    .scaleX(0.25f)
-                                    .scaleY(0.25f)
+                                    .translationY(-dpF(56f))
+                                    .scaleX(0.2f)
+                                    .scaleY(0.2f)
                                     .alpha(0f)
-                                    .setDuration(220L)
+                                    .setDuration(230L)
+                                    .setInterpolator(aosp17SpatialInterpolator)
                                     .start()
                                 scrollView.animate()
                                     .translationY(0f)
-                                    .setDuration(220L)
+                                    .setDuration(230L)
+                                    .setInterpolator(aosp17SpatialInterpolator)
                                     .start()
-                            }, 320L)
+                            }, 520L)
                         } else {
                             indicatorBadge.animate()
-                                .translationY(-dpF(54f))
-                                .scaleX(0.25f)
-                                .scaleY(0.25f)
+                                .translationY(-dpF(56f))
+                                .scaleX(0.2f)
+                                .scaleY(0.2f)
                                 .alpha(0f)
                                 .setDuration(220L)
-                                .setInterpolator(DecelerateInterpolator())
+                                .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
                             scrollView.animate()
                                 .translationY(0f)
                                 .setDuration(220L)
-                                .setInterpolator(DecelerateInterpolator())
+                                .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
                         }
                         return true
@@ -3396,7 +3662,6 @@ class TermuxActivity : Activity() {
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.FONT -> {
-                    // Material Symbols Rounded Typography / Font ('A' + 'a')
                     path.moveTo(x(3.8f), y(18.5f))
                     path.lineTo(x(8.8f), y(5.5f))
                     path.lineTo(x(13.8f), y(18.5f))
@@ -3569,9 +3834,6 @@ class TermuxActivity : Activity() {
         }
     }
 
-    // ========================================================================
-    // Material 3 Expressive Workspace Hub: Servers (SSH) | SFTP | Packages
-    // ========================================================================
     private fun formatSize(bytes: Long): String {
         if (bytes < 1024L) return "$bytes B"
         val kb = bytes / 1024.0
@@ -3604,7 +3866,8 @@ class TermuxActivity : Activity() {
                         name = cols[0],
                         version = cols[1],
                         sizeKb = cols[2].toLongOrNull() ?: 0L,
-                        description = cols[3]
+                        description = cols[3],
+                        isCore = (cols.getOrNull(4) ?: "0") == "1"
                     )
                 )
             }
@@ -3612,6 +3875,10 @@ class TermuxActivity : Activity() {
         return out
     }
 
+    // ========================================================================
+    // Material 3 Expressive Workspace Hub: Servers | SFTP | Packages
+    // (Borderless Tonal Design + Predictive Back + BakaSU Morphing Pull-to-Refresh)
+    // ========================================================================
     private fun showWorkspaceHubDialog(initialTab: Int = 0) {
         val dlg = Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -3639,12 +3906,13 @@ class TermuxActivity : Activity() {
         }
         root.addView(mainCol)
 
-        var activeTab = initialTab.coerceIn(0, 2) // 0 = Servers (SSH), 1 = SFTP, 2 = Packages
+        var activeTab = initialTab.coerceIn(0, 2) // 0 = Servers, 1 = SFTP, 2 = Packages
         var previousTab = activeTab
         var activeSftpServer: SshServerProfile? = null
-        var localCurrentDir = File("/data/data/com.termuxx/file/home").let {
+        val homeDir = File("/data/data/com.termuxx/file/home").let {
             if (it.exists()) it else File(applicationInfo.dataDir)
         }
+        var localCurrentDir = homeDir
         var remoteCurrentPath = "/root"
         var sftpTreeMode = false
         var sftpShowHidden = true
@@ -3656,13 +3924,13 @@ class TermuxActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(uiSurface)
-            setPadding(dp(12), dp(2), dp(12), dp(4))
+            setPadding(dp(12), dp(2), dp(12), dp(6))
         }
 
         val termBackChip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = pillBg(uiAccentContainer, uiAccent, dp(14))
+            background = tonalBg(uiAccentContainer, dp(14))
             setPadding(dp(11), dp(7), dp(12), dp(7))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -3687,43 +3955,6 @@ class TermuxActivity : Activity() {
             setOnClickListener {
                 triggerHaptic(0.8f)
                 dlg.dismiss()
-            }
-            setOnLongClickListener {
-                triggerHaptic(1.2f)
-                val localStartupCmd = prefs.getString(KEY_LOCAL_STARTUP_CMD, "")?.trim().orEmpty()
-                val (lDlg, lSheet) = createExpressiveDialog(400)
-                lSheet.addView(TextView(this@TermuxActivity).apply {
-                    text = "Автозапуск локального терминала"
-                    setTextColor(COLOR_TEXT_BRIGHT)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setPadding(0, 0, 0, dp(8))
-                })
-                val cmdInput = EditText(this@TermuxActivity).apply {
-                    setText(localStartupCmd)
-                    hint = "Автокоманда (напр. proot-distro login ubuntu)"
-                    setHintTextColor(COLOR_TEXT_DIM)
-                    setTextColor(COLOR_TEXT_BRIGHT)
-                    typeface = Typeface.MONOSPACE
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                    setSingleLine(true)
-                    background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(12))
-                    setPadding(dp(12), dp(9), dp(12), dp(9))
-                }
-                lSheet.addView(cmdInput)
-                val bRow = LinearLayout(this@TermuxActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.END
-                    setPadding(0, dp(12), 0, 0)
-                }
-                bRow.addView(makeExpressiveChip("Отмена", false) { lDlg.dismiss() })
-                bRow.addView(makeExpressiveChip("Сохранить", true) {
-                    prefs.edit().putString(KEY_LOCAL_STARTUP_CMD, cmdInput.text.toString().trim()).apply()
-                    lDlg.dismiss()
-                })
-                lSheet.addView(bRow)
-                lDlg.show()
-                true
             }
         }
         topNavRow.addView(termBackChip)
@@ -3783,11 +4014,6 @@ class TermuxActivity : Activity() {
         topNavRow.addView(tabPkgsCol)
         mainCol.addView(topNavRow)
 
-        mainCol.addView(View(this).apply {
-            setBackgroundColor(uiOutlineVariant)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
-        })
-
         val contentFrame = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3796,6 +4022,51 @@ class TermuxActivity : Activity() {
             )
         }
         mainCol.addView(contentFrame)
+
+        // Predictive Back on Workspace Hub
+        val hubPredictiveBack = object : OnBackAnimationCallback {
+            override fun onBackStarted(backEvent: BackEvent) {
+                root.animate().cancel()
+            }
+
+            override fun onBackProgressed(backEvent: BackEvent) {
+                val p = backEvent.progress.coerceIn(0f, 1f)
+                val w = max(resources.displayMetrics.widthPixels.toFloat(), dpF(320f))
+                val dir = if (backEvent.swipeEdge == BackEvent.EDGE_RIGHT) -1f else 1f
+                root.translationX = dir * p * w * 0.22f
+                val sc = 1f - p * 0.08f
+                root.scaleX = sc
+                root.scaleY = sc
+                root.alpha = 1f - p * 0.3f
+            }
+
+            override fun onBackCancelled() {
+                root.animate()
+                    .translationX(0f)
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .alpha(1f)
+                    .setDuration(200L)
+                    .setInterpolator(aosp17SpatialInterpolator)
+                    .start()
+            }
+
+            override fun onBackInvoked() {
+                triggerHaptic(0.75f)
+                if (activeTab == 1 && sftpSearchActive) {
+                    sftpSearchActive = false
+                    sftpSearchQuery = ""
+                    root.translationX = 0f; root.scaleX = 1f; root.scaleY = 1f; root.alpha = 1f
+                    renderActiveTab()
+                } else {
+                    dlg.dismiss()
+                }
+            }
+        }
+        dlg.onBackInvokedDispatcher.registerOnBackInvokedCallback(
+            OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+            hubPredictiveBack
+        )
 
         fun showCodeViewerAndEditorDialog(
             fileName: String,
@@ -3842,7 +4113,7 @@ class TermuxActivity : Activity() {
                 }
                 hdr.addView(
                     FrameLayout(this).apply {
-                        background = pillBg(uiAccentContainer, uiAccent, dp(12))
+                        background = tonalBg(uiAccentContainer, dp(12))
                         layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
                             marginEnd = dp(10)
                         }
@@ -3896,7 +4167,7 @@ class TermuxActivity : Activity() {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(14), dp(8), dp(14), dp(8))
-                        background = makeArchiveTuneGlassDrawable(dp(30))
+                        background = makeM3FloatingSurfaceDrawable(dp(30))
                         elevation = dpF(10f)
                         layoutParams = FrameLayout.LayoutParams(
                             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -3906,18 +4177,18 @@ class TermuxActivity : Activity() {
                             bottomMargin = dp(18)
                         }
                     }
-                    pillWrap.addView(makeExpressiveChip("Отмена", false) {
+                    pillWrap.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) {
                         isEditMode = false
                         rebuildViewer()
                     })
-                    pillWrap.addView(makeExpressiveChip("Сохранить", true, uiAccent, uiAccentContainer) {
+                    pillWrap.addView(makeExpressiveChip(tr("Сохранить", "Save"), true, uiAccent, uiAccentContainer) {
                         currentText = editBox.text.toString()
                         if (onSaveContent(currentText)) {
-                            Toast.makeText(this@TermuxActivity, "Сохранено: $fileName", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@TermuxActivity, tr("Сохранено: $fileName", "Saved: $fileName"), Toast.LENGTH_SHORT).show()
                             isEditMode = false
                             rebuildViewer()
                         } else {
-                            Toast.makeText(this@TermuxActivity, "Ошибка сохранения", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@TermuxActivity, tr("Ошибка сохранения", "Failed to save"), Toast.LENGTH_SHORT).show()
                         }
                     })
                     vRoot.addView(col)
@@ -3944,15 +4215,11 @@ class TermuxActivity : Activity() {
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f * viewerFontScale)
                         setPadding(dp(12), 0, dp(10), 0)
                     }
-                    val vLine = View(this).apply {
-                        setBackgroundColor(uiOutlineVariant)
-                        layoutParams = LinearLayout.LayoutParams(1, ViewGroup.LayoutParams.MATCH_PARENT)
-                    }
                     val hScroll = HorizontalScrollView(this).apply {
                         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                     }
                     val codeTv = TextView(this).apply {
-                        text = currentText.ifEmpty { "(Пустой файл)" }
+                        text = currentText.ifEmpty { tr("(Пустой файл)", "(Empty file)") }
                         setTextIsSelectable(true)
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.MONOSPACE
@@ -3961,7 +4228,6 @@ class TermuxActivity : Activity() {
                     }
                     hScroll.addView(codeTv)
                     codeRow.addView(lineNumsTv)
-                    codeRow.addView(vLine)
                     codeRow.addView(hScroll)
                     vScroll.addView(codeRow)
                     col.addView(vScroll)
@@ -3971,7 +4237,7 @@ class TermuxActivity : Activity() {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(14), dp(6), dp(14), dp(6))
-                        background = makeArchiveTuneGlassDrawable(dp(30))
+                        background = makeM3FloatingSurfaceDrawable(dp(30))
                         elevation = dpF(10f)
                         layoutParams = FrameLayout.LayoutParams(
                             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4000,10 +4266,10 @@ class TermuxActivity : Activity() {
                         viewerFontScale = (viewerFontScale + 0.15f).coerceIn(0.6f, 2.5f)
                         rebuildViewer()
                     })
-                    pill.addView(makeExpressiveChip("Копировать", false) {
+                    pill.addView(makeExpressiveChip(tr("Копировать", "Copy"), false) {
                         copyToClipboard(currentText, true)
                     })
-                    pill.addView(makeExpressiveChip("Изменить", true, uiAccent, uiAccentContainer) {
+                    pill.addView(makeExpressiveChip(tr("Изменить", "Edit"), true, uiAccent, uiAccentContainer) {
                         isEditMode = true
                         rebuildViewer()
                     })
@@ -4017,12 +4283,12 @@ class TermuxActivity : Activity() {
         }
 
         // ====================================================================
-        // TAB 0: Servers & Advanced SSH Manager (-p, -L, -R, -D, -J, -N, Ping in C++23)
+        // TAB 0: Servers & Advanced SSH Manager
         // ====================================================================
         fun showAddOrEditServerDialog(existing: SshServerProfile?, onSaved: () -> Unit) {
             val (sDlg, sSheet) = createExpressiveDialog(440)
             sSheet.addView(TextView(this).apply {
-                text = if (existing == null) "Настройка SSH-сервера и туннелей" else "Изменить SSH-сервер"
+                text = if (existing == null) tr("Настройка SSH-сервера", "Add SSH Server") else tr("Изменить SSH-сервер", "Edit SSH Server")
                 setTextColor(COLOR_TEXT_BRIGHT)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
                 typeface = Typeface.DEFAULT_BOLD
@@ -4068,7 +4334,7 @@ class TermuxActivity : Activity() {
                     if (isNumeric) {
                         inputType = InputType.TYPE_CLASS_NUMBER
                     }
-                    background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(14))
+                    background = tonalBg(uiSurfaceLow, dp(14))
                     setPadding(dp(14), dp(9), dp(14), dp(9))
                 }
                 form.addView(et)
@@ -4076,7 +4342,7 @@ class TermuxActivity : Activity() {
             }
 
             form.addView(TextView(this).apply {
-                text = "Быстрый импорт из строки команды (опционально)"
+                text = tr("Быстрый импорт из строки команды", "Quick import from ssh command")
                 setTextColor(uiAccent)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
@@ -4093,7 +4359,7 @@ class TermuxActivity : Activity() {
                 typeface = Typeface.MONOSPACE
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setSingleLine(true)
-                background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(12))
+                background = tonalBg(uiSurfaceLow, dp(12))
                 setPadding(dp(12), dp(8), dp(12), dp(8))
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                     marginEnd = dp(6)
@@ -4101,14 +4367,14 @@ class TermuxActivity : Activity() {
             }
             importRow.addView(rawCmdEt)
 
-            val labelEt = makeLabeledField("Label (Название)", existing?.label ?: "", "Основной сервер")
-            val hostEt = makeLabeledField("Host (IP или домен)", existing?.host ?: "", "example.com или 10.0.0.1")
+            val labelEt = makeLabeledField(tr("Название", "Label"), existing?.label ?: "", "Main Server")
+            val hostEt = makeLabeledField("Host (IP / Domain)", existing?.host ?: "", "example.com")
             val portEt = makeLabeledField("Port (-p)", (existing?.port ?: 22).toString(), "22", isNumeric = true)
             val userEt = makeLabeledField("Username", existing?.username ?: "root", "root")
 
             var selectedAuth = existing?.authType ?: 0
             form.addView(TextView(this).apply {
-                text = "Авторизация"
+                text = tr("Авторизация", "Authentication")
                 setTextColor(uiAccent)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
@@ -4116,7 +4382,7 @@ class TermuxActivity : Activity() {
             })
             val (authScroll, authRow) = makeHorizontalChipRow()
             val secretLabelTv = TextView(this).apply {
-                text = if (selectedAuth == 0) "Password (Пароль)" else if (selectedAuth == 1) "Путь к ключу (-i)" else "SSH-Агент"
+                text = if (selectedAuth == 0) "Password" else if (selectedAuth == 1) tr("Путь к ключу (-i)", "Key path (-i)") else "SSH Agent"
                 setTextColor(uiAccent)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
@@ -4125,26 +4391,30 @@ class TermuxActivity : Activity() {
             val defaultKeyPath = "/data/data/com.termuxx/file/home/.ssh/id_ed25519"
             val secretEt = EditText(this).apply {
                 setText(existing?.secretOrKeyPath ?: (if (selectedAuth == 1) defaultKeyPath else ""))
-                hint = if (selectedAuth == 0) "Пароль (авто-ввод через SSH_ASKPASS)" else defaultKeyPath
+                hint = if (selectedAuth == 0) tr("Пароль", "Password") else defaultKeyPath
                 setHintTextColor(COLOR_TEXT_DIM)
                 setTextColor(COLOR_TEXT_BRIGHT)
                 typeface = Typeface.MONOSPACE
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                 setSingleLine(true)
-                background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(14))
+                background = tonalBg(uiSurfaceLow, dp(14))
                 setPadding(dp(14), dp(9), dp(14), dp(9))
             }
 
             fun rebuildAuthChips() {
                 authRow.removeAllViews()
-                val opts = listOf("Пароль" to 0, "SSH-Ключ (-i)" to 1, "SSH-Агент (-A)" to 2)
+                val opts = listOf(
+                    tr("Пароль", "Password") to 0,
+                    tr("SSH-Ключ (-i)", "SSH Key (-i)") to 1,
+                    "SSH Agent (-A)" to 2
+                )
                 for ((lbl, code) in opts) {
                     authRow.addView(makeExpressiveChip(lbl, selectedAuth == code) {
                         selectedAuth = code
                         secretLabelTv.text = when (code) {
-                            0 -> "Password (Пароль)"
-                            1 -> "Путь к ключу (-i)"
-                            else -> "Комментарий агента"
+                            0 -> "Password"
+                            1 -> tr("Путь к ключу (-i)", "Key path (-i)")
+                            else -> "SSH Agent"
                         }
                         if (code == 1 && secretEt.text.isNullOrBlank()) {
                             secretEt.setText(defaultKeyPath)
@@ -4171,22 +4441,22 @@ class TermuxActivity : Activity() {
                     typeface = Typeface.MONOSPACE
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                     setSingleLine(true)
-                    background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(10))
+                    background = tonalBg(uiSurfaceLow, dp(10))
                     setPadding(dp(8), dp(7), dp(8), dp(7))
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight).apply {
                         marginEnd = dp(4)
                     }
                 }
             }
-            val lLocPortEt = makeMiniPortEt("Лок. порт", 1f)
+            val lLocPortEt = makeMiniPortEt("Local", 1f)
             val lRemHostEt = makeMiniPortEt("127.0.0.1", 1.3f).apply { setText("127.0.0.1") }
-            val lRemPortEt = makeMiniPortEt("Удал. порт", 1f)
+            val lRemPortEt = makeMiniPortEt("Remote", 1f)
             lBuilderRow.addView(lLocPortEt)
             lBuilderRow.addView(lRemHostEt)
             lBuilderRow.addView(lRemPortEt)
 
             val localFwdsEt = makeLabeledField(
-                "Local Port Forwarding (-L, через запятую)",
+                "Local Port Forwarding (-L)",
                 existing?.localForwards ?: "",
                 "8080:127.0.0.1:80"
             )
@@ -4207,34 +4477,34 @@ class TermuxActivity : Activity() {
             form.addView(lBuilderRow, lIdx)
 
             val remoteFwdsEt = makeLabeledField(
-                "Remote Port Forwarding (-R, удалённый порт -> локальный)",
+                "Remote Port Forwarding (-R)",
                 existing?.remoteForwards ?: "",
                 "9000:127.0.0.1:9000"
             )
             val dynamicPortEt = makeLabeledField(
-                "Dynamic SOCKS5 Proxy (-D, локальный порт)",
+                "Dynamic SOCKS5 Proxy (-D)",
                 existing?.dynamicSocksPort ?: "",
                 "1080",
                 isNumeric = true
             )
             val jumpHostEt = makeLabeledField(
-                "ProxyJump / Bastion (-J)",
+                "ProxyJump (-J)",
                 existing?.jumpHost ?: "",
                 "user@jumphost:22"
             )
             val keepAliveEt = makeLabeledField(
-                "KeepAlive интервал (ServerAliveInterval, сек)",
+                "ServerAliveInterval (sec)",
                 (existing?.keepAliveSec ?: 30).toString(),
                 "30",
                 isNumeric = true
             )
             val customFlagsEt = makeLabeledField(
-                "Дополнительные флаги SSH",
+                tr("Дополнительные флаги", "Extra SSH flags"),
                 existing?.customFlags ?: "",
                 "-o TCPKeepAlive=yes"
             )
             val startupEt = makeLabeledField(
-                "Команда после входа (опционально)",
+                tr("Команда после входа", "Startup command"),
                 existing?.startupCommand ?: "",
                 "tmux attach || tmux"
             )
@@ -4247,12 +4517,12 @@ class TermuxActivity : Activity() {
             val (optScroll, optRow) = makeHorizontalChipRow()
             fun rebuildOptChips() {
                 optRow.removeAllViews()
-                optRow.addView(makeExpressiveChip("Только туннель (-N)", tunnelOnlyN) {
+                optRow.addView(makeExpressiveChip("Tunnel only (-N)", tunnelOnlyN) {
                     tunnelOnlyN = !tunnelOnlyN
                     rebuildOptChips()
                     updateLivePreview()
                 })
-                optRow.addView(makeExpressiveChip("Сжатие (-C)", useComp) {
+                optRow.addView(makeExpressiveChip("Compression (-C)", useComp) {
                     useComp = !useComp
                     rebuildOptChips()
                     updateLivePreview()
@@ -4262,7 +4532,7 @@ class TermuxActivity : Activity() {
                     rebuildOptChips()
                     updateLivePreview()
                 })
-                optRow.addView(makeExpressiveChip("Только IPv4 (-4)", ipv4Only) {
+                optRow.addView(makeExpressiveChip("IPv4 only (-4)", ipv4Only) {
                     ipv4Only = !ipv4Only
                     rebuildOptChips()
                     updateLivePreview()
@@ -4271,7 +4541,7 @@ class TermuxActivity : Activity() {
             rebuildOptChips()
             form.addView(optScroll)
 
-            importRow.addView(makeExpressiveChip("Разобрать", true) {
+            importRow.addView(makeExpressiveChip(tr("Разобрать", "Parse"), true) {
                 val rawCmd = rawCmdEt.text.toString().trim()
                 if (rawCmd.isNotEmpty()) {
                     val parsed = nativeParseSshCommand(rawCmd).split("\t")
@@ -4295,7 +4565,6 @@ class TermuxActivity : Activity() {
                         if (parsed[12].isNotEmpty()) customFlagsEt.setText(parsed[12])
                         rebuildOptChips()
                         updateLivePreview()
-                        Toast.makeText(this, "Параметры команды импортированы", Toast.LENGTH_SHORT).show()
                     }
                 }
             })
@@ -4305,7 +4574,7 @@ class TermuxActivity : Activity() {
                 setTextColor(uiAccent)
                 typeface = Typeface.MONOSPACE
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                background = pillBg(uiAccentContainer, uiAccent, dp(12))
+                background = tonalBg(uiAccentContainer, dp(12))
                 setPadding(dp(12), dp(9), dp(12), dp(9))
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -4355,12 +4624,12 @@ class TermuxActivity : Activity() {
                 gravity = Gravity.END
                 setPadding(0, dp(12), 0, 0)
             }
-            btnBar.addView(makeExpressiveChip("Превью", false) { updateLivePreview() })
-            btnBar.addView(makeExpressiveChip("Отмена", false) { sDlg.dismiss() })
-            btnBar.addView(makeExpressiveChip("Сохранить", true) {
+            btnBar.addView(makeExpressiveChip(tr("Превью", "Preview"), false) { updateLivePreview() })
+            btnBar.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { sDlg.dismiss() })
+            btnBar.addView(makeExpressiveChip(tr("Сохранить", "Save"), true) {
                 val profile = buildDraftProfile()
                 if (profile.host.isEmpty()) {
-                    Toast.makeText(this, "Укажите Host (IP или домен)", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, tr("Укажите Host", "Specify Host"), Toast.LENGTH_SHORT).show()
                     return@makeExpressiveChip
                 }
                 val list = loadSshServers()
@@ -4435,39 +4704,39 @@ class TermuxActivity : Activity() {
                 setPadding(dp(2), 0, dp(2), dp(12))
             }
             titleRow.addView(TextView(this).apply {
-                text = "SSH Серверы"
+                text = tr("SSH Серверы", "SSH Servers")
                 setTextColor(COLOR_TEXT_BRIGHT)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
             if (servers.isNotEmpty()) {
-                titleRow.addView(makeExpressiveChip("Пинг всех", false) {
+                titleRow.addView(makeExpressiveChip(tr("Пинг всех", "Ping all"), false) {
                     for (s in servers) {
                         pingServerAsync(s, pingBadgeViews[s.id])
                     }
                 })
             }
-            titleRow.addView(makeExpressiveChip("SSH-Ключи", false) {
+            titleRow.addView(makeExpressiveChip(tr("SSH-Ключи", "SSH Keys"), false) {
                 val sshDir = File("/data/data/com.termuxx/file/home/.ssh").apply { mkdirs() }
                 val pubFile = File(sshDir, "id_ed25519.pub")
                 val privFile = File(sshDir, "id_ed25519")
                 val (kDlg, kSheet) = createExpressiveDialog(420)
                 kSheet.addView(TextView(this).apply {
-                    text = "SSH-ключи (ed25519)"
+                    text = "SSH Keys (ed25519)"
                     setTextColor(COLOR_TEXT_BRIGHT)
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
                     typeface = Typeface.DEFAULT_BOLD
                     setPadding(0, 0, 0, dp(8))
                 })
-                val pubText = if (pubFile.exists()) pubFile.readText().trim() else "Ключ ~/.ssh/id_ed25519.pub ещё не создан."
+                val pubText = if (pubFile.exists()) pubFile.readText().trim() else tr("Ключ ~/.ssh/id_ed25519.pub ещё не создан.", "Key ~/.ssh/id_ed25519.pub not generated yet.")
                 kSheet.addView(TextView(this).apply {
                     text = pubText
                     setTextIsSelectable(true)
                     setTextColor(if (pubFile.exists()) uiAccent else COLOR_TEXT_DIM)
                     typeface = Typeface.MONOSPACE
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                    background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(14))
+                    background = tonalBg(uiSurfaceLow, dp(14))
                     setPadding(dp(12), dp(10), dp(12), dp(10))
                 })
                 val actRow = LinearLayout(this).apply {
@@ -4476,12 +4745,12 @@ class TermuxActivity : Activity() {
                     setPadding(0, dp(12), 0, 0)
                 }
                 if (pubFile.exists()) {
-                    actRow.addView(makeExpressiveChip("Копировать ключ", false) {
+                    actRow.addView(makeExpressiveChip(tr("Копировать", "Copy key"), false) {
                         copyToClipboard(pubText, true)
                     })
                 }
                 actRow.addView(makeExpressiveChip(
-                    if (privFile.exists()) "Пересоздать ed25519" else "Создать ed25519",
+                    if (privFile.exists()) tr("Пересоздать", "Regenerate") else tr("Создать ed25519", "Generate ed25519"),
                     true
                 ) {
                     kDlg.dismiss()
@@ -4501,11 +4770,11 @@ class TermuxActivity : Activity() {
                     orientation = LinearLayout.VERTICAL
                     gravity = Gravity.CENTER
                     setPadding(dp(24), dp(38), dp(24), dp(38))
-                    background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(24))
+                    background = tonalBg(uiSurfaceLow, dp(24))
                 }
                 emptyBox.addView(
                     FrameLayout(this).apply {
-                        background = pillBg(uiAccentContainer, uiAccent, dp(16))
+                        background = tonalBg(uiAccentContainer, dp(16))
                         layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)).apply {
                             bottomMargin = dp(12)
                         }
@@ -4513,14 +4782,17 @@ class TermuxActivity : Activity() {
                     }
                 )
                 emptyBox.addView(TextView(this).apply {
-                    text = "Нет сохранённых SSH-серверов"
+                    text = tr("Нет сохранённых SSH-серверов", "No saved SSH servers")
                     gravity = Gravity.CENTER
                     setTextColor(COLOR_TEXT_BRIGHT)
                     typeface = Typeface.DEFAULT_BOLD
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                 })
                 emptyBox.addView(TextView(this).apply {
-                    text = "Нажмите «+» внизу справа, чтобы добавить сервер, настроить туннелирование портов (-L / -R / -D) или импортировать строку подключения."
+                    text = tr(
+                        "Нажмите «+» внизу справа, чтобы добавить сервер или настроить проброс портов.",
+                        "Tap '+' at the bottom right to add a server or configure port forwarding."
+                    )
                     gravity = Gravity.CENTER
                     setTextColor(COLOR_TEXT_DIM)
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -4533,12 +4805,12 @@ class TermuxActivity : Activity() {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(14), dp(13), dp(10), dp(13))
-                        background = segmentedCardBg(idx, servers.size, uiSurfaceLow, uiOutlineVariant, 22f, 5f)
+                        background = segmentedCardBg(idx, servers.size, uiSurfaceLow, 0, 22f, 5f)
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
                         ).apply {
-                            bottomMargin = if (idx < servers.size - 1) dp(3) else dp(10)
+                            bottomMargin = if (idx < servers.size - 1) dp(2) else dp(10)
                         }
                         attachSmoothPressAnimation(this, 0.98f)
                         setOnClickListener {
@@ -4549,7 +4821,7 @@ class TermuxActivity : Activity() {
 
                     card.addView(
                         FrameLayout(this).apply {
-                            background = pillBg(uiAccentContainer, uiAccentContainer, dp(12))
+                            background = tonalBg(uiAccentContainer, dp(12))
                             layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
                                 marginEnd = dp(12)
                             }
@@ -4586,7 +4858,7 @@ class TermuxActivity : Activity() {
                         setTextColor(uiAccent)
                         typeface = Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
-                        background = pillBg(uiAccentContainer, uiAccentContainer, dp(6))
+                        background = tonalBg(uiAccentContainer, dp(6))
                         setPadding(dp(7), dp(2), dp(7), dp(2))
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4616,7 +4888,7 @@ class TermuxActivity : Activity() {
                     val pingPill = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
-                        background = pillBg(uiSurfaceContainer, uiOutlineVariant, dp(10))
+                        background = tonalBg(uiSurfaceContainer, dp(10))
                         setPadding(dp(8), dp(5), dp(9), dp(5))
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4686,32 +4958,32 @@ class TermuxActivity : Activity() {
                                     setPadding(dp(4), 0, dp(4), dp(10))
                                 })
                                 val actions = listOf(
-                                    Triple(M3Icon.TERMINAL, "Подключиться в терминале (SSH)") {
+                                    Triple(M3Icon.TERMINAL, tr("Подключиться в терминале", "Connect in terminal")) {
                                         connectToSshServerInTerminal(srv, dlg)
                                     },
-                                    Triple(M3Icon.FOLDER, "Открыть проводник SFTP") {
+                                    Triple(M3Icon.FOLDER, tr("Открыть проводник SFTP", "Open SFTP explorer")) {
                                         activeSftpServer = srv
                                         remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
                                         previousTab = activeTab
                                         activeTab = 1
                                         renderActiveTab()
                                     },
-                                    Triple(M3Icon.PING, "Пинговать сервер (${srv.host}:${srv.port})") {
+                                    Triple(M3Icon.PING, tr("Пинговать сервер", "Ping server")) {
                                         pingServerAsync(srv, pingTv)
                                     },
-                                    Triple(M3Icon.COPY, "Скопировать команду SSH") {
+                                    Triple(M3Icon.COPY, tr("Скопировать команду SSH", "Copy SSH command")) {
                                         copyToClipboard(buildSshCommandViaCpp23(srv, withAskPass = false), true)
                                     },
-                                    Triple(M3Icon.KEY, "Установить мой SSH-ключ (ssh-copy-id)") {
+                                    Triple(M3Icon.KEY, tr("Установить мой ключ (ssh-copy-id)", "Install my SSH key (ssh-copy-id)")) {
                                         dlg.dismiss()
                                         createSession(false, runStartupCmd = false)
                                         val copyCmd = "mkdir -p ~/.ssh && ([ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -t ed25519 -N \"\" -f ~/.ssh/id_ed25519) && ssh-copy-id -p ${srv.port} -o StrictHostKeyChecking=accept-new ${srv.username}@${srv.host}\n"
                                         terminalSurface.postDelayed({ nativeSendText(copyCmd, false) }, 120L)
                                     },
-                                    Triple(M3Icon.EDIT, "Изменить настройки и порты (-L/-R/-D)") {
+                                    Triple(M3Icon.EDIT, tr("Изменить настройки и порты", "Edit server & ports")) {
                                         showAddOrEditServerDialog(srv) { renderServersTab() }
                                     },
-                                    Triple(M3Icon.TRASH, "Удалить сервер") {
+                                    Triple(M3Icon.TRASH, tr("Удалить сервер", "Delete server")) {
                                         val updated = loadSshServers().filter { it.id != srv.id }
                                         saveSshServers(updated)
                                         if (activeSftpServer?.id == srv.id) activeSftpServer = null
@@ -4724,7 +4996,7 @@ class TermuxActivity : Activity() {
                                         orientation = LinearLayout.HORIZONTAL
                                         gravity = Gravity.CENTER_VERTICAL
                                         setPadding(dp(12), dp(11), dp(12), dp(11))
-                                        background = segmentedCardBg(aIdx, actions.size, uiSurfaceLow, uiOutlineVariant, 16f, 4f)
+                                        background = segmentedCardBg(aIdx, actions.size, uiSurfaceLow, 0, 16f, 4f)
                                         layoutParams = LinearLayout.LayoutParams(
                                             ViewGroup.LayoutParams.MATCH_PARENT,
                                             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -4740,8 +5012,7 @@ class TermuxActivity : Activity() {
                                     }
                                     row.addView(
                                         FrameLayout(this@TermuxActivity).apply {
-                                            background = pillBg(
-                                                if (isDel) COLOR_ROOT_CONTAINER else uiAccentContainer,
+                                            background = tonalBg(
                                                 if (isDel) COLOR_ROOT_CONTAINER else uiAccentContainer,
                                                 dp(10)
                                             )
@@ -4776,9 +5047,9 @@ class TermuxActivity : Activity() {
             }
 
             val addFab = FrameLayout(this).apply {
-                background = makeArchiveTuneGlassDrawable(dp(30), tintWithAccent = true)
-                elevation = dpF(10f)
-                layoutParams = FrameLayout.LayoutParams(dp(60), dp(60), Gravity.BOTTOM or Gravity.END).apply {
+                background = tonalBg(uiAccentContainer, dp(20))
+                elevation = dpF(8f)
+                layoutParams = FrameLayout.LayoutParams(dp(58), dp(58), Gravity.BOTTOM or Gravity.END).apply {
                     marginEnd = dp(20)
                     bottomMargin = dp(18)
                 }
@@ -4793,7 +5064,7 @@ class TermuxActivity : Activity() {
         }
 
         // ====================================================================
-        // TAB 1: SFTP & File Explorer (Segmented Cards + BakaSU Pull-to-Refresh + Material 3 Floating Bar)
+        // TAB 1: SFTP & File Explorer (Segmented Source Bar + Gray/Accent Borderless Breadcrumbs + Material 3 Floating Bar)
         // ====================================================================
         fun listLocalEntriesViaCpp23(dir: File, depth: Int = 0): List<SftpItemEntry> {
             val raw = nativeListLocalDir(dir.absolutePath, sftpShowHidden, if (depth == 0) sftpSearchQuery else "")
@@ -4842,7 +5113,7 @@ class TermuxActivity : Activity() {
                 "printf '%s\\t%s\\t%s\\t%s\\t%s\\n' \"\$t\" \"\$sz\" \"\$mt\" \"\$pm\" \"\$f\"; " +
                 "done"
             val (ok, output) = runRemoteSftpViaCpp23(server, remoteScript)
-            if (!ok) return output.ifBlank { "Не удалось подключиться по SFTP/SSH" } to emptyList()
+            if (!ok) return output.ifBlank { tr("Не удалось подключиться по SFTP/SSH", "Failed to connect via SFTP/SSH") } to emptyList()
             val lines = output.lines().filter { it.isNotBlank() }
             val resolvedPwd = lines.firstOrNull()?.trim()?.takeIf { it.startsWith("/") } ?: remoteDir
             remoteCurrentPath = resolvedPwd
@@ -4888,38 +5159,104 @@ class TermuxActivity : Activity() {
             }
             contentFrame.addView(mainSftpCol)
 
-            val (hostScroll, hostRow) = makeHorizontalChipRow()
-            hostScroll.setPadding(dp(14), dp(8), dp(14), dp(2))
-            val localBookmarks = listOf(
-                "Home (~)" to File("/data/data/com.termuxx/file/home"),
-                "Usr (\$PREFIX)" to File("/data/data/com.termuxx/file/usr"),
-                "SDCard" to Environment.getExternalStorageDirectory()
-            )
-            for ((lbl, dir) in localBookmarks) {
-                val selected = (activeSftpServer == null && localCurrentDir.absolutePath == dir.absolutePath)
-                hostRow.addView(makeExpressiveChip(lbl, selected) {
-                    activeSftpServer = null
-                    if (!dir.exists()) dir.mkdirs()
-                    if (dir.exists() && dir.canRead()) {
-                        localCurrentDir = dir
-                        renderSftpTab()
-                    } else {
-                        Toast.makeText(this, "Нет доступа к ${dir.absolutePath}", Toast.LENGTH_SHORT).show()
-                    }
-                })
+            // 1. Clean Material 3 Segmented Source Group Bar (Home | Usr | SDCard | SSH) — Borderless!
+            val sourceBarWrap = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = tonalBg(uiSurfaceLow, dp(16))
+                setPadding(dp(4), dp(4), dp(4), dp(4))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    setMargins(dp(14), dp(8), dp(14), dp(4))
+                }
             }
-            for (srv in loadSshServers()) {
-                val selected = (activeSftpServer?.id == srv.id)
-                hostRow.addView(makeExpressiveChip("SFTP: ${srv.label}", selected) {
-                    activeSftpServer = srv
-                    if (remoteCurrentPath.isBlank()) {
-                        remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
-                    }
-                    renderSftpTab()
-                })
-            }
-            mainSftpCol.addView(hostScroll)
 
+            val usrDir = File("/data/data/com.termuxx/file/usr")
+            val sdDir = Environment.getExternalStorageDirectory()
+            val savedServers = loadSshServers()
+
+            val localGroups = listOf(
+                "Home (~)" to homeDir,
+                "Usr" to usrDir,
+                "SDCard" to sdDir
+            )
+            for ((lbl, dir) in localGroups) {
+                val isSel = (activeSftpServer == null && localCurrentDir.absolutePath.startsWith(dir.absolutePath))
+                val segBtn = TextView(this).apply {
+                    text = lbl
+                    gravity = Gravity.CENTER
+                    setSingleLine(true)
+                    typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
+                    if (isSel) {
+                        background = tonalBg(uiAccentContainer, dp(12))
+                    }
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    attachSmoothPressAnimation(this, 0.95f)
+                    setOnClickListener {
+                        triggerHaptic(0.8f)
+                        activeSftpServer = null
+                        if (!dir.exists()) dir.mkdirs()
+                        if (dir.exists() && dir.canRead()) {
+                            localCurrentDir = dir
+                            renderSftpTab()
+                        } else {
+                            Toast.makeText(this@TermuxActivity, tr("Нет доступа", "Access denied"), Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                sourceBarWrap.addView(segBtn)
+            }
+
+            if (savedServers.isNotEmpty()) {
+                val isRemoteSel = (activeSftpServer != null)
+                val sshSegBtn = TextView(this).apply {
+                    text = if (isRemoteSel) "SSH: ${activeSftpServer!!.label}" else "SSH ▾"
+                    gravity = Gravity.CENTER
+                    setSingleLine(true)
+                    typeface = if (isRemoteSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    setTextColor(if (isRemoteSel) uiOnAccentContainer else COLOR_TEXT_DIM)
+                    if (isRemoteSel) {
+                        background = tonalBg(uiAccentContainer, dp(12))
+                    }
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.15f)
+                    attachSmoothPressAnimation(this, 0.95f)
+                    setOnClickListener {
+                        triggerHaptic(0.8f)
+                        if (savedServers.size == 1 && activeSftpServer == null) {
+                            val srv = savedServers[0]
+                            activeSftpServer = srv
+                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                            renderSftpTab()
+                        } else {
+                            val curIdx = savedServers.indexOfFirst { it.id == activeSftpServer?.id }.coerceAtLeast(0)
+                            showBakaSuChooseDialog(
+                                title = tr("Выберите SSH-сервер", "Select SSH Server"),
+                                items = savedServers.map { it.label },
+                                descriptions = savedServers.map { "${it.username}@${it.host}:${it.port}" },
+                                selectedIndex = curIdx
+                            ) { chosen ->
+                                val srv = savedServers[chosen]
+                                activeSftpServer = srv
+                                remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                                renderSftpTab()
+                            }
+                        }
+                    }
+                }
+                sourceBarWrap.addView(sshSegBtn)
+            }
+            mainSftpCol.addView(sourceBarWrap)
+
+            // 2. Material 3 Path Breadcrumbs:
+            // All parent path segments have a soft gray borderless pill (`uiSurfaceContainer`),
+            // and ONLY the last segment (current directory) has a theme-colored borderless pill (`uiAccentContainer`)!
             val activePathStr = if (activeSftpServer == null) localCurrentDir.absolutePath else remoteCurrentPath
             val (bcScroll, bcRow) = makeHorizontalChipRow()
             bcScroll.setPadding(dp(14), dp(4), dp(14), dp(6))
@@ -4938,28 +5275,32 @@ class TermuxActivity : Activity() {
                     bcRow.addView(TextView(this).apply {
                         text = "›"
                         setTextColor(COLOR_TEXT_DIM)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                        setPadding(dp(5), 0, dp(5), 0)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                        setPadding(dp(4), 0, dp(4), 0)
                     })
                 }
                 val segChip = TextView(this).apply {
                     text = seg.first
                     setSingleLine(true)
                     typeface = if (isLast) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                    setTextColor(if (isLast) uiAccent else COLOR_TEXT)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    // Borderless capsule: gray for parent segments, theme color for the current folder at the end!
                     if (isLast) {
-                        background = pillBg(uiAccentContainer, uiAccent, dp(10))
+                        setTextColor(uiAccent)
+                        background = tonalBg(uiAccentContainer, dp(10))
                         setPadding(dp(12), dp(5), dp(12), dp(5))
                     } else {
-                        setPadding(dp(6), dp(4), dp(6), dp(4))
+                        setTextColor(COLOR_TEXT)
+                        background = tonalBg(uiSurfaceContainer, dp(10))
+                        setPadding(dp(10), dp(5), dp(10), dp(5))
                     }
+                    attachSmoothPressAnimation(this, 0.94f)
                     setOnClickListener {
                         triggerHaptic(0.75f)
                         if (isLast) {
                             val (pDlg, pSheet) = createExpressiveDialog(390)
                             pSheet.addView(TextView(this@TermuxActivity).apply {
-                                text = "Перейти по пути"
+                                text = tr("Перейти по пути", "Go to path")
                                 setTextColor(COLOR_TEXT_BRIGHT)
                                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
                                 typeface = Typeface.DEFAULT_BOLD
@@ -4971,7 +5312,7 @@ class TermuxActivity : Activity() {
                                 typeface = Typeface.MONOSPACE
                                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                                 setSingleLine(true)
-                                background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(12))
+                                background = tonalBg(uiSurfaceLow, dp(12))
                                 setPadding(dp(12), dp(9), dp(12), dp(9))
                             }
                             pSheet.addView(pathEt)
@@ -4980,8 +5321,8 @@ class TermuxActivity : Activity() {
                                 gravity = Gravity.END
                                 setPadding(0, dp(12), 0, 0)
                             }
-                            bRow.addView(makeExpressiveChip("Отмена", false) { pDlg.dismiss() })
-                            bRow.addView(makeExpressiveChip("Перейти", true) {
+                            bRow.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { pDlg.dismiss() })
+                            bRow.addView(makeExpressiveChip(tr("Перейти", "Go"), true) {
                                 val target = pathEt.text.toString().trim()
                                 if (target.isNotEmpty()) {
                                     if (activeSftpServer == null) {
@@ -5020,7 +5361,7 @@ class TermuxActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(14), dp(4), dp(14), dp(4))
                 }
-                clipBanner.addView(makeExpressiveChip("Вставить «${clipFile.name}» сюда", true) {
+                clipBanner.addView(makeExpressiveChip(tr("Вставить «${clipFile.name}»", "Paste '${clipFile.name}'"), true) {
                     try {
                         val dst = File(localCurrentDir, clipFile.name)
                         if (clipFile.isDirectory) clipFile.copyRecursively(dst, overwrite = true)
@@ -5029,10 +5370,10 @@ class TermuxActivity : Activity() {
                         fileClipSource = null
                         renderSftpTab()
                     } catch (e: Throwable) {
-                        Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
                 })
-                clipBanner.addView(makeExpressiveChip("Отмена", false) {
+                clipBanner.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) {
                     fileClipSource = null
                     renderSftpTab()
                 })
@@ -5080,7 +5421,7 @@ class TermuxActivity : Activity() {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(14), dp(11), dp(14), dp(11))
-                    background = segmentedCardBg(currentCardIdx, max(1, totalCards), uiSurfaceLow, uiOutlineVariant, 20f, 5f)
+                    background = segmentedCardBg(currentCardIdx, max(1, totalCards), uiSurfaceLow, 0, 20f, 5f)
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
@@ -5105,7 +5446,7 @@ class TermuxActivity : Activity() {
                 }
                 upCard.addView(
                     FrameLayout(this).apply {
-                        background = pillBg(uiAccentContainer, uiAccentContainer, dp(11))
+                        background = tonalBg(uiAccentContainer, dp(11))
                         layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
                             marginEnd = dp(12)
                         }
@@ -5123,7 +5464,7 @@ class TermuxActivity : Activity() {
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 })
                 upCol.addView(TextView(this).apply {
-                    text = "Родительская папка"
+                    text = tr("Родительская папка", "Parent directory")
                     setTextColor(COLOR_TEXT_DIM)
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
                 })
@@ -5141,9 +5482,8 @@ class TermuxActivity : Activity() {
                 }
                 hdrRow.addView(
                     FrameLayout(this).apply {
-                        background = pillBg(
+                        background = tonalBg(
                             if (item.isDirectory) uiAccentContainer else uiSurfaceLow,
-                            if (item.isDirectory) uiAccent else uiOutlineVariant,
                             dp(12)
                         )
                         layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
@@ -5183,11 +5523,11 @@ class TermuxActivity : Activity() {
 
                 val opts = ArrayList<Triple<M3Icon, String, () -> Unit>>()
                 if (!item.isDirectory) {
-                    opts.add(Triple(M3Icon.EDIT, "Открыть / Редактировать код") {
+                    opts.add(Triple(M3Icon.EDIT, tr("Открыть / Редактировать", "Open / Edit code")) {
                         if (srv == null) {
                             val f = File(item.path)
                             val content = try {
-                                if (f.length() <= 512 * 1024) f.readText() else "Файл > 512 КБ"
+                                if (f.length() <= 512 * 1024) f.readText() else "File > 512 KB"
                             } catch (_: Throwable) { "" }
                             showCodeViewerAndEditorDialog(item.name, item.path, content) { updated ->
                                 try {
@@ -5209,15 +5549,15 @@ class TermuxActivity : Activity() {
                             }
                         }
                     })
-                    opts.add(Triple(M3Icon.DOWNLOAD, "Скачать в Загрузки (/sdcard/Download)") {
+                    opts.add(Triple(M3Icon.DOWNLOAD, tr("Скачать в Загрузки", "Download to /sdcard/Download")) {
                         val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).apply { mkdirs() }
                         val dst = File(dlDir, item.name)
                         if (srv == null) {
                             try {
                                 File(item.path).copyTo(dst, overwrite = true)
-                                Toast.makeText(this, "Сохранено: ${dst.absolutePath}", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_SHORT).show()
                             } catch (e: Throwable) {
-                                Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                             }
                         } else {
                             Thread {
@@ -5227,19 +5567,17 @@ class TermuxActivity : Activity() {
                                         try {
                                             val bytes = android.util.Base64.decode(b64Out.replace("\n", "").replace("\r", ""), android.util.Base64.DEFAULT)
                                             dst.writeBytes(bytes)
-                                            Toast.makeText(this, "Скачано в Загрузки: ${dst.name} (${formatSize(bytes.size.toLong())})", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(this, tr("Скачано: ${dst.name}", "Downloaded: ${dst.name}"), Toast.LENGTH_SHORT).show()
                                         } catch (e: Throwable) {
-                                            Toast.makeText(this, "Ошибка декодирования: ${e.message}", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                                         }
-                                    } else {
-                                        Toast.makeText(this, "Ошибка скачивания: $b64Out", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             }.start()
                         }
                     })
                 } else {
-                    opts.add(Triple(M3Icon.TERMINAL, "Открыть папку в терминале (cd)") {
+                    opts.add(Triple(M3Icon.TERMINAL, tr("Открыть папку в терминале (cd)", "Open folder in terminal (cd)")) {
                         if (srv == null) {
                             dlg.dismiss()
                             nativeSendText("cd ${shellEscapeSingle(item.path)}\n", false)
@@ -5251,10 +5589,10 @@ class TermuxActivity : Activity() {
                         }
                     })
                 }
-                opts.add(Triple(M3Icon.EDIT, "Переименовать") {
+                opts.add(Triple(M3Icon.EDIT, tr("Переименовать", "Rename")) {
                     val (rDlg, rSheet) = createExpressiveDialog(380)
                     rSheet.addView(TextView(this).apply {
-                        text = "Переименовать"
+                        text = tr("Переименовать", "Rename")
                         setTextColor(COLOR_TEXT_BRIGHT)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
                         typeface = Typeface.DEFAULT_BOLD
@@ -5266,7 +5604,7 @@ class TermuxActivity : Activity() {
                         typeface = Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                         setSingleLine(true)
-                        background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(12))
+                        background = tonalBg(uiSurfaceLow, dp(12))
                         setPadding(dp(12), dp(9), dp(12), dp(9))
                     }
                     rSheet.addView(input)
@@ -5275,8 +5613,8 @@ class TermuxActivity : Activity() {
                         gravity = Gravity.END
                         setPadding(0, dp(12), 0, 0)
                     }
-                    bBar.addView(makeExpressiveChip("Отмена", false) { rDlg.dismiss() })
-                    bBar.addView(makeExpressiveChip("Сохранить", true) {
+                    bBar.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { rDlg.dismiss() })
+                    bBar.addView(makeExpressiveChip(tr("Сохранить", "Save"), true) {
                         val newName = input.text.toString().trim()
                         if (newName.isNotEmpty() && !newName.contains('/') && newName != item.name) {
                             if (srv == null) {
@@ -5294,11 +5632,10 @@ class TermuxActivity : Activity() {
                     rSheet.addView(bBar)
                     rDlg.show()
                 })
-                opts.add(Triple(M3Icon.KEY, "Права доступа (chmod)") {
+                opts.add(Triple(M3Icon.KEY, tr("Права доступа (chmod)", "Permissions (chmod)")) {
                     showBakaSuChooseDialog(
                         title = "chmod: ${item.name}",
                         items = listOf("755 (rwxr-xr-x)", "700 (rwx------)", "644 (rw-r--r--)", "600 (rw-------)"),
-                        descriptions = listOf("Исполняемый файл / Папка", "Приватная папка", "Стандартный файл", "Приватный ключ SSH"),
                         selectedIndex = 0
                     ) { which ->
                         val code = arrayOf("755", "700", "644", "600")[which]
@@ -5311,16 +5648,16 @@ class TermuxActivity : Activity() {
                     }
                 })
                 if (srv == null) {
-                    opts.add(Triple(M3Icon.COPY, "Копировать файл / папку") {
+                    opts.add(Triple(M3Icon.COPY, tr("Копировать", "Copy")) {
                         fileClipSource = File(item.path)
                         fileClipIsMove = false
                         renderSftpTab()
                     })
                 }
-                opts.add(Triple(M3Icon.COPY, "Скопировать полный путь") {
+                opts.add(Triple(M3Icon.COPY, tr("Скопировать путь", "Copy path")) {
                     copyToClipboard(item.path, true)
                 })
-                opts.add(Triple(M3Icon.TRASH, "Удалить") {
+                opts.add(Triple(M3Icon.TRASH, tr("Удалить", "Delete")) {
                     if (srv == null) {
                         File(item.path).deleteRecursively()
                     } else {
@@ -5335,7 +5672,7 @@ class TermuxActivity : Activity() {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(12), dp(11), dp(12), dp(11))
-                        background = segmentedCardBg(oIdx, opts.size, uiSurfaceLow, uiOutlineVariant, 16f, 4f)
+                        background = segmentedCardBg(oIdx, opts.size, uiSurfaceLow, 0, 16f, 4f)
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -5351,8 +5688,7 @@ class TermuxActivity : Activity() {
                     }
                     optRow.addView(
                         FrameLayout(this).apply {
-                            background = pillBg(
-                                if (isDel) COLOR_ROOT_CONTAINER else uiAccentContainer,
+                            background = tonalBg(
                                 if (isDel) COLOR_ROOT_CONTAINER else uiAccentContainer,
                                 dp(10)
                             )
@@ -5391,7 +5727,7 @@ class TermuxActivity : Activity() {
                 })
             } else if (entries.isEmpty()) {
                 rowsCol.addView(TextView(this).apply {
-                    text = if (sftpSearchQuery.isNotBlank()) "Нет файлов по запросу «$sftpSearchQuery»" else "Папка пуста"
+                    text = if (sftpSearchQuery.isNotBlank()) tr("Нет файлов по запросу «$sftpSearchQuery»", "No files matching '$sftpSearchQuery'") else tr("Папка пуста", "Folder is empty")
                     gravity = Gravity.CENTER
                     setTextColor(COLOR_TEXT_DIM)
                     typeface = Typeface.MONOSPACE
@@ -5404,7 +5740,7 @@ class TermuxActivity : Activity() {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(14 + item.depth * 14), dp(11), dp(10), dp(11))
-                        background = segmentedCardBg(currentCardIdx, max(1, totalCards), uiSurfaceLow, uiOutlineVariant, 20f, 5f)
+                        background = segmentedCardBg(currentCardIdx, max(1, totalCards), uiSurfaceLow, 0, 20f, 5f)
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -5468,9 +5804,8 @@ class TermuxActivity : Activity() {
                     val iconTint = if (item.isDirectory) uiAccent else COLOR_TEXT_BRIGHT
                     row.addView(
                         FrameLayout(this).apply {
-                            background = pillBg(
+                            background = tonalBg(
                                 if (item.isDirectory) uiAccentContainer else uiSurfaceContainer,
-                                if (item.isDirectory) uiAccentContainer else uiOutlineVariant,
                                 dp(11)
                             )
                             layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
@@ -5519,7 +5854,7 @@ class TermuxActivity : Activity() {
 
                     row.addView(
                         FrameLayout(this).apply {
-                            background = pillBg(uiSurfaceContainer, uiSurfaceContainer, dp(10))
+                            background = tonalBg(uiSurfaceContainer, dp(10))
                             layoutParams = LinearLayout.LayoutParams(dp(34), dp(34)).apply {
                                 marginStart = dp(6)
                             }
@@ -5535,7 +5870,7 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            // 4. Material Design 3 Floating Bottom Bar (ArchiveTune / BakaSU / ColorBlendr style)
+            // 4. Redesigned Material Design 3 Floating Bottom Bar in SFTP (Borderless Tonal Dock + Squircle FAB)
             val bottomBarRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
@@ -5552,28 +5887,28 @@ class TermuxActivity : Activity() {
             val floatingPill = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                background = makeArchiveTuneGlassDrawable(dp(31), tintWithAccent = false)
-                elevation = dpF(10f)
+                background = makeM3FloatingSurfaceDrawable(dp(31), tintWithAccent = false)
+                elevation = dpF(12f)
                 setPadding(dp(6), dp(5), dp(6), dp(5))
                 layoutParams = if (sftpSearchActive) {
-                    LinearLayout.LayoutParams(0, dp(60), 1f)
+                    LinearLayout.LayoutParams(0, dp(62), 1f)
                 } else {
-                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(60))
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(62))
                 }
             }
 
             fun makePillVectorBtn(icon: M3Icon, active: Boolean = false, onClick: () -> Unit): FrameLayout {
                 return FrameLayout(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(52), dp(50)).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(54), dp(50)).apply {
                         setMargins(dp(2), 0, dp(2), 0)
                     }
                     if (active) {
-                        background = pillBg(uiAccentContainer, uiAccent, dp(25))
+                        background = tonalBg(uiAccentContainer, dp(25))
                     }
                     addView(
                         MaterialIconView(
                             this@TermuxActivity,
-                            icon,
+                            icon = icon,
                             tintColor = if (active) uiAccent else COLOR_TEXT_BRIGHT,
                             iconSizeDp = 23f,
                             strokeWidthDp = 2.15f
@@ -5595,7 +5930,7 @@ class TermuxActivity : Activity() {
                 })
                 val searchEt = EditText(this).apply {
                     setText(sftpSearchQuery)
-                    hint = "Поиск в папке…"
+                    hint = tr("Поиск в папке…", "Search in folder…")
                     setHintTextColor(COLOR_TEXT_DIM)
                     setTextColor(COLOR_TEXT_BRIGHT)
                     typeface = Typeface.MONOSPACE
@@ -5640,7 +5975,7 @@ class TermuxActivity : Activity() {
                         setPadding(0, 0, 0, dp(12))
                     }
                     val hdrBadge = FrameLayout(this).apply {
-                        background = pillBg(uiAccentContainer, uiAccent, dp(14))
+                        background = tonalBg(uiAccentContainer, dp(14))
                         layoutParams = LinearLayout.LayoutParams(dp(46), dp(46)).apply {
                             marginEnd = dp(12)
                         }
@@ -5654,7 +5989,7 @@ class TermuxActivity : Activity() {
                         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                     }
                     val hdrTitle = TextView(this).apply {
-                        text = "Новая папка"
+                        text = tr("Новая папка", "New folder")
                         setTextColor(COLOR_TEXT_BRIGHT)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
                         typeface = Typeface.DEFAULT_BOLD
@@ -5679,18 +6014,18 @@ class TermuxActivity : Activity() {
                     }
 
                     val nameEt = EditText(this).apply {
-                        hint = "Введите имя папки (напр. projects)"
+                        hint = tr("Введите имя", "Enter name")
                         setHintTextColor(COLOR_TEXT_DIM)
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
                         setSingleLine(true)
-                        background = pillBg(uiSurfaceLow, uiAccent, dp(16))
+                        background = tonalBg(uiSurfaceLow, dp(16))
                         setPadding(dp(16), dp(13), dp(16), dp(13))
                     }
 
                     val contentLabel = TextView(this).apply {
-                        text = "Начальное содержимое файла (опционально)"
+                        text = tr("Содержимое файла (опционально)", "File content (optional)")
                         setTextColor(uiAccent)
                         typeface = Typeface.DEFAULT_BOLD
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
@@ -5705,12 +6040,12 @@ class TermuxActivity : Activity() {
                         minLines = 3
                         maxLines = 5
                         gravity = Gravity.TOP or Gravity.START
-                        background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(16))
+                        background = tonalBg(uiSurfaceLow, dp(16))
                         setPadding(dp(14), dp(10), dp(14), dp(10))
                     }
 
                     val chmodLabel = TextView(this).apply {
-                        text = "Права доступа (chmod)"
+                        text = "chmod"
                         setTextColor(uiAccent)
                         typeface = Typeface.DEFAULT_BOLD
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
@@ -5722,8 +6057,8 @@ class TermuxActivity : Activity() {
                     rebuildCreateDialogState = {
                         typeRow.removeAllViews()
                         val types = listOf(
-                            Triple(true, M3Icon.FOLDER, "Новая папка"),
-                            Triple(false, M3Icon.FILE, "Новый файл")
+                            Triple(true, M3Icon.FOLDER, tr("Новая папка", "New folder")),
+                            Triple(false, M3Icon.FILE, tr("Новый файл", "New file"))
                         )
                         for ((isFolderOpt, ic, lbl) in types) {
                             val sel = (createIsFolder == isFolderOpt)
@@ -5731,9 +6066,8 @@ class TermuxActivity : Activity() {
                                 orientation = LinearLayout.HORIZONTAL
                                 gravity = Gravity.CENTER
                                 setPadding(dp(14), dp(12), dp(14), dp(12))
-                                background = pillBg(
+                                background = tonalBg(
                                     if (sel) uiAccentContainer else uiSurfaceLow,
-                                    if (sel) uiAccent else uiOutlineVariant,
                                     dp(16)
                                 )
                                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -5771,8 +6105,8 @@ class TermuxActivity : Activity() {
 
                         hdrIcon.icon = if (createIsFolder) M3Icon.CREATE_FOLDER else M3Icon.FILE
                         hdrIcon.invalidate()
-                        hdrTitle.text = if (createIsFolder) "Создать новую папку" else "Создать новый файл"
-                        nameEt.hint = if (createIsFolder) "Имя папки (напр. scripts)" else "Имя файла (напр. main.cpp)"
+                        hdrTitle.text = if (createIsFolder) tr("Создать папку", "Create folder") else tr("Создать файл", "Create file")
+                        nameEt.hint = if (createIsFolder) tr("Имя папки (напр. scripts)", "Folder name (e.g. scripts)") else tr("Имя файла (напр. main.cpp)", "File name (e.g. main.cpp)")
                         contentLabel.visibility = if (createIsFolder) View.GONE else View.VISIBLE
                         contentEt.visibility = if (createIsFolder) View.GONE else View.VISIBLE
 
@@ -5798,11 +6132,11 @@ class TermuxActivity : Activity() {
                         gravity = Gravity.END
                         setPadding(0, dp(16), 0, 0)
                     }
-                    bRow.addView(makeExpressiveChip("Отмена", false) { cDlg.dismiss() })
-                    bRow.addView(makeExpressiveChip("Создать", true) {
+                    bRow.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { cDlg.dismiss() })
+                    bRow.addView(makeExpressiveChip(tr("Создать", "Create"), true) {
                         val n = nameEt.text.toString().trim()
                         if (n.isEmpty() || n.contains('/')) {
-                            Toast.makeText(this, "Введите корректное имя", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this, tr("Введите корректное имя", "Enter a valid name"), Toast.LENGTH_SHORT).show()
                             return@makeExpressiveChip
                         }
                         if (srv == null) {
@@ -5843,16 +6177,16 @@ class TermuxActivity : Activity() {
             })
 
             val uploadFab = FrameLayout(this).apply {
-                background = makeArchiveTuneGlassDrawable(dp(30), tintWithAccent = true)
-                elevation = dpF(10f)
-                layoutParams = LinearLayout.LayoutParams(dp(60), dp(60))
+                background = makeM3FloatingSurfaceDrawable(dp(20), tintWithAccent = true)
+                elevation = dpF(12f)
+                layoutParams = LinearLayout.LayoutParams(dp(62), dp(62))
                 addView(MaterialIconView(this@TermuxActivity, M3Icon.UPLOAD, uiAccent, 24f, 2.25f))
                 attachSmoothPressAnimation(this, 0.90f)
                 setOnClickListener {
                     triggerHaptic(1.0f)
                     val (uDlg, uSheet) = createExpressiveDialog(410)
                     uSheet.addView(TextView(this@TermuxActivity).apply {
-                        text = if (srv == null) "Импорт файла в ${localCurrentDir.name}" else "Выгрузить файл на ${srv.label} (SFTP)"
+                        text = if (srv == null) tr("Импорт файла в ${localCurrentDir.name}", "Import file to ${localCurrentDir.name}") else tr("Выгрузить на ${srv.label}", "Upload to ${srv.label}")
                         setTextColor(COLOR_TEXT_BRIGHT)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
                         typeface = Typeface.DEFAULT_BOLD
@@ -5860,13 +6194,13 @@ class TermuxActivity : Activity() {
                     })
                     val srcEt = EditText(this@TermuxActivity).apply {
                         setText("/sdcard/Download/")
-                        hint = "Локальный путь (/sdcard/Download/...)"
+                        hint = "/sdcard/Download/..."
                         setHintTextColor(COLOR_TEXT_DIM)
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                         setSingleLine(true)
-                        background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(14))
+                        background = tonalBg(uiSurfaceLow, dp(14))
                         setPadding(dp(14), dp(10), dp(14), dp(10))
                     }
                     uSheet.addView(srcEt)
@@ -5875,21 +6209,20 @@ class TermuxActivity : Activity() {
                         gravity = Gravity.END
                         setPadding(0, dp(14), 0, 0)
                     }
-                    bRow.addView(makeExpressiveChip("Отмена", false) { uDlg.dismiss() })
-                    bRow.addView(makeExpressiveChip("Загрузить", true) {
+                    bRow.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { uDlg.dismiss() })
+                    bRow.addView(makeExpressiveChip(tr("Загрузить", "Upload"), true) {
                         val srcFile = File(srcEt.text.toString().trim())
                         if (!srcFile.exists() || !srcFile.isFile) {
-                            Toast.makeText(this@TermuxActivity, "Файл не найден: ${srcFile.absolutePath}", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@TermuxActivity, tr("Файл не найден", "File not found"), Toast.LENGTH_SHORT).show()
                             return@makeExpressiveChip
                         }
                         uDlg.dismiss()
                         if (srv == null) {
                             try {
                                 srcFile.copyTo(File(localCurrentDir, srcFile.name), overwrite = true)
-                                Toast.makeText(this@TermuxActivity, "Скопировано: ${srcFile.name}", Toast.LENGTH_SHORT).show()
                                 renderSftpTab()
                             } catch (e: Throwable) {
-                                Toast.makeText(this@TermuxActivity, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                             }
                         } else if (srcFile.length() <= 2 * 1024 * 1024) {
                             val dstRemote = if (remoteCurrentPath == "/") "/${srcFile.name}" else "$remoteCurrentPath/${srcFile.name}"
@@ -5900,12 +6233,8 @@ class TermuxActivity : Activity() {
                                     "printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(dstRemote)}"
                                 )
                                 runOnUiThread {
-                                    if (ok) {
-                                        Toast.makeText(this@TermuxActivity, "Загружено на сервер: ${srcFile.name}", Toast.LENGTH_SHORT).show()
-                                        renderSftpTab()
-                                    } else {
-                                        Toast.makeText(this@TermuxActivity, "Ошибка: $err", Toast.LENGTH_SHORT).show()
-                                    }
+                                    if (ok) renderSftpTab()
+                                    else Toast.makeText(this@TermuxActivity, "Error: $err", Toast.LENGTH_SHORT).show()
                                 }
                             }.start()
                         } else {
@@ -5925,7 +6254,7 @@ class TermuxActivity : Activity() {
         }
 
         // ====================================================================
-        // TAB 2: Packages Manager (All: * | Size: * | Refresh Icon | Trash Icon | BakaSU Pull-to-Refresh)
+        // TAB 2: Packages Manager (Separated Removable vs Core System Packages + No Outlines)
         // ====================================================================
         fun renderPackagesTab() {
             contentFrame.removeAllViews()
@@ -5943,12 +6272,14 @@ class TermuxActivity : Activity() {
 
             val installed = parseInstalledDpkgPackagesViaCpp23()
             val totalKb = installed.sumOf { it.sizeKb }
+            val userPackages = installed.filter { !it.isCore }
+            val corePackages = installed.filter { it.isCore }
 
             val summaryCard = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(12), dp(10), dp(12), dp(10))
-                background = pillBg(uiSurfaceLow, uiOutlineVariant, dp(22))
+                background = tonalBg(uiSurfaceLow, dp(22))
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -5960,7 +6291,7 @@ class TermuxActivity : Activity() {
             val allBadge = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                background = pillBg(uiAccentContainer, uiAccent, dp(13))
+                background = tonalBg(uiAccentContainer, dp(13))
                 setPadding(dp(11), dp(7), dp(13), dp(7))
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -5987,7 +6318,7 @@ class TermuxActivity : Activity() {
             val sizeBadge = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                background = pillBg(uiSurfaceContainer, uiOutlineVariant, dp(13))
+                background = tonalBg(uiSurfaceContainer, dp(13))
                 setPadding(dp(11), dp(7), dp(13), dp(7))
             }
             sizeBadge.addView(
@@ -6009,15 +6340,16 @@ class TermuxActivity : Activity() {
                 layoutParams = LinearLayout.LayoutParams(0, dp(1), 1f)
             })
 
+            // Runs single-pass `pkg upgrade -y` (since `pkg upgrade` already runs `pkg update` once!)
             val upgradeBtn = FrameLayout(this).apply {
-                background = pillBg(uiAccentContainer, uiAccent, dp(13))
+                background = tonalBg(uiAccentContainer, dp(13))
                 layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
                 addView(MaterialIconView(this@TermuxActivity, M3Icon.REFRESH, uiAccent, 21f, 2.15f))
                 attachSmoothPressAnimation(this, 0.90f)
                 setOnClickListener {
                     triggerHaptic(0.9f)
                     dlg.dismiss()
-                    nativeSendText("pkg update -y && pkg upgrade -y\n", false)
+                    nativeSendText("pkg upgrade -y\n", false)
                 }
             }
             summaryCard.addView(upgradeBtn)
@@ -6043,55 +6375,81 @@ class TermuxActivity : Activity() {
             }
             outer.addView(ptrPackages)
 
-            for ((idx, pkg) in installed.withIndex()) {
-                val card = LinearLayout(this).apply {
+            fun makePkgCard(pkg: DpkgPackageInfo, idx: Int, total: Int, allowDelete: Boolean): LinearLayout {
+                return LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(14), dp(11), dp(12), dp(11))
-                    background = segmentedCardBg(idx, installed.size, uiSurfaceLow, uiOutlineVariant, 20f, 5f)
+                    background = segmentedCardBg(idx, total, uiSurfaceLow, 0, 20f, 5f)
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
                     ).apply {
-                        bottomMargin = dp(2)
+                        bottomMargin = if (idx < total - 1) dp(2) else dp(10)
                     }
-                }
-                val infoCol = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                        marginEnd = dp(10)
-                    }
-                }
-                infoCol.addView(TextView(this).apply {
-                    text = "${pkg.name} (${pkg.version})"
-                    setSingleLine(true)
-                    setTextColor(COLOR_TEXT_BRIGHT)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                })
-                infoCol.addView(TextView(this).apply {
-                    text = "${formatSize(pkg.sizeKb * 1024L)} • ${pkg.description}"
-                    setSingleLine(true)
-                    setTextColor(COLOR_TEXT_DIM)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
-                    setPadding(0, dp(2), 0, 0)
-                })
-                card.addView(infoCol)
 
-                card.addView(
-                    FrameLayout(this).apply {
-                        background = pillBg(COLOR_ROOT_CONTAINER, COLOR_ROOT, dp(12))
-                        layoutParams = LinearLayout.LayoutParams(dp(38), dp(38))
-                        addView(MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 19.5f, 2.0f))
-                        attachSmoothPressAnimation(this, 0.90f)
-                        setOnClickListener {
-                            triggerHaptic(0.9f)
-                            dlg.dismiss()
-                            nativeSendText("apt remove -y ${pkg.name}\n", false)
+                    val infoCol = LinearLayout(this@TermuxActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginEnd = dp(10)
                         }
                     }
-                )
-                pkgCol.addView(card)
+                    infoCol.addView(TextView(this@TermuxActivity).apply {
+                        text = "${pkg.name} (${pkg.version})"
+                        setSingleLine(true)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    })
+                    infoCol.addView(TextView(this@TermuxActivity).apply {
+                        text = "${formatSize(pkg.sizeKb * 1024L)} • ${pkg.description}"
+                        setSingleLine(true)
+                        setTextColor(COLOR_TEXT_DIM)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                        setPadding(0, dp(2), 0, 0)
+                    })
+                    addView(infoCol)
+
+                    if (allowDelete) {
+                        addView(
+                            FrameLayout(this@TermuxActivity).apply {
+                                background = tonalBg(COLOR_ROOT_CONTAINER, dp(12))
+                                layoutParams = LinearLayout.LayoutParams(dp(38), dp(38))
+                                addView(MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_PASTEL_RED, 19.5f, 2.0f))
+                                attachSmoothPressAnimation(this, 0.90f)
+                                setOnClickListener {
+                                    triggerHaptic(0.9f)
+                                    dlg.dismiss()
+                                    nativeSendText("apt remove -y ${pkg.name}\n", false)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+
+            if (userPackages.isNotEmpty()) {
+                pkgCol.addView(TextView(this).apply {
+                    text = tr("Установленные пакеты (${userPackages.size})", "Installed packages (${userPackages.size})")
+                    setTextColor(uiAccent)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    setPadding(dp(8), dp(4), dp(8), dp(6))
+                })
+                for ((idx, pkg) in userPackages.withIndex()) {
+                    pkgCol.addView(makePkgCard(pkg, idx, userPackages.size, allowDelete = true))
+                }
+            }
+
+            pkgCol.addView(TextView(this).apply {
+                text = tr("Основные системные пакеты (${corePackages.size})", "Core system packages (${corePackages.size})")
+                setTextColor(COLOR_TEXT_DIM)
+                typeface = Typeface.DEFAULT_BOLD
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                setPadding(dp(8), dp(8), dp(8), dp(6))
+            })
+            for ((idx, pkg) in corePackages.withIndex()) {
+                pkgCol.addView(makePkgCard(pkg, idx, corePackages.size, allowDelete = false))
             }
         }
 
@@ -6327,7 +6685,7 @@ class TermuxActivity : Activity() {
         index: Int,
         total: Int,
         fill: Int = COLOR_CARD_BG,
-        stroke: Int = COLOR_BORDER,
+        stroke: Int = 0,
         outerRadiusDp: Float = 22f,
         innerRadiusDp: Float = 4f
     ): GradientDrawable {
@@ -6338,7 +6696,9 @@ class TermuxActivity : Activity() {
         return GradientDrawable().apply {
             setColor(fill)
             cornerRadii = floatArrayOf(topR, topR, topR, topR, botR, botR, botR, botR)
-            setStroke(max(1, dp(1)), stroke)
+            if (stroke != 0) {
+                setStroke(max(1, dp(1)), stroke)
+            }
         }
     }
 
@@ -6394,6 +6754,7 @@ class TermuxActivity : Activity() {
         internal var cellHeight = 36f
         private var cellBaseline = 28f
         internal var fontScale = prefs.getFloat(KEY_FONT_SCALE, 1.0f).coerceIn(0.45f, 3.0f)
+        internal var lineSpacingPct = prefs.getInt(KEY_LINE_SPACING_PCT, 100).coerceIn(85, 135)
 
         internal var rows = 24
         internal var cols = 80
@@ -6532,6 +6893,10 @@ class TermuxActivity : Activity() {
                         val col = (e.x / cellWidth).toInt().coerceIn(0, max(0, cols - 1))
                         val row = (e.y / cellHeight).toInt().coerceIn(0, max(0, rows - 1))
                         nativeStartTextSelection(scrollOffset, col, row)
+                        if (copyOnSelect) {
+                            val selTxt = nativeGetSelectedText()
+                            if (selTxt.isNotEmpty()) copyToClipboard(selTxt, false)
+                        }
                         showColorOsFloatingActionMode()
                         invalidateAllRows()
                     }
@@ -6587,26 +6952,29 @@ class TermuxActivity : Activity() {
         }
 
         internal fun reloadTerminalFont() {
-            val preset = prefs.getInt(KEY_FONT_PRESET, 0)
+            val preset = prefs.getInt(KEY_FONT_PRESET, 2)
             val customPath = prefs.getString(KEY_CUSTOM_FONT_PATH, "") ?: ""
             val ligs = prefs.getBoolean(KEY_FONT_LIGATURES, false)
 
             baseTypeface = try {
                 when (preset) {
-                    1 -> Typeface.Builder(context.assets, "fonts/JetBrainsMono.ttf")
-                        .setFontVariationSettings("'wght' 300")
-                        .build() ?: Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
+                    0 -> Typeface.DEFAULT // Android System UI Default Font
+                    1 -> Typeface.MONOSPACE // Android System Monospace Font
                     2 -> Typeface.Builder(context.assets, "fonts/JetBrainsMono.ttf")
-                        .setFontVariationSettings("'wght' 500")
+                        .setFontVariationSettings("'wght' 400")
                         .build() ?: Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
                     3 -> Typeface.Builder(context.assets, "fonts/JetBrainsMono.ttf")
-                        .setFontVariationSettings("'wght' 600")
+                        .setFontVariationSettings("'wght' 300")
                         .build() ?: Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
                     4 -> Typeface.Builder(context.assets, "fonts/JetBrainsMono.ttf")
+                        .setFontVariationSettings("'wght' 500")
+                        .build() ?: Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
+                    5 -> Typeface.Builder(context.assets, "fonts/JetBrainsMono.ttf")
+                        .setFontVariationSettings("'wght' 600")
+                        .build() ?: Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
+                    6 -> Typeface.Builder(context.assets, "fonts/JetBrainsMono.ttf")
                         .setFontVariationSettings("'wght' 700")
                         .build() ?: Typeface.create(Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf"), Typeface.BOLD)
-                    5 -> Typeface.MONOSPACE
-                    6 -> Typeface.create("serif-monospace", Typeface.NORMAL) ?: Typeface.SERIF
                     7 -> {
                         val f = File(customPath)
                         if (f.exists() && f.isFile && f.length() > 4096) {
@@ -6615,16 +6983,10 @@ class TermuxActivity : Activity() {
                             Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
                         }
                     }
-                    else -> Typeface.Builder(context.assets, "fonts/JetBrainsMono.ttf")
-                        .setFontVariationSettings("'wght' 400")
-                        .build() ?: Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
+                    else -> Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
                 }
             } catch (_: Throwable) {
-                try {
-                    Typeface.createFromAsset(context.assets, "fonts/JetBrainsMono.ttf")
-                } catch (_: Throwable) {
-                    Typeface.MONOSPACE
-                }
+                Typeface.MONOSPACE
             }
             boldTypeface = Typeface.create(baseTypeface, Typeface.BOLD)
             italicTypeface = Typeface.create(baseTypeface, Typeface.ITALIC)
@@ -6795,8 +7157,10 @@ class TermuxActivity : Activity() {
             textPaint.typeface = baseTypeface
             val fm = textPaint.fontMetrics
             cellWidth = max(6f, textPaint.measureText("M"))
-            cellHeight = max(12f, ceil((fm.descent - fm.ascent + fm.leading).toDouble()).toFloat())
-            cellBaseline = -fm.ascent
+            val rawHeight = ceil((fm.descent - fm.ascent + fm.leading).toDouble()).toFloat()
+            cellHeight = max(12f, rawHeight * (lineSpacingPct / 100f))
+            val extraPad = (cellHeight - rawHeight) * 0.5f
+            cellBaseline = -fm.ascent + extraPad
             if (forceRebuildCache) {
                 rowNodes = null
                 rowNodesValid = null
@@ -7914,7 +8278,9 @@ class TermuxActivity : Activity() {
         @JvmStatic external fun nativeStopTextSelection(): Boolean
         @JvmStatic external fun nativeIsSelectingText(): Boolean
         @JvmStatic external fun nativeSelectAll(scrollOffset: Int)
+        @JvmStatic var activeInstance: TermuxActivity? = null
         @JvmStatic external fun nativeSetDefaultCursorShape(shape: Int)
+        @JvmStatic external fun nativeSetMaxScrollback(maxLines: Int)
         @JvmStatic external fun nativeGetSelectedText(): String
         @JvmStatic external fun nativeGenerateColorSpec2026Palette(seedArgb: Int, styleIndex: Int): IntArray
         @JvmStatic external fun nativeDiscoverCustomFonts(): String
@@ -7925,33 +8291,58 @@ class KeepAliveService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
-    override fun onCreate() {
-        super.onCreate()
+    private fun buildMinimalNotification(): Notification {
         val chId = "termux_session_channel"
         val nm = getSystemService(NotificationManager::class.java)
         nm?.createNotificationChannel(
             NotificationChannel(chId, "Termux", NotificationManager.IMPORTANCE_LOW).apply {
                 setShowBadge(false)
+                enableVibration(false)
+                setSound(null, null)
             }
         )
 
-        val pi = PendingIntent.getActivity(
+        val openPi = PendingIntent.getActivity(
             this,
             0,
             Intent(this, TermuxActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val notification = Notification.Builder(this, chId)
-            .setContentTitle("Termux")
-            .setContentText("Сессия активна")
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentIntent(pi)
-            .setOngoing(true)
-            .build()
+        val exitIntent = Intent(this, KeepAliveService::class.java).apply {
+            action = ACTION_EXIT_APP
+        }
+        val exitPi = PendingIntent.getService(
+            this,
+            1,
+            exitIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
 
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val lang = prefs.getInt(KEY_APP_LANG, 0)
+        val isEn = when (lang) {
+            1 -> false
+            2 -> true
+            else -> !Locale.getDefault().language.lowercase().startsWith("ru")
+        }
+        val exitLabel = if (isEn) "Exit" else "Выход"
+
+        val exitAction = Notification.Action.Builder(null, exitLabel, exitPi).build()
+
+        return Notification.Builder(this, chId)
+            .setContentTitle("Termux")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(openPi)
+            .setOngoing(true)
+            .addAction(exitAction)
+            .build()
+    }
+
+    override fun onCreate() {
+        super.onCreate()
         try {
-            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            startForeground(1, buildMinimalNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } catch (_: Throwable) {
         }
 
@@ -7982,6 +8373,35 @@ class KeepAliveService : Service() {
         } catch (_: Throwable) {
         }
         super.onDestroy()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_EXIT_APP) {
+            try {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } catch (_: Throwable) {
+            }
+            try {
+                val nm = getSystemService(NotificationManager::class.java)
+                nm?.cancelAll()
+            } catch (_: Throwable) {
+            }
+            stopSelf()
+            TermuxActivity.activeInstance?.exitAppCompletely() ?: run {
+                try {
+                    TermuxActivity.nativeDestroyAll()
+                } catch (_: Throwable) {
+                }
+                kotlin.system.exitProcess(0)
+            }
+            return START_NOT_STICKY
+        }
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm?.notify(1, buildMinimalNotification())
+        } catch (_: Throwable) {
+        }
+        return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

@@ -792,10 +792,35 @@ EXPORT_SYM int mkdirat(int dirfd, const char* pathname, mode_t mode) {
     return rc;
 }
 
+static bool isDpkgProcess() noexcept {
+    static int cached = -1;
+    if (cached != -1) return cached == 1;
+    char comm[64] = {0};
+    int fd = rawOpenAt(AT_FDCWD, "/proc/self/comm", O_RDONLY | O_CLOEXEC, 0);
+    if (fd >= 0) {
+        ssize_t n = read(fd, comm, sizeof(comm) - 1);
+        close(fd);
+        if (n > 0) {
+            comm[n] = 0;
+            if (strncmp(comm, "dpkg", 4) == 0) {
+                cached = 1;
+                return true;
+            }
+        }
+    }
+    cached = 0;
+    return false;
+}
+
 EXPORT_SYM int rmdir(const char* pathname) {
     PathBuf pb(pathname);
     if (isContainerParentDir(pb.ptr)) return 0;
-    return static_cast<int>(syscall(__NR_unlinkat, AT_FDCWD, pb.ptr, AT_REMOVEDIR));
+    int rc = static_cast<int>(syscall(__NR_unlinkat, AT_FDCWD, pb.ptr, AT_REMOVEDIR));
+    if (rc < 0 && (errno == ENOTEMPTY || errno == EEXIST) && isDpkgProcess()) {
+        // Prevent bogus dpkg warning when old .list and new .deb share a relocated directory
+        errno = ENOENT;
+    }
+    return rc;
 }
 
 EXPORT_SYM int unlink(const char* pathname) {
@@ -806,7 +831,11 @@ EXPORT_SYM int unlink(const char* pathname) {
 EXPORT_SYM int unlinkat(int dirfd, const char* pathname, int flags) {
     PathBuf pb(pathname);
     if ((flags & AT_REMOVEDIR) && isContainerParentDir(pb.ptr)) return 0;
-    return static_cast<int>(syscall(__NR_unlinkat, dirfd, pb.ptr, flags));
+    int rc = static_cast<int>(syscall(__NR_unlinkat, dirfd, pb.ptr, flags));
+    if (rc < 0 && (flags & AT_REMOVEDIR) && (errno == ENOTEMPTY || errno == EEXIST) && isDpkgProcess()) {
+        errno = ENOENT;
+    }
+    return rc;
 }
 
 EXPORT_SYM int rename(const char* oldpath, const char* newpath) {
