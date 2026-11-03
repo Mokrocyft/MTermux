@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Build-Time Bootstrap Updater, APT Lists Pre-Populator & Binary Relocator for Termuxx (com.termuxx).
+Build-Time Bootstrap Downloader, Cache-Aware Updater, APT Lists Pre-Populator & Binary Relocator
+for Termuxx (com.termuxx).
 Runs during APK build to:
-1. Fetch the live Termux aarch64 package index & InRelease from packages-cf.termux.dev.
-2. Pre-populate var/lib/apt/lists/ inside bootstrap-aarch64.zip so `apt install <pkg>` works
-   immediately out of the box without needing `apt update` first.
-3. Compare every package in bootstrap-aarch64.zip's var/lib/dpkg/status with the live repository
-   and slipstream any newer .deb packages directly into the bootstrap archive.
-4. Pre-patch 16-byte tokens ("com.termux/files" -> "com.termuxx/file", "com.termux/cache" -> "com.termuxx/cach")
-   so the APK ships 100% up-to-date out of the box.
+1. Download JetBrainsMono.ttf and bootstrap-aarch64.zip directly if not already present (eliminating
+   the extra cold Gradle invocation in CI).
+2. If `.bootstrap_patched.stamp` is already present (restored from CI cache), skip redundant network
+   downloads and .deb slipstreaming for instant cached builds.
+3. Otherwise fetch the live Termux aarch64 package index & InRelease, pre-populate var/lib/apt/lists/,
+   slipstream updated .deb packages, pre-select default mirror (`etc/termux/chosen_mirrors`), and
+   pre-patch 16-byte tokens ("com.termux/files" -> "com.termuxx/file", "com.termux/cache" -> "com.termuxx/cach").
 """
 
 import os
@@ -21,13 +22,52 @@ import zipfile
 REPO_BASE = "https://packages-cf.termux.dev/apt/termux-main"
 INRELEASE_URL = f"{REPO_BASE}/dists/stable/InRelease"
 PACKAGES_URL = f"{REPO_BASE}/dists/stable/main/binary-aarch64/Packages"
+
 BOOTSTRAP_ZIP = "app/src/main/cpp/bootstrap-aarch64.zip"
+STAMP_FILE = "app/src/main/cpp/.bootstrap_patched.stamp"
+FONT_FILE = "app/src/main/assets/fonts/JetBrainsMono.ttf"
+
+BOOTSTRAP_URLS = [
+    "https://github.com/termux/termux-packages/releases/latest/download/bootstrap-aarch64.zip",
+    "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.02.12-r1%2Bapt.android-7/bootstrap-aarch64.zip",
+]
+FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf"
 
 PREFIX_IN_DEB = "data/data/com.termux/files/usr/"
 OLD_FILES_16 = b"com.termux/files"
 NEW_FILES_16 = b"com.termuxx/file"
 OLD_CACHE_16 = b"com.termux/cache"
 NEW_CACHE_16 = b"com.termuxx/cach"
+
+
+def ensure_font_downloaded():
+    if os.path.exists(FONT_FILE) and os.path.getsize(FONT_FILE) > 50_000:
+        print(f"[update_bootstrap] Cached font found: {FONT_FILE}")
+        return
+    os.makedirs(os.path.dirname(FONT_FILE), exist_ok=True)
+    print(f"[update_bootstrap] Downloading JetBrainsMono.ttf from {FONT_URL} ...")
+    req = urllib.request.Request(FONT_URL, headers={"User-Agent": "termux-pkg/2.0"})
+    with urllib.request.urlopen(req, timeout=45) as resp, open(FONT_FILE, "wb") as out:
+        shutil.copyfileobj(resp, out)
+    print(f"[update_bootstrap] Downloaded {FONT_FILE} ({os.path.getsize(FONT_FILE):,} bytes).")
+
+
+def ensure_raw_bootstrap_downloaded():
+    if os.path.exists(BOOTSTRAP_ZIP) and os.path.getsize(BOOTSTRAP_ZIP) > 10_000_000:
+        return
+    os.makedirs(os.path.dirname(BOOTSTRAP_ZIP), exist_ok=True)
+    for url in BOOTSTRAP_URLS:
+        try:
+            print(f"[update_bootstrap] Downloading bootstrap-aarch64.zip from {url} ...")
+            req = urllib.request.Request(url, headers={"User-Agent": "termux-pkg/2.0"})
+            with urllib.request.urlopen(req, timeout=60) as resp, open(BOOTSTRAP_ZIP, "wb") as out:
+                shutil.copyfileobj(resp, out)
+            if os.path.getsize(BOOTSTRAP_ZIP) > 10_000_000:
+                print(f"[update_bootstrap] Downloaded {BOOTSTRAP_ZIP} ({os.path.getsize(BOOTSTRAP_ZIP):,} bytes).")
+                return
+        except Exception as e:
+            print(f"[update_bootstrap] Download attempt failed ({url}): {e}")
+    raise RuntimeError("Failed to download bootstrap-aarch64.zip")
 
 
 def parse_stanzas(text):
@@ -50,9 +90,17 @@ def parse_stanzas(text):
 
 
 def main():
-    if not os.path.exists(BOOTSTRAP_ZIP):
-        print(f"[update_bootstrap] {BOOTSTRAP_ZIP} not found, skipping.")
+    ensure_font_downloaded()
+
+    if (
+        os.path.exists(STAMP_FILE)
+        and os.path.exists(BOOTSTRAP_ZIP)
+        and os.path.getsize(BOOTSTRAP_ZIP) > 10_000_000
+    ):
+        print(f"[update_bootstrap] Using cached pre-patched {BOOTSTRAP_ZIP} ({os.path.getsize(BOOTSTRAP_ZIP):,} bytes).")
         return
+
+    ensure_raw_bootstrap_downloaded()
 
     print(f"[update_bootstrap] Inspecting {BOOTSTRAP_ZIP} ...")
     work_dir = tempfile.mkdtemp(prefix="termuxx_bs_")
@@ -82,7 +130,6 @@ def main():
                     repo_bytes = resp.read()
                     repo_text = repo_bytes.decode("utf-8", errors="replace")
 
-                # Pre-populate var/lib/apt/lists/ so `apt install <pkg>` works immediately out of the box!
                 apt_lists_dir = os.path.join(extract_dir, "var/lib/apt/lists")
                 os.makedirs(os.path.join(apt_lists_dir, "partial"), exist_ok=True)
                 pkg_list_file = os.path.join(
@@ -151,7 +198,6 @@ def main():
             except Exception as e:
                 print(f"[update_bootstrap] Live repo sync warning (continuing with base bootstrap): {e}")
 
-        # Configure apt.conf.d/00termuxx inside the bootstrap so apt uses /data/data/com.termuxx/cach/apt
         apt_conf_dir = os.path.join(extract_dir, "etc/apt/apt.conf.d")
         os.makedirs(apt_conf_dir, exist_ok=True)
         with open(os.path.join(apt_conf_dir, "00termuxx"), "w", encoding="utf-8") as f:
@@ -160,11 +206,9 @@ def main():
                 'Dir::Cache::archives "/data/data/com.termuxx/cach/apt/archives";\n'
             )
 
-        # Ensure default mirror symlink is pre-selected so pkg never warns "No mirror or mirror group selected"
         if "etc/termux/chosen_mirrors" not in symlinks_map:
             symlinks_map["etc/termux/chosen_mirrors"] = "/data/data/com.termuxx/file/usr/etc/termux/mirrors/default"
 
-        # Write updated SYMLINKS.txt with com.termuxx/file paths
         if symlinks_map:
             with open(symlinks_path, "w", encoding="utf-8") as f:
                 for rel_link, target in sorted(symlinks_map.items()):
@@ -172,7 +216,6 @@ def main():
                     patched_link = rel_link.replace("com.termux/files", "com.termuxx/file").replace("com.termux/cache", "com.termuxx/cach")
                     f.write(f"{patched_target}←{patched_link}\n")
 
-        # Pre-patch all regular files in the bootstrap for com.termuxx
         patched_files = 0
         for root, dirs, files in os.walk(extract_dir):
             for fname in files:
@@ -190,7 +233,6 @@ def main():
                     patched_files += 1
         print(f"[update_bootstrap] Pre-patched {patched_files} files for com.termuxx.")
 
-        # Repack bootstrap-aarch64.zip
         tmp_zip = BOOTSTRAP_ZIP + ".new"
         with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             for root, dirs, files in os.walk(extract_dir):
@@ -209,6 +251,8 @@ def main():
                     zf.write(full_f, rel_f)
 
         os.replace(tmp_zip, BOOTSTRAP_ZIP)
+        with open(STAMP_FILE, "w", encoding="utf-8") as sf:
+            sf.write("patched\n")
         print(f"[update_bootstrap] Repacked {BOOTSTRAP_ZIP} ({os.path.getsize(BOOTSTRAP_ZIP):,} bytes).")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -233,7 +277,6 @@ def slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, deb_url):
     if not os.path.isdir(usr_src):
         return False
 
-    # Clean up old files of this package before unpacking the new version so obsolete dirs (e.g. share/doc/nghttp2) are empty
     old_list_file = os.path.join(extract_dir, "var/lib/dpkg/info", f"{pkg_name}.list")
     old_dirs = []
     if os.path.exists(old_list_file):

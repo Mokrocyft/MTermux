@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(termuxx-core LANGUAGES C CXX ASM)
 
+# Automatically use ccache when available to cache C++23 object compilation across builds
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+endif()
+
 include(CheckCXXCompilerFlag)
 
 check_cxx_compiler_flag("-std=c++26" HAS_CXX26)

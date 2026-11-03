@@ -33,17 +33,7 @@ android {
         }
     }
 
-    // Embedded signing keystore so both Debug and Release APKs are pre-signed out of the box
     signingConfigs {
-        named("debug") {
-            storeFile = file("testkey_untrusted.jks")
-            keyAlias = "alias"
-            storePassword = "xrj45yWGLbsO7W0v"
-            keyPassword = "xrj45yWGLbsO7W0v"
-            enableV1Signing = true
-            enableV2Signing = true
-            enableV3Signing = true
-        }
         create("releaseSigned") {
             storeFile = file("testkey_untrusted.jks")
             keyAlias = "alias"
@@ -56,9 +46,6 @@ android {
     }
 
     buildTypes {
-        debug {
-            signingConfig = signingConfigs.getByName("debug")
-        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -98,6 +85,13 @@ android {
     }
 }
 
+// Disable debug build variant completely so Gradle only configures and builds Release
+androidComponents {
+    beforeVariants(selector().withBuildType("debug")) { variantBuilder ->
+        variantBuilder.enable = false
+    }
+}
+
 dependencies {
     // Zero external Java libraries — 100% pure Kotlin + Android framework + C++23 native core!
 }
@@ -115,7 +109,6 @@ abstract class DownloadLatestBootstrapTask : DefaultTask() {
         if (file.exists() && file.length() > 10_000_000L) return
         file.parentFile.mkdirs()
 
-        // Try the latest official Termux bootstrap release first, with fallback to verified release
         val urls = listOf(
             "https://github.com/termux/termux-packages/releases/latest/download/bootstrap-aarch64.zip",
             "https://github.com/termux/termux-packages/releases/download/bootstrap-${fallbackVersion.get()}/bootstrap-aarch64.zip"
@@ -197,26 +190,10 @@ val downloadJetBrainsMono = tasks.register<DownloadFontTask>("downloadJetBrainsM
 }
 
 tasks.named<Delete>("clean") {
-    delete(fileTree("src/main/cpp") { include("bootstrap-*.zip") })
+    delete(fileTree("src/main/cpp") { include("bootstrap-*.zip", ".bootstrap_patched.stamp") })
     delete(fileTree("src/main/assets/fonts") { include("*.ttf") })
 }
 
 tasks.named("preBuild") {
     dependsOn(downloadBootstraps, downloadJetBrainsMono)
-}
-
-tasks.withType<JavaCompile>().configureEach {
-    dependsOn(downloadBootstraps, downloadJetBrainsMono)
-    options.compilerArgs.addAll(listOf("-Xlint:-deprecation", "-Xlint:-unchecked", "-Xlint:-rawtypes"))
-}
-
-tasks.configureEach {
-    if (((name.startsWith("compile") && name.endsWith("Kotlin")) ||
-        name.startsWith("configureCMake") ||
-        name.startsWith("buildCMake") ||
-        name.startsWith("externalNativeBuild") ||
-        name.startsWith("merge"))
-    ) {
-        dependsOn(downloadBootstraps, downloadJetBrainsMono)
-    }
 }

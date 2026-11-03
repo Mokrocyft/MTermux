@@ -29,8 +29,11 @@ import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.Settings
+import android.view.animation.LinearInterpolator
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
@@ -4318,6 +4321,8 @@ class TermuxActivity : Activity() {
         val expandedTreePaths = HashSet<String>()
         var sftpSearchActive = false
         var sftpSearchQuery = ""
+        var prevSftpSourceIdx = 0
+        var sftpTransitionDir = 0 // -1 = backward/left, 0 = none, +1 = forward/right
 
         fun openHubSubPage(populateSubPage: (LinearLayout, () -> Unit) -> Unit) {
             inHubSubPage = true
@@ -4884,7 +4889,8 @@ class TermuxActivity : Activity() {
                         makeBakaSuChooseCard(
                             icon = M3Icon.KEY,
                             title = tr("Способ авторизации", "Authentication method"),
-                            options = authOptions,
+                            subtitle = null,
+                            items = authOptions,
                             selectedIndex = selectedAuth,
                             index = 4,
                             total = 6
@@ -4999,7 +5005,8 @@ class TermuxActivity : Activity() {
                         makeBakaSuChooseCard(
                             icon = M3Icon.REFRESH,
                             title = tr("Удержание соединения (ServerAliveInterval)", "Keep-alive (ServerAliveInterval)"),
-                            options = keepAliveLabels,
+                            subtitle = null,
+                            items = keepAliveLabels,
                             selectedIndex = kaIdx,
                             index = 0,
                             total = 5
@@ -5265,8 +5272,7 @@ class TermuxActivity : Activity() {
                     kDlg.dismiss()
                     dlg.dismiss()
                     nativeSendText(
-                        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && rm -f ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub && ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 && cat ~/.ssh/id_ed25519.pub
-",
+                        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && rm -f ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub && ssh-keygen -t ed25519 -N \"\" -f ~/.ssh/id_ed25519 && cat ~/.ssh/id_ed25519.pub\n",
                         false
                     )
                 })
@@ -5490,8 +5496,7 @@ class TermuxActivity : Activity() {
                                     Triple(M3Icon.KEY, tr("Установить мой ключ (ssh-copy-id)", "Install my SSH key (ssh-copy-id)")) {
                                         dlg.dismiss()
                                         createSession(false, runStartupCmd = false)
-                                        val copyCmd = "mkdir -p ~/.ssh && ([ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519) && ssh-copy-id -p ${srv.port} ${srv.username}@${srv.host}
-"
+                                        val copyCmd = "mkdir -p ~/.ssh && ([ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -t ed25519 -N \"\" -f ~/.ssh/id_ed25519) && ssh-copy-id -p ${srv.port} ${srv.username}@${srv.host}\n"
                                         terminalSurface.postDelayed({ nativeSendText(copyCmd, false) }, 120L)
                                     },
                                     Triple(M3Icon.TRASH, tr("Удалить сервер", "Delete server")) {
@@ -5669,10 +5674,20 @@ class TermuxActivity : Activity() {
             }
             contentFrame.addView(mainSftpCol)
 
-            // 1. Clean Material 3 Segmented Source Group Bar (Дом (~) | Система | Память | SSH)
-            val sourceBarWrap = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
+            val usrDir = File("/data/data/com.termuxx/file/usr")
+            val sdDir = Environment.getExternalStorageDirectory()
+            val savedServers = loadSshServers()
+
+            val currentSftpSourceIdx = when {
+                activeSftpServer != null -> 3
+                localCurrentDir.absolutePath.startsWith(usrDir.absolutePath) -> 1
+                localCurrentDir.absolutePath.startsWith(sdDir.absolutePath) -> 2
+                else -> 0
+            }
+
+            // 1. Animated Material 3 Segmented Source Group Bar (Дом (~) | Система | Память | SSH)
+            // with sliding & morphing active pill indicator!
+            val sourceBarOuter = FrameLayout(this).apply {
                 background = tonalBg(uiSurfaceLow, dp(16))
                 setPadding(dp(4), dp(4), dp(4), dp(4))
                 layoutParams = LinearLayout.LayoutParams(
@@ -5682,18 +5697,31 @@ class TermuxActivity : Activity() {
                     setMargins(dp(14), dp(8), dp(14), dp(4))
                 }
             }
+            val slidingSourcePill = View(this).apply {
+                background = tonalBg(uiAccentContainer, dp(12))
+                layoutParams = FrameLayout.LayoutParams(0, 0)
+            }
+            sourceBarOuter.addView(slidingSourcePill)
 
-            val usrDir = File("/data/data/com.termuxx/file/usr")
-            val sdDir = Environment.getExternalStorageDirectory()
-            val savedServers = loadSshServers()
+            val sourceBarWrap = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            }
+            sourceBarOuter.addView(sourceBarWrap)
 
+            val segViews = ArrayList<TextView>()
             val localGroups = listOf(
                 Triple(tr("Дом (~)", "Home (~)"), homeDir, false),
                 Triple(tr("Система", "Usr"), usrDir, false),
                 Triple(tr("Память", "SDCard"), sdDir, true)
             )
-            for ((lbl, dir, requiresPerm) in localGroups) {
-                val isSel = (activeSftpServer == null && localCurrentDir.absolutePath.startsWith(dir.absolutePath))
+            for ((gIdx, grp) in localGroups.withIndex()) {
+                val (lbl, dir, requiresPerm) = grp
+                val isSel = (currentSftpSourceIdx == gIdx)
                 val segBtn = TextView(this).apply {
                     text = lbl
                     gravity = Gravity.CENTER
@@ -5701,43 +5729,40 @@ class TermuxActivity : Activity() {
                     typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                     setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                    if (isSel) {
-                        background = tonalBg(uiAccentContainer, dp(12))
-                    }
                     setPadding(dp(8), dp(8), dp(8), dp(8))
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                    attachSmoothPressAnimation(this, 0.95f)
+                    attachSmoothPressAnimation(this, 0.94f)
                     setOnClickListener {
                         triggerHaptic(0.8f)
-                        activeSftpServer = null
+                        val switchToDir = {
+                            sftpTransitionDir = if (gIdx >= currentSftpSourceIdx) 1 else -1
+                            prevSftpSourceIdx = currentSftpSourceIdx
+                            activeSftpServer = null
+                            localCurrentDir = dir
+                            renderSftpTab()
+                        }
                         if (requiresPerm && !hasAllFilesAccessPermission() && !hasStandardStoragePermission()) {
                             showStoragePermissionsModal {
-                                if (dir.exists() && dir.canRead()) {
-                                    localCurrentDir = dir
-                                    renderSftpTab()
-                                }
+                                if (dir.exists() && dir.canRead()) switchToDir()
                             }
                             return@setOnClickListener
                         }
                         if (!dir.exists()) dir.mkdirs()
                         if (dir.exists() && dir.canRead()) {
-                            localCurrentDir = dir
-                            renderSftpTab()
+                            switchToDir()
                         } else {
                             showStoragePermissionsModal {
-                                if (dir.exists() && dir.canRead()) {
-                                    localCurrentDir = dir
-                                    renderSftpTab()
-                                }
+                                if (dir.exists() && dir.canRead()) switchToDir()
                             }
                         }
                     }
                 }
+                segViews.add(segBtn)
                 sourceBarWrap.addView(segBtn)
             }
 
             if (savedServers.isNotEmpty()) {
-                val isRemoteSel = (activeSftpServer != null)
+                val isRemoteSel = (currentSftpSourceIdx == 3)
                 val sshSegBtn = TextView(this).apply {
                     text = if (isRemoteSel) "SSH: ${activeSftpServer!!.label}" else "SSH ▾"
                     gravity = Gravity.CENTER
@@ -5745,16 +5770,15 @@ class TermuxActivity : Activity() {
                     typeface = if (isRemoteSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                     setTextColor(if (isRemoteSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                    if (isRemoteSel) {
-                        background = tonalBg(uiAccentContainer, dp(12))
-                    }
                     setPadding(dp(8), dp(8), dp(8), dp(8))
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.15f)
-                    attachSmoothPressAnimation(this, 0.95f)
+                    attachSmoothPressAnimation(this, 0.94f)
                     setOnClickListener {
                         triggerHaptic(0.8f)
                         if (savedServers.size == 1 && activeSftpServer == null) {
                             val srv = savedServers[0]
+                            sftpTransitionDir = 1
+                            prevSftpSourceIdx = currentSftpSourceIdx
                             activeSftpServer = srv
                             remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
                             renderSftpTab()
@@ -5767,6 +5791,8 @@ class TermuxActivity : Activity() {
                                 selectedIndex = curIdx
                             ) { chosen ->
                                 val srv = savedServers[chosen]
+                                sftpTransitionDir = 1
+                                prevSftpSourceIdx = currentSftpSourceIdx
                                 activeSftpServer = srv
                                 remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
                                 renderSftpTab()
@@ -5774,9 +5800,43 @@ class TermuxActivity : Activity() {
                         }
                     }
                 }
+                segViews.add(sshSegBtn)
                 sourceBarWrap.addView(sshSegBtn)
             }
-            mainSftpCol.addView(sourceBarWrap)
+
+            // Animate the active capsule sliding smoothly from prevSftpSourceIdx to currentSftpSourceIdx!
+            val fromIdx = prevSftpSourceIdx.coerceIn(0, segViews.lastIndex)
+            val toIdx = currentSftpSourceIdx.coerceIn(0, segViews.lastIndex)
+            prevSftpSourceIdx = toIdx
+            sourceBarWrap.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    if (sourceBarWrap.viewTreeObserver.isAlive) {
+                        sourceBarWrap.viewTreeObserver.removeOnPreDrawListener(this)
+                    }
+                    val targetView = segViews.getOrNull(toIdx) ?: return true
+                    val fromView = segViews.getOrNull(fromIdx) ?: targetView
+                    slidingSourcePill.layoutParams = FrameLayout.LayoutParams(targetView.width, targetView.height)
+                    slidingSourcePill.requestLayout()
+                    if (fromIdx != toIdx) {
+                        slidingSourcePill.translationX = fromView.left.toFloat()
+                        slidingSourcePill.scaleX = 0.90f
+                        slidingSourcePill.scaleY = 0.90f
+                        slidingSourcePill.animate()
+                            .translationX(targetView.left.toFloat())
+                            .scaleX(1f)
+                            .scaleY(1f)
+                            .setDuration(250L)
+                            .setInterpolator(aosp17SpatialInterpolator)
+                            .start()
+                    } else {
+                        slidingSourcePill.translationX = targetView.left.toFloat()
+                        slidingSourcePill.scaleX = 1f
+                        slidingSourcePill.scaleY = 1f
+                    }
+                    return true
+                }
+            })
+            mainSftpCol.addView(sourceBarOuter)
 
             // 2. Material 3 Path Breadcrumbs (Soft gray pills for parents, theme accent pill for current directory)
             val activePathStr = if (activeSftpServer == null) localCurrentDir.absolutePath else remoteCurrentPath
@@ -5861,10 +5921,12 @@ class TermuxActivity : Activity() {
                         } else if (activeSftpServer == null) {
                             val targetDir = File(seg.second)
                             if (targetDir.exists() && targetDir.canRead()) {
+                                sftpTransitionDir = -1
                                 localCurrentDir = targetDir
                                 renderSftpTab()
                             }
                         } else {
+                            sftpTransitionDir = -1
                             remoteCurrentPath = seg.second
                             renderSftpTab()
                         }
@@ -6041,8 +6103,7 @@ class TermuxActivity : Activity() {
                     opts.add(Triple(M3Icon.TERMINAL, tr("Открыть папку в терминале (cd)", "Open folder in terminal (cd)")) {
                         if (srv == null) {
                             dlg.dismiss()
-                            nativeSendText("cd ${shellEscapeSingle(item.path)}
-", false)
+                            nativeSendText("cd ${shellEscapeSingle(item.path)}\n", false)
                         } else {
                             connectToSshServerInTerminal(
                                 srv.copy(startupCommand = "cd ${shellEscapeSingle(item.path)} && exec \$SHELL -l"),
@@ -6190,6 +6251,32 @@ class TermuxActivity : Activity() {
 
             fun populateEntriesIntoRowsCol(errStr: String?, entries: List<SftpItemEntry>) {
                 rowsCol.removeAllViews()
+                if (sftpTransitionDir != 0) {
+                    val forward = sftpTransitionDir > 0
+                    sftpTransitionDir = 0
+                    val shiftPx = if (forward) dpF(28f) else -dpF(28f)
+                    rowsCol.alpha = 0f
+                    rowsCol.translationX = shiftPx
+                    rowsCol.scaleX = 0.975f
+                    rowsCol.scaleY = 0.975f
+                    rowsCol.post { ensureCenteredPivot(rowsCol) }
+                    rowsCol.animate()
+                        .alpha(1f)
+                        .translationX(0f)
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .setDuration(230L)
+                        .setInterpolator(aosp17SpatialInterpolator)
+                        .start()
+                    bcRow.alpha = 0.35f
+                    bcRow.translationX = shiftPx * 0.5f
+                    bcRow.animate()
+                        .alpha(1f)
+                        .translationX(0f)
+                        .setDuration(210L)
+                        .setInterpolator(aosp17SpatialInterpolator)
+                        .start()
+                }
                 val totalCards = entries.size + (if (hasParentRow) 1 else 0)
                 var currentCardIdx = 0
 
@@ -6209,6 +6296,7 @@ class TermuxActivity : Activity() {
                         setOnClickListener {
                             triggerHaptic(0.75f)
                             val parentPath = activePathStr.substringBeforeLast('/').ifEmpty { "/" }
+                            sftpTransitionDir = -1
                             if (srv == null) {
                                 val pf = File(parentPath)
                                 if (pf.exists() && pf.canRead()) {
@@ -6294,10 +6382,12 @@ class TermuxActivity : Activity() {
                                     } else if (srv == null) {
                                         val f = File(item.path)
                                         if (f.canRead()) {
+                                            sftpTransitionDir = 1
                                             localCurrentDir = f
                                             renderSftpTab()
                                         }
                                     } else {
+                                        sftpTransitionDir = 1
                                         remoteCurrentPath = item.path
                                         renderSftpTab()
                                     }
@@ -6629,10 +6719,7 @@ class TermuxActivity : Activity() {
                                     2 -> {
                                         selectedChmod = "755"
                                         if (contentEt.text.isNullOrBlank()) {
-                                            contentEt.setText("#!/usr/bin/env bash
-set -euo pipefail
-
-")
+                                            contentEt.setText("#!/usr/bin/env bash\nset -euo pipefail\n\n")
                                         }
                                         if (nameEt.text.isNullOrBlank()) {
                                             nameEt.setText("script.sh")

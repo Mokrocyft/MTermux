@@ -6,3 +6,5 @@ app/.cxx/
 local.properties
 *.iml
 .idea/
+
+app/src/main/cpp/.bootstrap_patched.stamp

@@ -26,6 +26,29 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      - name: Cache Pre-Patched Bootstrap & Font
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/src/main/cpp/bootstrap-aarch64.zip
+            app/src/main/cpp/.bootstrap_patched.stamp
+            app/src/main/assets/fonts/JetBrainsMono.ttf
+          key: termuxx-bootstrap-v2-${{ hashFiles('scripts/update_bootstrap.py') }}
+          restore-keys: |
+            termuxx-bootstrap-v2-
+
+      - name: Cache Gradle, CMake & CCache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.ccache
+            app/.cxx
+          key: termuxx-gradle-cxx-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml', 'app/src/main/cpp/CMakeLists.txt') }}
+          restore-keys: |
+            termuxx-gradle-cxx-${{ runner.os }}-
+
       - name: Accept SDK Licenses
         run: |
           yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
@@ -33,32 +56,21 @@ jobs:
       - name: Prepare Bootstrap
         run: |
           chmod +x ./gradlew scripts/update_bootstrap.py
-          ./gradlew downloadBootstraps downloadJetBrainsMono --warning-mode none --no-problems-report
           python3 scripts/update_bootstrap.py
 
-      - name: Build
+      - name: Build Release APK
         env:
           TERMUX_PACKAGE_VARIANT: apt-android-7
         run: |
-          ./gradlew assembleDebug assembleRelease --warning-mode none --no-problems-report --stacktrace
+          ./gradlew assembleRelease --build-cache --parallel --warning-mode none --no-problems-report --stacktrace
           mkdir -p dist
-          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
           RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          cp -f "$DEBUG_APK" dist/termux-debug.apk
           cp -f "$RELEASE_APK" dist/termux-release.apk
           APKSIGNER=$(find ${ANDROID_HOME}/build-tools -name apksigner | sort -V | tail -n 1)
           if [ -n "$APKSIGNER" ]; then
-            "$APKSIGNER" verify --verbose dist/termux-debug.apk
             "$APKSIGNER" verify --verbose dist/termux-release.apk
           fi
-          ls -lh dist/*.apk
-
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v6
-        with:
-          name: termux-debug
-          path: dist/termux-debug.apk
-          if-no-files-found: error
+          ls -lh dist/termux-release.apk
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v6
