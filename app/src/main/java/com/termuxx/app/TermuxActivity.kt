@@ -1170,6 +1170,8 @@ class TermuxActivity : Activity() {
         return (a shl 24) or (r shl 16) or (g shl 8) or b
     }
 
+    private fun blendColors(c1: Int, c2: Int, ratio: Float): Int = blendColor(c1, c2, ratio)
+
     private fun withAlpha(color: Int, alpha: Int): Int {
         return (alpha.coerceIn(0, 255) shl 24) or (color and 0x00FFFFFF)
     }
@@ -7638,7 +7640,7 @@ class TermuxActivity : Activity() {
             val bentoIcons = ArrayList<MaterialIconView>()
             val bentoActiveStates = ArrayList<Boolean>()
 
-            val inactiveBentoColor = blendColors(uiSurfaceHigh, uiAccentContainer, 0.28f)
+            val inactiveBentoColor = blendColor(uiSurfaceHigh, uiAccentContainer, 0.28f)
             val activeBentoColor = uiAccentContainer
             val primaryActionBentoColor = uiAccent
 
