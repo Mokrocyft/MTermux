@@ -534,11 +534,11 @@ class TermuxActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         )
 
-        // Bottom Extra Keys Bar (no border line, uniform tight spacing)
+        // Bottom Extra Keys Bar (shifted away from bottom & side edges when keyboard is closed)
         extraKeysRoot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_AMOLED_BG)
-            setPadding(dp(2), dp(2), dp(2), dp(2))
+            setPadding(0, dp(3), 0, dp(14))
             clipChildren = false
             clipToPadding = false
         }
@@ -963,6 +963,9 @@ class TermuxActivity : Activity() {
         return disp to disp
     }
 
+    private fun restLeftR(baseR: Float, outerR: Float, morphT: Float): Float =
+        baseR + (outerR - baseR) * morphT
+
     internal fun rebuildExtraKeysBar() {
         extraKeysRoot.removeAllViews()
         modifierButtons.clear()
@@ -1048,6 +1051,12 @@ class TermuxActivity : Activity() {
                 rowContainer.addView(btn, FrameLayout.LayoutParams(dp(44), keyHeightPx, Gravity.CENTER_VERTICAL))
             }
 
+            val restXArr = FloatArray(n)
+            val restLeftRArr = FloatArray(n)
+            val restRightRArr = FloatArray(n)
+            val deltaLeftEdge = FloatArray(n)
+            val deltaRightEdge = FloatArray(n)
+
             layoutRowNow = {
                 val totalW = rowContainer.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
                 val wF = totalW.toFloat()
@@ -1056,15 +1065,15 @@ class TermuxActivity : Activity() {
                 val innerR = dpF(5f)
                 val maxSingleKeyW = dpF(50f)
 
-                // 1. Closed-IME geometry (slight side padding so rounded screen edges never clip keys; centered for small N)
-                val closedSidePad = dpF(12f)
+                // 1. Closed-IME geometry (shifted further from left & right edges: 22dp)
+                val closedSidePad = dpF(22f)
                 val usableClosedW = (wF - 2f * closedSidePad).coerceAtLeast(dpF(100f))
                 val closedKeyW = min(maxSingleKeyW, (usableClosedW - gap * (n - 1)) / n)
                 val closedGroupW = n * closedKeyW + (n - 1) * gap
                 val closedStartX = (wF - closedGroupW) * 0.5f
 
-                // 2. Open-IME geometry (flush side padding dp(2); split rule for < 8 keys)
-                val openSidePad = dpF(2f)
+                // 2. Open-IME geometry (flush side padding dp(4); split rule for < 8 keys)
+                val openSidePad = dpF(4f)
                 val usableOpenW = (wF - 2f * openSidePad).coerceAtLeast(dpF(100f))
                 val openKeyW = if (n >= MAX_EXTRA_KEYS_PER_ROW) {
                     (usableOpenW - gap * (n - 1)) / n
@@ -1072,10 +1081,9 @@ class TermuxActivity : Activity() {
                     min(maxSingleKeyW, (usableOpenW - gap * (n - 1)) / n)
                 }
 
-                val openF = imeOpenFraction.coerceIn(0f, 1f)
+                val openF = safeClamp(imeOpenFraction, 0f, 1f)
                 val curBaseW = closedKeyW + (openKeyW - closedKeyW) * openF
 
-                // Compute each key's resting X and connected group radii
                 for (i in 0 until n) {
                     val closedX = closedStartX + i * (closedKeyW + gap)
                     val closedLeftR = if (i == 0) outerR else innerR
@@ -1097,7 +1105,6 @@ class TermuxActivity : Activity() {
                             openRightR = if (i == n - 1) outerR else innerR
                         }
                         n % 2 == 0 -> {
-                            // Even (2, 4, 6): half on left edge, half on right edge
                             val half = n / 2
                             if (i < half) {
                                 openX = openSidePad + i * (openKeyW + gap)
@@ -1113,7 +1120,6 @@ class TermuxActivity : Activity() {
                             }
                         }
                         else -> {
-                            // Odd (3, 5, 7): outer pairs split to left & right edges, middle odd key stays in center
                             val sideCount = (n - 1) / 2
                             val midIdx = sideCount
                             when {
@@ -1139,29 +1145,64 @@ class TermuxActivity : Activity() {
                         }
                     }
 
-                    val restX = closedX + (openX - closedX) * openF
-                    val restLeftR = closedLeftR + (openLeftR - closedLeftR) * openF
-                    val restRightR = closedRightR + (openRightR - closedRightR) * openF
+                    restXArr[i] = closedX + (openX - closedX) * openF
+                    restLeftRArr[i] = closedLeftR + (openLeftR - closedLeftR) * openF
+                    restRightRArr[i] = closedRightR + (openRightR - closedRightR) * openF
+                    deltaLeftEdge[i] = 0f
+                    deltaRightEdge[i] = 0f
+                }
 
-                    // Check if this key is an active/locked modifier or currently pressed
+                // Zero-sum neighbor length compression:
+                // When key i expands, its immediate connected neighbor(s) shrink in length by the exact same amount
+                // so no other keys in the row shift sideways!
+                val maxExpand = dpF(11f)
+                for (i in 0 until n) {
+                    val p = pressProgress[i]
+                    if (p <= 0.001f) continue
+                    val expPx = maxExpand * p
+                    val hasLeft = (i > 0) && abs(restXArr[i] - (restXArr[i - 1] + curBaseW + gap)) < dpF(6f)
+                    val hasRight = (i < n - 1) && abs(restXArr[i + 1] - (restXArr[i] + curBaseW + gap)) < dpF(6f)
+                    when {
+                        hasLeft && hasRight -> {
+                            val halfExp = expPx * 0.5f
+                            deltaLeftEdge[i] -= halfExp
+                            deltaRightEdge[i] += halfExp
+                            deltaRightEdge[i - 1] -= halfExp
+                            deltaLeftEdge[i + 1] += halfExp
+                        }
+                        hasRight -> {
+                            // Leftmost in group: left edge stays anchored, expands right, right neighbor shrinks from left
+                            deltaRightEdge[i] += expPx
+                            deltaLeftEdge[i + 1] += expPx
+                        }
+                        hasLeft -> {
+                            // Rightmost in group: right edge stays anchored, expands left, left neighbor shrinks from right
+                            deltaLeftEdge[i] -= expPx
+                            deltaRightEdge[i - 1] -= expPx
+                        }
+                        else -> {
+                            // Standalone single button
+                            val halfExp = expPx * 0.5f
+                            deltaLeftEdge[i] -= halfExp
+                            deltaRightEdge[i] += halfExp
+                        }
+                    }
+                }
+
+                val modMask = nativeGetModifierMask()
+                for (i in 0 until n) {
                     val spec = actionSpecs[i]
-                    val modMask = nativeGetModifierMask()
                     val isModActive = (spec == "CTRL" && (ctrlLocked || (modMask and 1) != 0)) ||
                         (spec == "ALT" && (altLocked || (modMask and 2) != 0))
                     val pSelf = max(pressProgress[i], if (isModActive) 1f else 0f)
-                    val pLeft = if (i > 0) pressProgress[i - 1] else 0f
-                    val pRight = if (i < n - 1) pressProgress[i + 1] else 0f
 
-                    // Expressive expansion on press & subtle neighbor squeeze
-                    val expandPx = dpF(8f) * pSelf - dpF(3f) * (pLeft + pRight)
-                    val shiftPx = -dpF(4f) * pSelf + dpF(3f) * pLeft - dpF(3f) * pRight
-                    val finalW = (curBaseW + expandPx).roundToInt().coerceAtLeast(dp(28))
-                    val finalX = restX + shiftPx
+                    val finalLeft = restXArr[i] + deltaLeftEdge[i]
+                    val finalRight = restXArr[i] + curBaseW + deltaRightEdge[i]
+                    val finalW = (finalRight - finalLeft).roundToInt().coerceAtLeast(dp(24))
 
-                    // Morph corners to full pill (outerR) when pressed or active modifier (like photo 2, 3, 5!)
-                    val morphT = pSelf.coerceIn(0f, 1f)
-                    val curLeftR = restLeftR + (outerR - restLeftR) * morphT
-                    val curRightR = restRightR + (outerR - restRightR) * morphT
+                    val morphT = safeClamp(pSelf, 0f, 1f)
+                    val curLeftR = restLeftR(restLeftRArr[i], outerR, morphT)
+                    val curRightR = restLeftR(restRightRArr[i], outerR, morphT)
 
                     val d = drawables[i]
                     d.cornerRadii = floatArrayOf(
@@ -1177,7 +1218,7 @@ class TermuxActivity : Activity() {
                         lp.width = finalW
                         btn.layoutParams = lp
                     }
-                    btn.translationX = finalX
+                    btn.translationX = finalLeft
                 }
             }
 
@@ -1353,6 +1394,16 @@ class TermuxActivity : Activity() {
     }
 
     private fun blendColors(c1: Int, c2: Int, ratio: Float): Int = blendColor(c1, c2, ratio)
+
+    private fun safeClamp(value: Float, minVal: Float, maxVal: Float): Float {
+        val hi = max(minVal, maxVal)
+        return value.coerceIn(minVal, hi)
+    }
+
+    private fun safeClampInt(value: Int, minVal: Int, maxVal: Int): Int {
+        val hi = max(minVal, maxVal)
+        return value.coerceIn(minVal, hi)
+    }
 
     private fun withAlpha(color: Int, alpha: Int): Int {
         return (alpha.coerceIn(0, 255) shl 24) or (color and 0x00FFFFFF)
@@ -1648,7 +1699,7 @@ class TermuxActivity : Activity() {
         val (dlg, sheet) = createExpressiveDialog(430)
         sheet.setPadding(dp(22), dp(22), dp(22), dp(16))
 
-        var currentIndex = selectedIndex.coerceIn(0, items.lastIndex)
+        var currentIndex = safeClampInt(selectedIndex, 0, max(0, items.lastIndex))
 
         sheet.addView(TextView(this).apply {
             text = title
@@ -2013,8 +2064,8 @@ class TermuxActivity : Activity() {
             val frac = if (maxProgress > 0) progress.toFloat() / maxProgress.toFloat() else 0f
             val thumbX = minX + (maxX - minX) * frac
 
-            val gapStart = (thumbX - thumbW * 0.5f - gap).coerceIn(minX, maxX)
-            val gapEnd = (thumbX + thumbW * 0.5f + gap).coerceIn(minX, maxX)
+            val gapStart = safeClamp(thumbX - thumbW * 0.5f - gap, minX, maxX)
+            val gapEnd = safeClamp(thumbX + thumbW * 0.5f + gap, minX, maxX)
 
             drawSegment(canvas, minX, gapStart, trackTop, trackH, outerR, innerR, uiAccent)
             drawSegment(canvas, gapEnd, maxX, trackTop, trackH, innerR, outerR, uiSurfaceHigh)
@@ -3749,7 +3800,9 @@ class TermuxActivity : Activity() {
                         duration = 260L
                         interpolator = aosp17SpatialInterpolator
                         addUpdateListener { va ->
-                            imeOpenFraction = (va.animatedValue as Float).coerceIn(0f, 1f)
+                            imeOpenFraction = safeClamp(va.animatedValue as Float, 0f, 1f)
+                            val botPad = (dpF(14f) * (1f - imeOpenFraction) + dpF(3f) * imeOpenFraction).roundToInt()
+                            extraKeysRoot.setPadding(0, dp(3), 0, botPad)
                             for (updater in extraKeyRowUpdaters) {
                                 updater()
                             }
@@ -4486,15 +4539,35 @@ class TermuxActivity : Activity() {
         val pressProg = FloatArray(n)
         val anims = arrayOfNulls<ValueAnimator>(n)
 
+        val deltaW = FloatArray(n)
         fun updateHeaderGroupGeometry() {
+            for (i in 0 until n) deltaW[i] = 0f
+            val expMax = dpF(10f)
+            for (i in 0 until n) {
+                val p = pressProg[i]
+                if (p <= 0.001f) continue
+                val e = expMax * p
+                when {
+                    i > 0 && i < n - 1 -> {
+                        deltaW[i] += e
+                        deltaW[i - 1] -= e * 0.5f
+                        deltaW[i + 1] -= e * 0.5f
+                    }
+                    i == 0 && n > 1 -> {
+                        deltaW[0] += e
+                        deltaW[1] -= e
+                    }
+                    i == n - 1 && n > 1 -> {
+                        deltaW[n - 1] += e
+                        deltaW[n - 2] -= e
+                    }
+                }
+            }
             for (i in 0 until n) {
                 val pSelf = pressProg[i]
-                val pLeft = if (i > 0) pressProg[i - 1] else 0f
-                val pRight = if (i < n - 1) pressProg[i + 1] else 0f
-
                 val restL = if (i == 0) outerR else innerR
                 val restR = if (i == n - 1) outerR else innerR
-                val m = pSelf.coerceIn(0f, 1f)
+                val m = safeClamp(pSelf, 0f, 1f)
                 val curL = restL + (outerR - restL) * m
                 val curR = restR + (outerR - restR) * m
 
@@ -4509,7 +4582,7 @@ class TermuxActivity : Activity() {
                 icons[i].tintColor = blendColor(restTint, activeTint, m)
                 icons[i].invalidate()
 
-                val wPx = (baseW + dpF(7f) * pSelf - dpF(2.5f) * (pLeft + pRight)).roundToInt().coerceAtLeast(dp(28))
+                val wPx = (baseW + deltaW[i]).roundToInt().coerceAtLeast(dp(24))
                 val lp = frames[i].layoutParams as LinearLayout.LayoutParams
                 if (lp.width != wPx) {
                     lp.width = wPx
@@ -6267,23 +6340,27 @@ class TermuxActivity : Activity() {
             pillView.scaleX = 1f
             if (targetTab.width <= 0) return
 
-            val innerWidth = (parentOuter.width - parentOuter.paddingLeft - parentOuter.paddingRight)
-                .toFloat()
-                .coerceAtLeast((targetTab.left + targetTab.width).toFloat())
-            val endLeft = targetTab.left.toFloat().coerceIn(0f, (innerWidth - targetTab.width).coerceAtLeast(0f))
-            val endRight = (endLeft + targetTab.width.toFloat()).coerceIn(endLeft + 1f, innerWidth)
+            val curPillRight = pillView.translationX + max(0, pillView.layoutParams?.width ?: 0).toFloat()
+            val targetTabRight = (targetTab.left + targetTab.width).toFloat()
+            val rawOuterW = (parentOuter.width - parentOuter.paddingLeft - parentOuter.paddingRight).toFloat()
+            val innerWidth = max(rawOuterW, max(targetTabRight, curPillRight)).coerceAtLeast(dpF(24f))
+
+            val maxEndLeft = max(0f, innerWidth - targetTab.width.toFloat())
+            val endLeft = safeClamp(targetTab.left.toFloat(), 0f, maxEndLeft)
+            val endRight = safeClamp(endLeft + targetTab.width.toFloat(), endLeft + 1f, max(endLeft + 1f, innerWidth))
             val targetW = (endRight - endLeft).coerceAtLeast(1f)
 
-            if (!animate || pillView.layoutParams.width <= 0) {
+            val curLpW = pillView.layoutParams?.width ?: 0
+            if (!animate || curLpW <= 0) {
                 pillView.scaleY = 1f
                 pillView.layoutParams = FrameLayout.LayoutParams(targetTab.width, targetTab.height)
                 pillView.translationX = endLeft
                 return
             }
 
-            val startLeft = pillView.translationX.coerceIn(0f, innerWidth)
-            val startW = pillView.layoutParams.width.toFloat().coerceAtLeast(dpF(24f))
-            val startRight = (startLeft + startW).coerceIn(startLeft + 1f, innerWidth)
+            val startLeft = safeClamp(pillView.translationX, 0f, max(0f, innerWidth - 1f))
+            val startW = curLpW.toFloat().coerceAtLeast(dpF(16f))
+            val startRight = safeClamp(startLeft + startW, startLeft + 1f, max(startLeft + 1f, innerWidth))
 
             if (abs(endLeft - startLeft) < 0.5f && abs(targetW - startW) < 0.5f) {
                 pillView.scaleY = 1f
@@ -6294,10 +6371,10 @@ class TermuxActivity : Activity() {
 
             val movingRight = endLeft >= startLeft
             val anim = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 320L
+                duration = 300L
                 interpolator = LinearInterpolator()
                 addUpdateListener { va ->
-                    val t = (va.animatedValue as Float).coerceIn(0f, 1f)
+                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
                     val inv = 1f - t
                     val leadT = 1f - inv * inv * inv * inv
                     val trailT = if (t < 0.28f) {
@@ -6305,7 +6382,7 @@ class TermuxActivity : Activity() {
                     } else {
                         val p = (t - 0.28f) / 0.72f
                         val spring = 1f - kotlin.math.exp(-4.6f * p) * kotlin.math.cos(4.8f * p)
-                        (0.18f + 0.82f * spring).coerceIn(0f, 1.04f)
+                        safeClamp(0.18f + 0.82f * spring, 0f, 1.04f)
                     }
                     val curLeft: Float
                     val curRight: Float
@@ -6316,23 +6393,23 @@ class TermuxActivity : Activity() {
                         curLeft = startLeft + (endLeft - startLeft) * leadT
                         curRight = startRight + (endRight - startRight) * trailT
                     }
-                    val clampedLeft = curLeft.coerceIn(0f, innerWidth)
-                    val clampedRight = curRight.coerceIn(clampedLeft + dpF(16f), innerWidth)
+                    val clampedLeft = safeClamp(curLeft, 0f, max(0f, innerWidth - 1f))
+                    val minRight = min(clampedLeft + dpF(12f), innerWidth)
+                    val clampedRight = safeClamp(curRight, minRight, max(minRight, innerWidth))
                     val curW = (clampedRight - clampedLeft).coerceAtLeast(1f)
 
-                    val stretchRatio = (curW / targetW).coerceIn(0.85f, 1.85f)
+                    val stretchRatio = safeClamp(curW / targetW, 0.85f, 1.85f)
                     val settleBounce = if (t > 0.65f) {
                         val sp = (t - 0.65f) / 0.35f
                         0.035f * kotlin.math.sin(sp * Math.PI.toFloat())
                     } else 0f
-                    pillView.scaleY = ((1f / kotlin.math.sqrt(stretchRatio)).coerceIn(0.88f, 1.02f) + settleBounce).coerceIn(0.88f, 1.04f)
-
+                    pillView.scaleY = safeClamp(
+                        safeClamp(1f / kotlin.math.sqrt(stretchRatio), 0.88f, 1.02f) + settleBounce,
+                        0.88f,
+                        1.04f
+                    )
                     pillView.translationX = clampedLeft
-                    val lp = (pillView.layoutParams as? FrameLayout.LayoutParams)
-                        ?: FrameLayout.LayoutParams(targetTab.width, targetTab.height)
-                    lp.width = curW.roundToInt().coerceAtLeast(1)
-                    lp.height = targetTab.height
-                    pillView.layoutParams = lp
+                    pillView.layoutParams = FrameLayout.LayoutParams(curW.roundToInt(), targetTab.height)
                 }
             }
             pillView.tag = anim
@@ -6572,8 +6649,9 @@ class TermuxActivity : Activity() {
                 sourceBarWrap.addView(sshSegTab)
             }
 
-            val fromIdx = prevSftpSourceIdx.coerceIn(0, segTabs.lastIndex)
-            val toIdx = currentSftpSourceIdx.coerceIn(0, segTabs.lastIndex)
+            val maxSegIdx = max(0, segTabs.lastIndex)
+            val fromIdx = safeClampInt(prevSftpSourceIdx, 0, maxSegIdx)
+            val toIdx = safeClampInt(currentSftpSourceIdx, 0, maxSegIdx)
             prevSftpSourceIdx = toIdx
             sourceBarWrap.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
                 override fun onPreDraw(): Boolean {
@@ -8296,7 +8374,7 @@ class TermuxActivity : Activity() {
                 gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
                 clipChildren = false
                 clipToPadding = false
-                setPadding(dp(16), dp(4), dp(16), dp(16))
+                setPadding(dp(24), dp(4), dp(24), dp(24))
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -8344,8 +8422,10 @@ class TermuxActivity : Activity() {
                 (btn.tag as? ValueAnimator)?.cancel()
                 bentoActiveStates[pressedIdx] = newActiveState
 
-                val curW = btn.layoutParams.width.toFloat().coerceAtLeast(dpF(42f))
-                val targetW = if (holding) dpF(76f) else (if (newActiveState) dpF(64f) else dpF(46f))
+                val baseSelfW = baseBentoWidthPx(pressedIdx).toFloat()
+                val holdDeltaPx = dpF(14f)
+                val curW = btn.layoutParams.width.toFloat().coerceAtLeast(dpF(34f))
+                val targetW = if (holding) (baseSelfW + holdDeltaPx) else baseSelfW
                 val startRad = bg.cornerRadius.takeIf { it > 0f } ?: dpF(23f)
                 val targetRad = if (holding) dpF(11f) else dpF(23f)
 
@@ -8365,10 +8445,15 @@ class TermuxActivity : Activity() {
 
                 val leftIdx = pressedIdx - 1
                 val rightIdx = pressedIdx + 1
-                val leftStartW = if (leftIdx >= 0) bentoButtons[leftIdx].layoutParams.width.toFloat() else 0f
-                val rightStartW = if (rightIdx < bentoButtons.size) bentoButtons[rightIdx].layoutParams.width.toFloat() else 0f
-                val leftTargetW = if (leftIdx >= 0) (baseBentoWidthPx(leftIdx) - (if (holding) dp(5) else 0)).toFloat() else 0f
-                val rightTargetW = if (rightIdx < bentoButtons.size) (baseBentoWidthPx(rightIdx) - (if (holding) dp(5) else 0)).toFloat() else 0f
+                val hasLeft = leftIdx >= 0
+                val hasRight = rightIdx < bentoButtons.size
+                // Exact zero-sum neighbor length compression so outer buttons never shift sideways!
+                val leftShrink = if (!holding) 0f else if (hasLeft && hasRight) holdDeltaPx * 0.5f else if (hasLeft) holdDeltaPx else 0f
+                val rightShrink = if (!holding) 0f else if (hasLeft && hasRight) holdDeltaPx * 0.5f else if (hasRight) holdDeltaPx else 0f
+                val leftStartW = if (hasLeft) bentoButtons[leftIdx].layoutParams.width.toFloat() else 0f
+                val rightStartW = if (hasRight) bentoButtons[rightIdx].layoutParams.width.toFloat() else 0f
+                val leftTargetW = if (hasLeft) (baseBentoWidthPx(leftIdx).toFloat() - leftShrink).coerceAtLeast(dpF(32f)) else 0f
+                val rightTargetW = if (hasRight) (baseBentoWidthPx(rightIdx).toFloat() - rightShrink).coerceAtLeast(dpF(32f)) else 0f
 
                 val startScaleY = btn.scaleY
                 val targetScaleY = if (holding) 0.93f else 1.0f
@@ -8948,35 +9033,34 @@ class TermuxActivity : Activity() {
             return
         }
 
-        // Capture the closing tab's visual position so the sliding indicator & remaining tabs animate smoothly!
         val closingTabView = if (active in 0 until tabStrip.childCount) tabStrip.getChildAt(active) else null
         if (closingTabView != null && closingTabView.width > 0) {
-            val closingLeft = closingTabView.left.toFloat()
-            val closingW = closingTabView.width
-            val closingH = closingTabView.height
-            closingTabView.animate()
-                .scaleX(0.45f)
-                .scaleY(0.65f)
-                .alpha(0f)
-                .setDuration(120L)
-                .setInterpolator(aosp17SpatialInterpolator)
-                .withEndAction {
-                    // If we closed tab 0 while tab 1 shifts left to become the new tab 0, seed indicator at tab 1's old X
-                    val nextSibling = if (active + 1 < tabStrip.childCount) tabStrip.getChildAt(active + 1) else null
-                    val seedLeft = if (active == 0 && nextSibling != null) nextSibling.left.toFloat() else closingLeft
-                    val seedW = if (active == 0 && nextSibling != null) nextSibling.width else closingW
-                    tabSlidingIndicator.translationX = seedLeft
-                    tabSlidingIndicator.layoutParams = FrameLayout.LayoutParams(seedW, closingH)
-
-                    val rem = nativeCloseSession(active)
-                    if (rem <= 0) {
-                        finish()
-                    } else {
-                        rebuildTabs()
-                        terminalSurface.invalidateAllRows()
-                    }
+            val startW = closingTabView.width.toFloat()
+            val tabH = closingTabView.height.takeIf { it > 0 } ?: dp(31)
+            ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 160L
+                interpolator = aosp17SpatialInterpolator
+                addUpdateListener { va ->
+                    val f = safeClamp(va.animatedValue as Float, 0f, 1f)
+                    closingTabView.alpha = 1f - f
+                    val lp = closingTabView.layoutParams as LinearLayout.LayoutParams
+                    lp.width = (startW * (1f - f)).roundToInt().coerceAtLeast(0)
+                    lp.height = tabH
+                    closingTabView.layoutParams = lp
                 }
-                .start()
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        val rem = nativeCloseSession(active)
+                        if (rem <= 0) {
+                            finish()
+                        } else {
+                            rebuildTabs()
+                            terminalSurface.invalidateAllRows()
+                        }
+                    }
+                })
+                start()
+            }
         } else {
             val rem = nativeCloseSession(active)
             if (rem <= 0) {
@@ -9051,39 +9135,122 @@ class TermuxActivity : Activity() {
 
     internal fun rebuildTabs() {
         if (!::tabSlidingIndicator.isInitialized) return
+        // Hide old sliding capsule: session tabs now use direct SFTP Bento button expansion & neighbor length compression!
+        tabSlidingIndicator.visibility = View.GONE
+
         val rawCount = nativeGetSessionCount()
         val count = max(1, rawCount)
-        val active = (if (rawCount > 0) nativeGetActiveIndex() else 0).coerceIn(0, count - 1)
-        val activeIsRoot = if (rawCount > 0) nativeIsSessionRoot(active) else false
-        val pillBaseColor = if (activeIsRoot) COLOR_ROOT_CONTAINER else uiAccentContainer
-
-        // Capture previous indicator geometry BEFORE rebuilding tabStrip so create, switch & delete all animate!
-        val hadPrevPill = tabSlidingIndicator.width > 0
-        val prevPillLeft = tabSlidingIndicator.translationX
-        val prevPillW = tabSlidingIndicator.width.toFloat()
-
-        tabSlidingIndicator.background = makeLiquidGlassPillDrawable(pillBaseColor, dp(16))
+        val active = safeClampInt(if (rawCount > 0) nativeGetActiveIndex() else 0, 0, count - 1)
+        val fromIdx = safeClampInt(prevActiveSessionIdx, 0, count - 1)
+        val switchedSession = (fromIdx != active)
         prevActiveSessionIdx = active
 
         tabStrip.removeAllViews()
         val tabViews = ArrayList<TextView>(count)
-        val outerR = dpF(15.5f)
+        val tabBgs = ArrayList<GradientDrawable>(count)
+        val tabIsRootArr = BooleanArray(count)
+        val pressProg = FloatArray(count)
+        val pressAnims = arrayOfNulls<ValueAnimator>(count)
+        val switchProg = FloatArray(count) { idx -> if (idx == active) 1f else 0f }
+
+        val tabH = dp(31)
+        val outerR = tabH * 0.5f
         val innerR = dpF(5f)
+        val inactiveTabW = dpF(46f)
+        val activeTabW = dpF(60f)
+        val deltaW = FloatArray(count)
+
+        fun updateSessionTabsBentoGeometry() {
+            for (i in 0 until count) deltaW[i] = 0f
+            val holdExpMax = dpF(12f)
+            for (i in 0 until count) {
+                val p = pressProg[i]
+                if (p <= 0.001f) continue
+                val e = holdExpMax * p
+                when {
+                    i > 0 && i < count - 1 -> {
+                        deltaW[i] += e
+                        deltaW[i - 1] -= e * 0.5f
+                        deltaW[i + 1] -= e * 0.5f
+                    }
+                    i == 0 && count > 1 -> {
+                        deltaW[0] += e
+                        deltaW[1] -= e
+                    }
+                    i == count - 1 && count > 1 -> {
+                        deltaW[count - 1] += e
+                        deltaW[count - 2] -= e
+                    }
+                    else -> {
+                        deltaW[i] += e
+                    }
+                }
+            }
+
+            for (i in 0 until count) {
+                val selF = safeClamp(switchProg[i], 0f, 1.15f)
+                val pSelf = pressProg[i]
+                val isRoot = tabIsRootArr[i]
+
+                val baseW = inactiveTabW + (activeTabW - inactiveTabW) * selF
+                val wPx = (baseW + deltaW[i]).roundToInt().coerceAtLeast(dp(32))
+
+                val restL = if (i == 0) outerR else innerR
+                val restR = if (i == count - 1) outerR else innerR
+                val pillMorph = safeClamp(max(selF, pSelf), 0f, 1f)
+                val curL = restL + (outerR - restL) * pillMorph
+                val curR = restR + (outerR - restR) * pillMorph
+
+                val activeFill = if (isRoot) COLOR_ROOT_CONTAINER else uiAccentContainer
+                val fillCol = blendColor(uiSurfaceContainer, activeFill, safeClamp(max(selF, pSelf * 0.85f), 0f, 1f))
+                val activeTxtCol = if (isRoot) COLOR_ROOT else uiOnAccentContainer
+                val txtCol = blendColor(COLOR_TEXT_BRIGHT, activeTxtCol, safeClamp(max(selF, pSelf), 0f, 1f))
+
+                val bg = tabBgs[i]
+                bg.setColor(fillCol)
+                bg.cornerRadii = floatArrayOf(curL, curL, curR, curR, curR, curR, curL, curL)
+
+                val tv = tabViews[i]
+                tv.setTextColor(txtCol)
+                val lp = tv.layoutParams as LinearLayout.LayoutParams
+                if (lp.width != wPx) {
+                    lp.width = wPx
+                    tv.layoutParams = lp
+                }
+            }
+        }
 
         for (i in 0 until count) {
             val idx = i
             val isRoot = if (rawCount > 0) nativeIsSessionRoot(i) else false
-            val isSelected = (i == active)
+            tabIsRootArr[i] = isRoot
+            val bg = makeConnectedSegmentDrawable(uiSurfaceContainer, outerR, outerR)
+            tabBgs.add(bg)
 
-            // Material 3 Expressive Connected Button Group shape (like photo 2, 3, 5 without outer background):
-            // Active tab has full pill corners (via tabSlidingIndicator underneath), inactive tabs have connected segment corners!
-            val restLeftR = if (i == 0 || i == active + 1) outerR else innerR
-            val restRightR = if (i == count - 1 || i == active - 1) outerR else innerR
-            val tabSegBg = makeConnectedSegmentDrawable(
-                if (isSelected) 0x00000000 else uiSurfaceContainer,
-                if (isSelected) outerR else restLeftR,
-                if (isSelected) outerR else restRightR
-            )
+            var downMs = 0L
+            fun animateTabHold(holding: Boolean) {
+                pressAnims[idx]?.cancel()
+                val startP = pressProg[idx]
+                val targetP = if (holding) 1f else 0f
+                val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = if (holding) 125L else 360L
+                    interpolator = LinearInterpolator()
+                    addUpdateListener { va ->
+                        val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                        val eased = if (holding) {
+                            1f - (1f - t) * (1f - t)
+                        } else {
+                            1f - kotlin.math.exp(-3.3f * t) * kotlin.math.cos(6.2f * t)
+                        }
+                        pressProg[idx] = safeClamp(startP + (targetP - startP) * eased, 0f, 1.25f)
+                        updateSessionTabsBentoGeometry()
+                    }
+                }
+                pressAnims[idx] = anim
+                anim.start()
+            }
+
+            val releaseTask = Runnable { animateTabHold(false) }
 
             val tab = TextView(this).apply {
                 text = (if (isRoot) "# " else "$ ") + (i + 1)
@@ -9091,55 +9258,30 @@ class TermuxActivity : Activity() {
                 setSingleLine(true)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                setPadding(dp(14), dp(6), dp(14), dp(6))
-                val activeTextCol = if (isRoot) COLOR_ROOT else uiOnAccentContainer
-                setTextColor(if (isSelected) activeTextCol else COLOR_TEXT_BRIGHT)
-                background = tabSegBg
+                setPadding(dp(6), 0, dp(6), 0)
+                background = bg
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    dp(31)
+                    if (i == active) activeTabW.roundToInt() else inactiveTabW.roundToInt(),
+                    tabH
                 ).apply {
                     setMargins(dp(1), 0, dp(1), 0)
                 }
 
-                var downMs = 0L
-                val releaseTabAnim = Runnable {
-                    animate()
-                        .scaleX(1f)
-                        .scaleY(1f)
-                        .setDuration(240L)
-                        .setInterpolator(OvershootInterpolator(2.2f))
-                        .start()
-                    if (!isSelected) {
-                        tabSegBg.cornerRadii = floatArrayOf(
-                            restLeftR, restLeftR, restRightR, restRightR,
-                            restRightR, restRightR, restLeftR, restLeftR
-                        )
-                    }
-                }
                 setOnTouchListener { v, ev ->
                     when (ev.actionMasked) {
                         MotionEvent.ACTION_DOWN -> {
-                            v.removeCallbacks(releaseTabAnim)
+                            v.removeCallbacks(releaseTask)
                             downMs = SystemClock.uptimeMillis()
-                            tabSegBg.cornerRadii = floatArrayOf(
-                                outerR, outerR, outerR, outerR,
-                                outerR, outerR, outerR, outerR
-                            )
-                            v.animate()
-                                .scaleX(1.06f)
-                                .scaleY(0.93f)
-                                .setDuration(110L)
-                                .setInterpolator(aosp17SpatialInterpolator)
-                                .start()
+                            triggerHaptic(0.85f)
+                            animateTabHold(true)
                             false
                         }
                         MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                             val held = SystemClock.uptimeMillis() - downMs
-                            if (held < 100L) {
-                                v.postDelayed(releaseTabAnim, (100L - held).coerceIn(30L, 90L))
+                            if (held < 120L) {
+                                v.postDelayed(releaseTask, safeClamp((120L - held).toFloat(), 40f, 110f).toLong())
                             } else {
-                                releaseTabAnim.run()
+                                releaseTask.run()
                             }
                             false
                         }
@@ -9149,7 +9291,6 @@ class TermuxActivity : Activity() {
 
                 setOnClickListener {
                     if (nativeGetSessionCount() > idx) {
-                        triggerHaptic(0.8f)
                         terminalSurface.stopTextSelection()
                         if (nativeGetActiveIndex() == idx) {
                             terminalSurface.resetScrollAndBlink()
@@ -9173,71 +9314,34 @@ class TermuxActivity : Activity() {
             tabStrip.addView(tab)
         }
 
-        tabStrip.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
-            override fun onPreDraw(): Boolean {
-                if (tabStrip.viewTreeObserver.isAlive) {
-                    tabStrip.viewTreeObserver.removeOnPreDrawListener(this)
+        if (switchedSession && fromIdx in 0 until count && active in 0 until count) {
+            switchProg[fromIdx] = 1f
+            switchProg[active] = 0f
+            updateSessionTabsBentoGeometry()
+            ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 350L
+                interpolator = LinearInterpolator()
+                addUpdateListener { va ->
+                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                    val spring = 1f - kotlin.math.exp(-3.4f * t) * kotlin.math.cos(6.0f * t)
+                    switchProg[active] = safeClamp(spring, 0f, 1.15f)
+                    switchProg[fromIdx] = safeClamp(1f - spring, 0f, 1f)
+                    updateSessionTabsBentoGeometry()
                 }
-                val targetView = tabViews.getOrNull(active) ?: return true
-                val outerParent = tabStrip.parent as? FrameLayout ?: return true
-                val innerW = (outerParent.width - outerParent.paddingLeft - outerParent.paddingRight)
-                    .toFloat()
-                    .coerceAtLeast((targetView.left + targetView.width).toFloat())
-
-                val endLeft = targetView.left.toFloat().coerceIn(0f, innerW)
-                val endRight = (endLeft + targetView.width).coerceIn(endLeft + 1f, innerW)
-                val targetW = (endRight - endLeft).coerceAtLeast(1f)
-                val targetTop = targetView.top.toFloat()
-
-                if (hadPrevPill && (abs(prevPillLeft - endLeft) > 1f || abs(prevPillW - targetW) > 1f)) {
-                    val startLeft = prevPillLeft.coerceIn(0f, innerW)
-                    val startRight = (startLeft + prevPillW.coerceAtLeast(dpF(24f))).coerceIn(startLeft + 1f, innerW)
-                    val movingRight = endLeft >= startLeft
-
-                    (tabSlidingIndicator.tag as? ValueAnimator)?.cancel()
-                    val anim = ValueAnimator.ofFloat(0f, 1f).apply {
-                        duration = 310L
-                        interpolator = LinearInterpolator()
-                        addUpdateListener { va ->
-                            val t = (va.animatedValue as Float).coerceIn(0f, 1f)
-                            val inv = 1f - t
-                            val leadT = 1f - inv * inv * inv * inv
-                            val trailT = if (t < 0.28f) {
-                                (t / 0.28f) * (t / 0.28f) * 0.18f
-                            } else {
-                                val p = (t - 0.28f) / 0.72f
-                                val spring = 1f - kotlin.math.exp(-4.4f * p) * kotlin.math.cos(5.0f * p)
-                                (0.18f + 0.82f * spring).coerceIn(0f, 1.04f)
-                            }
-                            val cLeft = if (movingRight) startLeft + (endLeft - startLeft) * trailT else startLeft + (endLeft - startLeft) * leadT
-                            val cRight = if (movingRight) startRight + (endRight - startRight) * leadT else startRight + (endRight - startRight) * trailT
-                            val clLeft = cLeft.coerceIn(0f, innerW)
-                            val clRight = cRight.coerceIn(clLeft + dpF(16f), innerW)
-                            val curW = (clRight - clLeft).coerceAtLeast(1f)
-                            val stretch = (curW / targetW).coerceIn(0.85f, 1.85f)
-                            tabSlidingIndicator.scaleY = (1f / kotlin.math.sqrt(stretch)).coerceIn(0.88f, 1.02f)
-                            tabSlidingIndicator.translationX = clLeft
-                            tabSlidingIndicator.translationY = targetTop
-                            tabSlidingIndicator.layoutParams = FrameLayout.LayoutParams(curW.roundToInt(), targetView.height)
-                        }
-                    }
-                    tabSlidingIndicator.tag = anim
-                    anim.start()
-                } else {
-                    tabSlidingIndicator.scaleY = 1f
-                    tabSlidingIndicator.translationX = endLeft
-                    tabSlidingIndicator.translationY = targetTop
-                    tabSlidingIndicator.layoutParams = FrameLayout.LayoutParams(targetView.width, targetView.height)
-                }
-
-                val scrollView = outerParent.parent as? HorizontalScrollView
-                if (scrollView != null) {
-                    val targetScrollX = (targetView.left - (scrollView.width - targetView.width) / 2).coerceAtLeast(0)
-                    scrollView.smoothScrollTo(targetScrollX, 0)
-                }
-                return true
+                start()
             }
-        })
+        } else {
+            updateSessionTabsBentoGeometry()
+        }
+
+        tabStrip.post {
+            val targetView = tabViews.getOrNull(active) ?: return@post
+            val scrollView = (tabStrip.parent as? View)?.parent as? HorizontalScrollView
+            if (scrollView != null) {
+                val targetScrollX = (targetView.left - (scrollView.width - targetView.width) / 2).coerceAtLeast(0)
+                scrollView.smoothScrollTo(targetScrollX, 0)
+            }
+        }
     }
 
     internal fun copyToClipboard(text: String?, showToast: Boolean) {
@@ -9431,7 +9535,7 @@ class TermuxActivity : Activity() {
                 }
                 if (delta != 0) {
                     val maxSb = nativeGetActiveScrollback()
-                    val newOffset = (scrollOffset + delta).coerceIn(0, maxSb)
+                    val newOffset = safeClampInt(scrollOffset + delta, 0, max(0, maxSb))
                     scrollOffset = newOffset
                     nativeOnSelectionTouchPx(
                         MotionEvent.ACTION_MOVE,
@@ -9516,7 +9620,7 @@ class TermuxActivity : Activity() {
                         if (deltaRows != 0) {
                             scrollAccum -= deltaRows * cellHeight
                             val maxSb = nativeGetActiveScrollback()
-                            scrollOffset = (scrollOffset - deltaRows).coerceIn(0, maxSb)
+                            scrollOffset = safeClampInt(scrollOffset - deltaRows, 0, max(0, maxSb))
                             actionMode?.invalidateContentRect()
                             invalidateAllRows()
                         }
@@ -10334,8 +10438,8 @@ class TermuxActivity : Activity() {
             private fun notifySelectionUpdate() {
                 if (batchDepth > 0) return
                 val curLen = localBuffer.length
-                val s = Selection.getSelectionStart(localBuffer).coerceIn(0, curLen)
-                val e = Selection.getSelectionEnd(localBuffer).coerceIn(0, curLen)
+                val s = safeClampInt(Selection.getSelectionStart(localBuffer), 0, max(0, curLen))
+                val e = safeClampInt(Selection.getSelectionEnd(localBuffer), 0, max(0, curLen))
                 val imm = context.getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
                 imm?.updateSelection(this@TerminalSurface, s, e, -1, -1)
                 if (extractedTextRequest != null) {
@@ -10345,8 +10449,8 @@ class TermuxActivity : Activity() {
 
             private fun buildExtractedText(): ExtractedText {
                 val curLen = localBuffer.length
-                val s = Selection.getSelectionStart(localBuffer).coerceIn(0, curLen)
-                val e = Selection.getSelectionEnd(localBuffer).coerceIn(0, curLen)
+                val s = safeClampInt(Selection.getSelectionStart(localBuffer), 0, max(0, curLen))
+                val e = safeClampInt(Selection.getSelectionEnd(localBuffer), 0, max(0, curLen))
                 return ExtractedText().apply {
                     text = localBuffer.toString()
                     startOffset = 0
@@ -10407,7 +10511,7 @@ class TermuxActivity : Activity() {
                 val common = commonPrefixLength(terminalSentLine, currentStr)
                 val gridLine = nativeGetInputLineBeforeCursor()
                 val maxSafeDel = max(terminalSentLine.length, gridLine.length)
-                val delCount = (terminalSentLine.length - common).coerceIn(0, maxSafeDel)
+                val delCount = safeClampInt(terminalSentLine.length - common, 0, max(0, maxSafeDel))
                 for (i in 0 until delCount) {
                     nativeSendKeyEvent(KeyEvent.KEYCODE_DEL, 0, 0)
                 }
@@ -10501,8 +10605,8 @@ class TermuxActivity : Activity() {
             override fun getSurroundingText(beforeLength: Int, afterLength: Int, flags: Int): SurroundingText {
                 syncWithTerminalGrid(false)
                 val curLen = localBuffer.length
-                val s = Selection.getSelectionStart(localBuffer).coerceIn(0, curLen)
-                val e = Selection.getSelectionEnd(localBuffer).coerceIn(0, curLen)
+                val s = safeClampInt(Selection.getSelectionStart(localBuffer), 0, max(0, curLen))
+                val e = safeClampInt(Selection.getSelectionEnd(localBuffer), 0, max(0, curLen))
                 val minSel = min(s, e)
                 val maxSel = max(s, e)
                 val start = max(0, minSel - max(0, beforeLength))
@@ -10530,8 +10634,8 @@ class TermuxActivity : Activity() {
                     syncWithTerminalGrid(false)
                 }
                 val curLen = localBuffer.length
-                val s = start.coerceIn(0, curLen)
-                val e = end.coerceIn(0, curLen)
+                val s = safeClampInt(start, 0, max(0, curLen))
+                val e = safeClampInt(end, 0, max(0, curLen))
                 if (s != e) {
                     BaseInputConnection.removeComposingSpans(localBuffer)
                 }
@@ -10630,7 +10734,7 @@ class TermuxActivity : Activity() {
 
             override fun setComposingRegion(start: Int, end: Int): Boolean {
                 val curLen = localBuffer.length
-                return super.setComposingRegion(start.coerceIn(0, curLen), end.coerceIn(0, curLen))
+                return super.setComposingRegion(safeClampInt(start, 0, max(0, curLen)), safeClampInt(end, 0, max(0, curLen)))
             }
 
             override fun finishComposingText(): Boolean {
@@ -10651,8 +10755,8 @@ class TermuxActivity : Activity() {
                     consumeActivePreDeleteIntoLocalBuffer()
                 } else {
                     val curLen = localBuffer.length
-                    val s = min(start, end).coerceIn(0, curLen)
-                    val e = max(start, end).coerceIn(0, curLen)
+                    val s = safeClampInt(min(start, end), 0, max(0, curLen))
+                    val e = safeClampInt(max(start, end), 0, max(0, curLen))
                     if (e > s) {
                         localBuffer.delete(s, e)
                     }
