@@ -5717,7 +5717,7 @@ class TermuxActivity : Activity() {
             val pattern = if (sftpShowHidden) "* .[!.]* ..?*" else "*"
             // Robust remote listing with @@PWD@@ sentinel so MOTD/banner output never corrupts the current path,
             // with dual GNU stat -c and BSD stat -f fallback support
-            val remoteScript = "(cd ${shellEscapeSingle(remoteDir)} 2>/dev/null || cd ~) && printf '@@PWD@@%s\\n' \"\\$PWD\" && " +
+            val remoteScript = "(cd ${shellEscapeSingle(remoteDir)} 2>/dev/null || cd ~) && printf '@@PWD@@' && pwd && " +
                 "(stat -c '%F\\t%s\\t%Y\\t%A\\t%n' $pattern 2>/dev/null || stat -f '%HT\\t%z\\t%m\\t%Sp\\t%N' $pattern 2>/dev/null || true)"
             val (ok, output) = runRemoteSftpViaCpp23(server, remoteScript)
             if (!ok) return output.ifBlank { tr("Не удалось подключиться по SFTP/SSH", "Failed to connect via SFTP/SSH") } to emptyList()
