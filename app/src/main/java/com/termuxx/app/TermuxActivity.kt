@@ -47,7 +47,9 @@ import android.text.InputType
 import android.text.Selection
 import android.text.SpannableStringBuilder
 import android.util.TypedValue
+import android.animation.LayoutTransition
 import android.animation.ValueAnimator
+import android.graphics.CornerPathEffect
 import android.view.ActionMode
 import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
@@ -3439,6 +3441,7 @@ class TermuxActivity : Activity() {
 
         private val shapePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
+            isDither = true
         }
         private val morphPath = Path()
 
@@ -3446,24 +3449,39 @@ class TermuxActivity : Activity() {
             super.onDraw(canvas)
             val cx = width * 0.5f
             val cy = height * 0.5f
-            val baseR = min(cx, cy) * 0.68f
+            val baseR = min(cx, cy) * 0.72f
             if (baseR <= 1f) return
 
-            // Compute exact MaterialShapes vertices in C++26 (72 smooth contour points)
+            // Compute exact MaterialShapes vertices in C++26 (96 smooth contour points):
+            // Step 0: 9-Pointed Star (Cookie9Sided) -> Rounded Pentagon (Pentagon)
+            // Step 1: Rounded Pentagon -> 4-Lobed Clover (Cookie4Sided)
+            // Step 2: 4-Lobed Clover -> Stadium Pill (Pill)
+            // Step 3: Stadium Pill -> 8-Pointed Sunny Star (Sunny)
+            // Step 4: Sunny Star -> 6-Lobed Flower (Cookie6Sided)
+            // Step 5: 6-Lobed Flower -> Rounded Square (Square)
+            // Step 6: Rounded Square -> 9-Pointed Star
             val coords = nativeComputeM3LoadingPolygon(
                 morphPhase,
                 pullProgress,
                 isIndeterminateRefreshing,
                 baseR
             )
-            if (coords.size < 4) return
+            val n = coords.size / 2
+            if (n < 3) return
 
             morphPath.reset()
-            val n = coords.size / 2
+            val firstX = cx + coords[0]
+            val firstY = cy + coords[1]
+            val lastX = cx + coords[(n - 1) * 2]
+            val lastY = cy + coords[(n - 1) * 2 + 1]
+            morphPath.moveTo((lastX + firstX) * 0.5f, (lastY + firstY) * 0.5f)
             for (i in 0 until n) {
-                val px = cx + coords[i * 2]
-                val py = cy + coords[i * 2 + 1]
-                if (i == 0) morphPath.moveTo(px, py) else morphPath.lineTo(px, py)
+                val currX = cx + coords[i * 2]
+                val currY = cy + coords[i * 2 + 1]
+                val nextIdx = (i + 1) % n
+                val nextX = cx + coords[nextIdx * 2]
+                val nextY = cy + coords[nextIdx * 2 + 1]
+                morphPath.quadTo(currX, currY, (currX + nextX) * 0.5f, (currY + nextY) * 0.5f)
             }
             morphPath.close()
             shapePaint.color = uiAccent
@@ -3478,8 +3496,8 @@ class TermuxActivity : Activity() {
     ) : FrameLayout(context) {
 
         private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
-        private val triggerDistancePx = dpF(64f)
-        private val maxPullPx = dpF(118f)
+        private val triggerDistancePx = dpF(62f)
+        private val maxPullPx = dpF(120f)
 
         private var downX = 0f
         private var downY = 0f
@@ -3505,21 +3523,21 @@ class TermuxActivity : Activity() {
                 isIndeterminateRefreshing = false
                 pullProgress = 0f
             }
-            // Exact Material 3 Expressive PullToRefreshDefaults.LoadingIndicator (42dp circle container)
+            // Google Play / Material 3 Expressive PullToRefreshDefaults.LoadingIndicator (44dp circular badge)
             indicatorBadge = FrameLayout(context).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(uiAccentContainer)
                 }
                 elevation = dpF(6f)
-                layoutParams = LayoutParams(dp(42), dp(42), Gravity.TOP or Gravity.CENTER_HORIZONTAL)
-                translationY = -dpF(48f)
+                layoutParams = LayoutParams(dp(44), dp(44), Gravity.TOP or Gravity.CENTER_HORIZONTAL)
+                translationY = -dpF(50f)
                 scaleX = 0f
                 scaleY = 0f
                 alpha = 0f
                 addView(
                     morphIndicator,
-                    LayoutParams(dp(30), dp(30), Gravity.CENTER)
+                    LayoutParams(dp(32), dp(32), Gravity.CENTER)
                 )
             }
             addView(indicatorBadge)
@@ -3527,6 +3545,11 @@ class TermuxActivity : Activity() {
 
         private fun isScrolledToTop(): Boolean {
             return !scrollView.canScrollVertically(-1) && scrollView.scrollY <= 0
+        }
+
+        override fun onDetachedFromWindow() {
+            spinAnimator?.cancel()
+            super.onDetachedFromWindow()
         }
 
         override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
@@ -3566,15 +3589,15 @@ class TermuxActivity : Activity() {
                         }
                     }
                     val rawDelta = max(0f, ev.y - pullStartY)
-                    currentPullPx = (rawDelta * 0.48f).coerceAtMost(maxPullPx)
+                    currentPullPx = (rawDelta * 0.50f).coerceAtMost(maxPullPx)
                     val progress = (currentPullPx / triggerDistancePx).coerceIn(0f, 1.25f)
 
-                    // BakaSU PullToRefreshBox: only the circular LoadingIndicator descends over the list
-                    indicatorBadge.translationY = -dpF(46f) + min(currentPullPx * 0.85f, dpF(68f))
-                    val easedScale = (1f - (1f - progress.coerceIn(0f, 1f)) * (1f - progress.coerceIn(0f, 1f))).coerceIn(0f, 1f)
+                    indicatorBadge.translationY = -dpF(48f) + min(currentPullPx * 0.88f, dpF(68f))
+                    val pClamped = progress.coerceIn(0f, 1f)
+                    val easedScale = (1f - (1f - pClamped) * (1f - pClamped)).coerceIn(0f, 1f)
                     indicatorBadge.scaleX = easedScale
                     indicatorBadge.scaleY = easedScale
-                    indicatorBadge.alpha = (progress * 1.8f).coerceIn(0f, 1f)
+                    indicatorBadge.alpha = (progress * 1.85f).coerceIn(0f, 1f)
 
                     morphIndicator.isIndeterminateRefreshing = false
                     morphIndicator.pullProgress = progress
@@ -3607,36 +3630,49 @@ class TermuxActivity : Activity() {
                                 .start()
 
                             spinAnimator?.cancel()
+                            // 380ms per shape morph:
+                            // 0..1: 9-Pointed Star -> Rounded Pentagon
+                            // 1..2: Rounded Pentagon -> 4-Lobed Clover
+                            // 2..3: 4-Lobed Clover -> Pill
+                            // 3..4: Pill -> 8-Pointed Sunny Star
+                            // 4..5: Sunny Star -> 6-Lobed Flower
+                            // 5..6: 6-Lobed Flower -> Rounded Square
+                            // 6..7: Rounded Square -> 9-Pointed Star
                             spinAnimator = ValueAnimator.ofFloat(0f, 7f).apply {
-                                duration = 3850L // 550ms per MaterialShape step (7 shapes)
+                                duration = 2660L
                                 repeatCount = ValueAnimator.INFINITE
                                 interpolator = LinearInterpolator()
                                 addUpdateListener { anim ->
-                                    morphIndicator.morphPhase = anim.animatedValue as Float
+                                    val ph = anim.animatedValue as Float
+                                    morphIndicator.morphPhase = ph
+                                    val sub = ph - kotlin.math.floor(ph)
+                                    val badgePulse = 1.0f + 0.04f * kotlin.math.sin(Math.PI.toFloat() * sub)
+                                    indicatorBadge.scaleX = badgePulse
+                                    indicatorBadge.scaleY = badgePulse
                                 }
                                 start()
                             }
 
-                            // Refresh data immediately while keeping the morphing indicator visible for 1.5 shape morphs
                             onRefreshTriggered()
 
+                            // Keep morphing indicator visible for 1750ms (~4.6 full shape morphs)
                             postDelayed({
                                 isRefreshing = false
                                 indicatorBadge.animate()
-                                    .translationY(-dpF(46f))
+                                    .translationY(-dpF(50f))
                                     .scaleX(0f)
                                     .scaleY(0f)
                                     .alpha(0f)
-                                    .setDuration(220L)
+                                    .setDuration(240L)
                                     .setInterpolator(predictiveCommitInterpolator)
                                     .withEndAction {
                                         spinAnimator?.cancel()
                                     }
                                     .start()
-                            }, 850L)
+                            }, 1750L)
                         } else {
                             indicatorBadge.animate()
-                                .translationY(-dpF(46f))
+                                .translationY(-dpF(50f))
                                 .scaleX(0f)
                                 .scaleY(0f)
                                 .alpha(0f)
@@ -3665,6 +3701,12 @@ class TermuxActivity : Activity() {
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
         }
+        private val roundedPathPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            pathEffect = CornerPathEffect(dpF(1.35f))
+        }
         private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
         }
@@ -3688,8 +3730,11 @@ class TermuxActivity : Activity() {
             fun x(v: Float) = left + v * s
             fun y(v: Float) = top + v * s
 
+            val sw = dpF(strokeWidthDp)
             strokePaint.color = tintColor
-            strokePaint.strokeWidth = dpF(strokeWidthDp)
+            strokePaint.strokeWidth = sw
+            roundedPathPaint.color = tintColor
+            roundedPathPaint.strokeWidth = sw
             fillPaint.color = tintColor
             path.reset()
 
@@ -3716,13 +3761,14 @@ class TermuxActivity : Activity() {
                     canvas.drawRoundRect(rect, r, r, strokePaint)
                 }
                 M3Icon.SETTINGS -> {
-                    canvas.drawCircle(x(12f), y(12f), 3.2f * s, strokePaint)
+                    val cx = x(12f)
+                    val cy = y(12f)
+                    canvas.drawCircle(cx, cy, 5.6f * s, strokePaint)
+                    canvas.drawCircle(cx, cy, 2.0f * s, fillPaint)
                     for (deg in 0 until 360 step 45) {
                         val rad = Math.toRadians(deg.toDouble())
-                        val r1 = 6.2f * s
-                        val r2 = 8.8f * s
-                        val cx = x(12f)
-                        val cy = y(12f)
+                        val r1 = 5.6f * s
+                        val r2 = 8.0f * s
                         canvas.drawLine(
                             cx + (Math.cos(rad) * r1).toFloat(),
                             cy + (Math.sin(rad) * r1).toFloat(),
@@ -3731,7 +3777,6 @@ class TermuxActivity : Activity() {
                             strokePaint
                         )
                     }
-                    canvas.drawCircle(x(12f), y(12f), 6.4f * s, strokePaint)
                 }
                 M3Icon.CLOSE -> {
                     canvas.drawLine(x(6f), y(6f), x(18f), y(18f), strokePaint)
@@ -3742,95 +3787,106 @@ class TermuxActivity : Activity() {
                     canvas.drawLine(x(15f), y(15f), x(19.5f), y(19.5f), strokePaint)
                 }
                 M3Icon.TREE -> {
-                    canvas.drawLine(x(6f), y(5f), x(6f), y(18f), strokePaint)
-                    canvas.drawLine(x(6f), y(10f), x(13f), y(10f), strokePaint)
-                    canvas.drawLine(x(6f), y(18f), x(13f), y(18f), strokePaint)
-                    rect.set(x(13f), y(7.5f), x(19f), y(12.5f))
-                    canvas.drawRoundRect(rect, 1.5f * s, 1.5f * s, strokePaint)
-                    rect.set(x(13f), y(15.5f), x(19f), y(20.5f))
-                    canvas.drawRoundRect(rect, 1.5f * s, 1.5f * s, strokePaint)
+                    rect.set(x(3.8f), y(3.8f), x(9.2f), y(8.6f))
+                    canvas.drawRoundRect(rect, 1.4f * s, 1.4f * s, strokePaint)
+                    canvas.drawLine(x(6.5f), y(8.6f), x(6.5f), y(17.6f), strokePaint)
+                    canvas.drawLine(x(6.5f), y(11.6f), x(13.5f), y(11.6f), strokePaint)
+                    canvas.drawLine(x(6.5f), y(17.6f), x(13.5f), y(17.6f), strokePaint)
+                    rect.set(x(13.5f), y(9.4f), x(19.8f), y(13.8f))
+                    canvas.drawRoundRect(rect, 1.4f * s, 1.4f * s, strokePaint)
+                    rect.set(x(13.5f), y(15.4f), x(19.8f), y(19.8f))
+                    canvas.drawRoundRect(rect, 1.4f * s, 1.4f * s, strokePaint)
                 }
                 M3Icon.EYE -> {
                     path.moveTo(x(2.5f), y(12f))
-                    path.quadTo(x(12f), y(4.5f), x(21.5f), y(12f))
-                    path.quadTo(x(12f), y(19.5f), x(2.5f), y(12f))
-                    canvas.drawPath(path, strokePaint)
-                    canvas.drawCircle(x(12f), y(12f), 2.5f * s, strokePaint)
-                }
-                M3Icon.CREATE_FOLDER -> {
-                    path.moveTo(x(3.5f), y(7.5f))
-                    path.lineTo(x(9.5f), y(7.5f))
-                    path.lineTo(x(11.5f), y(9.5f))
-                    path.lineTo(x(20.5f), y(9.5f))
-                    path.lineTo(x(20.5f), y(18.5f))
-                    path.lineTo(x(3.5f), y(18.5f))
+                    path.quadTo(x(12f), y(4.8f), x(21.5f), y(12f))
+                    path.quadTo(x(12f), y(19.2f), x(2.5f), y(12f))
                     path.close()
                     canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(12f), y(11.8f), x(12f), y(16.2f), strokePaint)
-                    canvas.drawLine(x(9.8f), y(14f), x(14.2f), y(14f), strokePaint)
+                    canvas.drawCircle(x(12f), y(12f), 2.2f * s, strokePaint)
                 }
-                M3Icon.REFRESH -> {
-                    rect.set(x(5f), y(5f), x(19f), y(19f))
-                    canvas.drawArc(rect, -45f, 285f, false, strokePaint)
-                    path.moveTo(x(15.2f), y(3.8f))
-                    path.lineTo(x(19.2f), y(6.8f))
-                    path.lineTo(x(15.0f), y(8.8f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.UPLOAD -> {
-                    canvas.drawLine(x(12f), y(16f), x(12f), y(5f), strokePaint)
-                    path.moveTo(x(7.5f), y(9.5f))
-                    path.lineTo(x(12f), y(5f))
-                    path.lineTo(x(16.5f), y(9.5f))
-                    canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(5f), y(19.5f), x(19f), y(19.5f), strokePaint)
-                }
-                M3Icon.DOWNLOAD -> {
-                    canvas.drawLine(x(12f), y(4.5f), x(12f), y(15.5f), strokePaint)
-                    path.moveTo(x(7.5f), y(11f))
-                    path.lineTo(x(12f), y(15.5f))
-                    path.lineTo(x(16.5f), y(11f))
-                    canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(5f), y(19.5f), x(19f), y(19.5f), strokePaint)
-                }
-                M3Icon.FOLDER -> {
-                    path.moveTo(x(3.5f), y(7f))
-                    path.lineTo(x(9.5f), y(7f))
-                    path.lineTo(x(11.5f), y(9.2f))
+                M3Icon.CREATE_FOLDER -> {
+                    path.moveTo(x(3.5f), y(6.8f))
+                    path.lineTo(x(9.5f), y(6.8f))
+                    path.lineTo(x(11.6f), y(9.2f))
                     path.lineTo(x(20.5f), y(9.2f))
                     path.lineTo(x(20.5f), y(18.5f))
                     path.lineTo(x(3.5f), y(18.5f))
                     path.close()
+                    canvas.drawPath(path, roundedPathPaint)
+                    canvas.drawLine(x(13.6f), y(11.6f), x(13.6f), y(16.2f), strokePaint)
+                    canvas.drawLine(x(11.3f), y(13.9f), x(15.9f), y(13.9f), strokePaint)
+                }
+                M3Icon.REFRESH -> {
+                    rect.set(x(5f), y(5f), x(19f), y(19f))
+                    canvas.drawArc(rect, -35f, 290f, false, strokePaint)
+                    path.moveTo(x(15.2f), y(4.0f))
+                    path.lineTo(x(19.0f), y(7.6f))
+                    path.lineTo(x(14.6f), y(8.2f))
                     canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.UPLOAD -> {
+                    path.moveTo(x(4.5f), y(14.5f))
+                    path.lineTo(x(4.5f), y(18.8f))
+                    path.lineTo(x(19.5f), y(18.8f))
+                    path.lineTo(x(19.5f), y(14.5f))
+                    canvas.drawPath(path, roundedPathPaint)
+                    canvas.drawLine(x(12f), y(14.8f), x(12f), y(5.0f), strokePaint)
+                    path.reset()
+                    path.moveTo(x(7.8f), y(9.2f))
+                    path.lineTo(x(12f), y(5.0f))
+                    path.lineTo(x(16.2f), y(9.2f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.DOWNLOAD -> {
+                    path.moveTo(x(4.5f), y(14.5f))
+                    path.lineTo(x(4.5f), y(18.8f))
+                    path.lineTo(x(19.5f), y(18.8f))
+                    path.lineTo(x(19.5f), y(14.5f))
+                    canvas.drawPath(path, roundedPathPaint)
+                    canvas.drawLine(x(12f), y(4.8f), x(12f), y(14.6f), strokePaint)
+                    path.reset()
+                    path.moveTo(x(7.8f), y(10.4f))
+                    path.lineTo(x(12f), y(14.6f))
+                    path.lineTo(x(16.2f), y(10.4f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.FOLDER -> {
+                    path.moveTo(x(3.5f), y(6.8f))
+                    path.lineTo(x(9.5f), y(6.8f))
+                    path.lineTo(x(11.6f), y(9.2f))
+                    path.lineTo(x(20.5f), y(9.2f))
+                    path.lineTo(x(20.5f), y(18.5f))
+                    path.lineTo(x(3.5f), y(18.5f))
+                    path.close()
+                    canvas.drawPath(path, roundedPathPaint)
                 }
                 M3Icon.FOLDER_OPEN -> {
-                    path.moveTo(x(3.5f), y(7f))
-                    path.lineTo(x(9.5f), y(7f))
-                    path.lineTo(x(11.5f), y(9.2f))
-                    path.lineTo(x(19.5f), y(9.2f))
-                    path.lineTo(x(19.5f), y(12f))
-                    canvas.drawPath(path, strokePaint)
-                    path.reset()
-                    path.moveTo(x(3.5f), y(18.5f))
-                    path.lineTo(x(6.0f), y(12f))
-                    path.lineTo(x(21.0f), y(12f))
-                    path.lineTo(x(18.5f), y(18.5f))
+                    path.moveTo(x(3.5f), y(6.8f))
+                    path.lineTo(x(9.5f), y(6.8f))
+                    path.lineTo(x(11.6f), y(9.2f))
+                    path.lineTo(x(20.5f), y(9.2f))
+                    path.lineTo(x(20.5f), y(18.5f))
+                    path.lineTo(x(3.5f), y(18.5f))
                     path.close()
-                    canvas.drawPath(path, strokePaint)
+                    canvas.drawPath(path, roundedPathPaint)
+                    canvas.drawLine(x(3.8f), y(12.4f), x(20.2f), y(12.4f), strokePaint)
                 }
                 M3Icon.FILE -> {
-                    path.moveTo(x(6f), y(4f))
-                    path.lineTo(x(14f), y(4f))
-                    path.lineTo(x(18.5f), y(8.5f))
-                    path.lineTo(x(18.5f), y(20f))
-                    path.lineTo(x(6f), y(20f))
+                    path.moveTo(x(5.5f), y(3.8f))
+                    path.lineTo(x(14.2f), y(3.8f))
+                    path.lineTo(x(18.5f), y(8.2f))
+                    path.lineTo(x(18.5f), y(20.2f))
+                    path.lineTo(x(5.5f), y(20.2f))
                     path.close()
-                    canvas.drawPath(path, strokePaint)
+                    canvas.drawPath(path, roundedPathPaint)
                     path.reset()
-                    path.moveTo(x(13.5f), y(4f))
-                    path.lineTo(x(13.5f), y(8.8f))
-                    path.lineTo(x(18.5f), y(8.8f))
+                    path.moveTo(x(14.0f), y(3.8f))
+                    path.lineTo(x(14.0f), y(8.4f))
+                    path.lineTo(x(18.5f), y(8.4f))
                     canvas.drawPath(path, strokePaint)
+                    canvas.drawLine(x(8.5f), y(12.8f), x(15.5f), y(12.8f), strokePaint)
+                    canvas.drawLine(x(8.5f), y(16.0f), x(13.5f), y(16.0f), strokePaint)
                 }
                 M3Icon.MORE_VERT -> {
                     val r = 1.65f * s
@@ -3859,7 +3915,7 @@ class TermuxActivity : Activity() {
                 }
                 M3Icon.TERMINAL -> {
                     rect.set(x(3.5f), y(5f), x(20.5f), y(19f))
-                    canvas.drawRoundRect(rect, 3f * s, 3f * s, strokePaint)
+                    canvas.drawRoundRect(rect, 2.8f * s, 2.8f * s, strokePaint)
                     path.moveTo(x(7.5f), y(9.5f))
                     path.lineTo(x(10.5f), y(12f))
                     path.lineTo(x(7.5f), y(14.5f))
@@ -3907,7 +3963,7 @@ class TermuxActivity : Activity() {
                     path.lineTo(x(4f), y(16f))
                     path.lineTo(x(4f), y(8f))
                     path.close()
-                    canvas.drawPath(path, strokePaint)
+                    canvas.drawPath(path, roundedPathPaint)
                     canvas.drawLine(x(4f), y(8f), x(12f), y(12.2f), strokePaint)
                     canvas.drawLine(x(20f), y(8f), x(12f), y(12.2f), strokePaint)
                     canvas.drawLine(x(12f), y(12.2f), x(12f), y(20.5f), strokePaint)
@@ -3982,7 +4038,7 @@ class TermuxActivity : Activity() {
                     path.lineTo(x(4.5f), y(19.5f))
                     path.lineTo(x(4.5f), y(15.2f))
                     path.close()
-                    canvas.drawPath(path, strokePaint)
+                    canvas.drawPath(path, roundedPathPaint)
                 }
                 M3Icon.COPY -> {
                     rect.set(x(8.5f), y(8.5f), x(19.5f), y(19.5f))
@@ -3992,7 +4048,7 @@ class TermuxActivity : Activity() {
                     path.lineTo(x(5.5f), y(5.5f))
                     path.lineTo(x(5.5f), y(15.5f))
                     path.lineTo(x(8.5f), y(15.5f))
-                    canvas.drawPath(path, strokePaint)
+                    canvas.drawPath(path, roundedPathPaint)
                 }
                 M3Icon.FONT -> {
                     path.moveTo(x(5.5f), y(19f))
@@ -6563,6 +6619,10 @@ class TermuxActivity : Activity() {
             // ================================================================
             fun openMaterialCreateItemSheet() {
                 val (cDlg, cSheet) = createExpressiveDialog(430)
+                cSheet.layoutTransition = LayoutTransition().apply {
+                    enableTransitionType(LayoutTransition.CHANGING)
+                    setDuration(230L)
+                }
                 var createMode = 0 // 0 = Folder, 1 = File, 2 = Bash Script (.sh)
                 var selectedChmod = "755"
 
@@ -6606,10 +6666,8 @@ class TermuxActivity : Activity() {
                 }
                 cSheet.addView(hdrPathChip)
 
-                // Segmented M3 Type Selector Bar (Папка | Файл | Скрипт .sh)
-                val segBar = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
+                // Segmented M3 Type Selector Bar (Папка | Файл | Скрипт .sh) with Sliding Pill Animation
+                val segBarOuter = FrameLayout(this).apply {
                     background = tonalBg(uiSurfaceLow, dp(16))
                     setPadding(dp(4), dp(4), dp(4), dp(4))
                     layoutParams = LinearLayout.LayoutParams(
@@ -6619,7 +6677,22 @@ class TermuxActivity : Activity() {
                         bottomMargin = dp(12)
                     }
                 }
-                cSheet.addView(segBar)
+                val segIndicatorPill = View(this).apply {
+                    background = tonalBg(uiAccentContainer, dp(12))
+                    layoutParams = FrameLayout.LayoutParams(0, 0)
+                }
+                segBarOuter.addView(segIndicatorPill)
+
+                val segBarRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                }
+                segBarOuter.addView(segBarRow)
+                cSheet.addView(segBarOuter)
 
                 // M3 Filled Input Container for Name
                 val nameBox = LinearLayout(this).apply {
@@ -6634,13 +6707,13 @@ class TermuxActivity : Activity() {
                     }
                 }
                 val nameBoxLabel = TextView(this).apply {
-                    text = tr("Имя папки", "Folder name")
+                    text = tr("Имя папки (поддерживается вложенность a/b)", "Folder name (supports nested a/b)")
                     setTextColor(uiAccent)
                     typeface = Typeface.DEFAULT_BOLD
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 }
                 val nameEt = EditText(this).apply {
-                    hint = "projects"
+                    hint = "scripts"
                     setHintTextColor(COLOR_TEXT_DIM)
                     setTextColor(COLOR_TEXT_BRIGHT)
                     typeface = Typeface.MONOSPACE
@@ -6658,6 +6731,7 @@ class TermuxActivity : Activity() {
                     orientation = LinearLayout.VERTICAL
                     background = tonalBg(uiSurfaceLow, dp(18))
                     setPadding(dp(16), dp(11), dp(16), dp(12))
+                    visibility = View.GONE
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
@@ -6686,10 +6760,8 @@ class TermuxActivity : Activity() {
                 contentBox.addView(contentEt)
                 cSheet.addView(contentBox)
 
-                // Segmented Chmod Selector Bar
-                val chmodBar = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
+                // Segmented Chmod Selector Bar with Sliding Pill Animation
+                val chmodBarOuter = FrameLayout(this).apply {
                     background = tonalBg(uiSurfaceLow, dp(14))
                     setPadding(dp(4), dp(4), dp(4), dp(4))
                     layoutParams = LinearLayout.LayoutParams(
@@ -6699,115 +6771,320 @@ class TermuxActivity : Activity() {
                         bottomMargin = dp(14)
                     }
                 }
-                cSheet.addView(chmodBar)
+                val chmodIndicatorPill = View(this).apply {
+                    background = tonalBg(uiAccentContainer, dp(10))
+                    layoutParams = FrameLayout.LayoutParams(0, 0)
+                }
+                chmodBarOuter.addView(chmodIndicatorPill)
 
-                lateinit var rebuildCreateState: () -> Unit
-                rebuildCreateState = {
-                    segBar.removeAllViews()
-                    val modes = listOf(
-                        Triple(0, M3Icon.FOLDER, tr("Папка", "Folder")),
-                        Triple(1, M3Icon.FILE, tr("Файл", "File")),
-                        Triple(2, M3Icon.TERMINAL, tr("Скрипт .sh", "Script .sh"))
+                val chmodBarRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
                     )
-                    for ((mCode, ic, lbl) in modes) {
-                        val isSel = (createMode == mCode)
-                        val tab = LinearLayout(this).apply {
-                            orientation = LinearLayout.HORIZONTAL
-                            gravity = Gravity.CENTER
-                            setPadding(dp(8), dp(9), dp(8), dp(9))
-                            if (isSel) background = tonalBg(uiAccentContainer, dp(12))
-                            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                            attachSmoothPressAnimation(this, 0.95f)
-                            setOnClickListener {
-                                triggerHaptic(0.8f)
-                                createMode = mCode
-                                when (mCode) {
-                                    0 -> {
-                                        selectedChmod = "755"
-                                    }
-                                    1 -> {
-                                        selectedChmod = "644"
-                                    }
-                                    2 -> {
-                                        selectedChmod = "755"
-                                        if (contentEt.text.isNullOrBlank()) {
-                                            contentEt.setText("#!/usr/bin/env bash\nset -euo pipefail\n\n")
-                                        }
-                                        if (nameEt.text.isNullOrBlank()) {
-                                            nameEt.setText("script.sh")
-                                        }
-                                    }
-                                }
-                                rebuildCreateState()
-                            }
+                }
+                chmodBarOuter.addView(chmodBarRow)
+                cSheet.addView(chmodBarOuter)
+
+                val modeTabs = ArrayList<LinearLayout>(3)
+                val modeIcons = ArrayList<MaterialIconView>(3)
+                val modeLabels = ArrayList<TextView>(3)
+                val chmodModes = listOf("755", "644", "700", "600")
+                val chmodTabs = ArrayList<TextView>(4)
+
+                fun updateChmodSelection(newChmod: String, animate: Boolean) {
+                    selectedChmod = newChmod
+                    val targetIdx = chmodModes.indexOf(newChmod).coerceAtLeast(0)
+                    for ((idx, tv) in chmodTabs.withIndex()) {
+                        val isSel = (idx == targetIdx)
+                        tv.typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
+                        tv.setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
+                        if (animate) {
+                            tv.animate()
+                                .scaleX(if (isSel) 1.04f else 1.0f)
+                                .scaleY(if (isSel) 1.04f else 1.0f)
+                                .setDuration(200L)
+                                .setInterpolator(aosp17SpatialInterpolator)
+                                .start()
                         }
-                        tab.addView(
-                            MaterialIconView(
-                                this,
-                                ic,
-                                if (isSel) uiAccent else COLOR_TEXT_DIM,
-                                17f,
-                                2.0f
-                            ).apply {
-                                layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
-                                    marginEnd = dp(5)
+                    }
+                    val targetTab = chmodTabs.getOrNull(targetIdx) ?: return
+                    if (targetTab.width > 0) {
+                        if (chmodIndicatorPill.layoutParams.width != targetTab.width) {
+                            chmodIndicatorPill.layoutParams = FrameLayout.LayoutParams(targetTab.width, targetTab.height)
+                        }
+                        if (animate) {
+                            chmodIndicatorPill.animate()
+                                .translationX(targetTab.left.toFloat())
+                                .scaleX(1.06f)
+                                .setDuration(130L)
+                                .setInterpolator(aosp17SpatialInterpolator)
+                                .withEndAction {
+                                    chmodIndicatorPill.animate()
+                                        .scaleX(1.0f)
+                                        .setDuration(130L)
+                                        .setInterpolator(aosp17SpatialInterpolator)
+                                        .start()
                                 }
-                            }
-                        )
-                        tab.addView(TextView(this).apply {
-                            text = lbl
-                            setSingleLine(true)
-                            setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                            typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                        })
-                        segBar.addView(tab)
+                                .start()
+                        } else {
+                            chmodIndicatorPill.translationX = targetTab.left.toFloat()
+                        }
+                    }
+                }
+
+                fun updateModeSelection(newMode: Int, animate: Boolean) {
+                    val prevMode = createMode
+                    val dir = if (newMode >= prevMode) 1 else -1
+                    createMode = newMode
+
+                    for (idx in 0 until modeTabs.size) {
+                        val isSel = (idx == newMode)
+                        modeIcons[idx].tintColor = if (isSel) uiAccent else COLOR_TEXT_DIM
+                        modeIcons[idx].invalidate()
+                        modeLabels[idx].setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
+                        modeLabels[idx].typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                        if (animate) {
+                            modeTabs[idx].animate()
+                                .scaleX(if (isSel) 1.04f else 1.0f)
+                                .scaleY(if (isSel) 1.04f else 1.0f)
+                                .setDuration(220L)
+                                .setInterpolator(aosp17SpatialInterpolator)
+                                .start()
+                        }
                     }
 
-                    val isFolder = (createMode == 0)
-                    heroIcon.icon = when (createMode) {
+                    val targetTab = modeTabs.getOrNull(newMode)
+                    if (targetTab != null && targetTab.width > 0) {
+                        if (segIndicatorPill.layoutParams.width != targetTab.width) {
+                            segIndicatorPill.layoutParams = FrameLayout.LayoutParams(targetTab.width, targetTab.height)
+                        }
+                        if (animate) {
+                            segIndicatorPill.animate()
+                                .translationX(targetTab.left.toFloat())
+                                .scaleX(1.08f)
+                                .setDuration(135L)
+                                .setInterpolator(aosp17SpatialInterpolator)
+                                .withEndAction {
+                                    segIndicatorPill.animate()
+                                        .scaleX(1.0f)
+                                        .setDuration(140L)
+                                        .setInterpolator(aosp17SpatialInterpolator)
+                                        .start()
+                                }
+                                .start()
+                        } else {
+                            segIndicatorPill.translationX = targetTab.left.toFloat()
+                        }
+                    }
+
+                    val isFolder = (newMode == 0)
+                    heroIcon.icon = when (newMode) {
                         0 -> M3Icon.CREATE_FOLDER
                         1 -> M3Icon.FILE
                         else -> M3Icon.TERMINAL
                     }
                     heroIcon.invalidate()
-                    hdrTitle.text = when (createMode) {
+
+                    if (animate && prevMode != newMode) {
+                        heroBadge.scaleX = 0.72f
+                        heroBadge.scaleY = 0.72f
+                        heroBadge.rotation = dir * -14f
+                        heroBadge.animate()
+                            .scaleX(1.0f)
+                            .scaleY(1.0f)
+                            .rotation(0f)
+                            .setDuration(280L)
+                            .setInterpolator(OvershootInterpolator(1.75f))
+                            .start()
+
+                        hdrTitle.alpha = 0.25f
+                        hdrTitle.translationX = dir * dpF(16f)
+                        hdrTitle.animate()
+                            .alpha(1.0f)
+                            .translationX(0f)
+                            .setDuration(220L)
+                            .setInterpolator(aosp17SpatialInterpolator)
+                            .start()
+
+                        nameBox.alpha = 0.55f
+                        nameBox.translationX = dir * dpF(12f)
+                        nameBox.animate()
+                            .alpha(1.0f)
+                            .translationX(0f)
+                            .setDuration(220L)
+                            .setInterpolator(aosp17SpatialInterpolator)
+                            .start()
+                    }
+
+                    hdrTitle.text = when (newMode) {
                         0 -> tr("Новая папка", "New folder")
                         1 -> tr("Новый файл", "New file")
                         else -> tr("Новый исполняемый скрипт", "New shell script")
                     }
-                    nameBoxLabel.text = if (isFolder) tr("Имя папки (поддерживается вложенность a/b)", "Folder name (supports nested a/b)") else tr("Имя файла", "File name")
-                    nameEt.hint = when (createMode) {
+                    nameBoxLabel.text = if (isFolder) {
+                        tr("Имя папки (поддерживается вложенность a/b)", "Folder name (supports nested a/b)")
+                    } else {
+                        tr("Имя файла", "File name")
+                    }
+                    nameEt.hint = when (newMode) {
                         0 -> "scripts"
                         1 -> "config.json"
                         else -> "deploy.sh"
                     }
-                    contentBox.visibility = if (isFolder) View.GONE else View.VISIBLE
 
-                    chmodBar.removeAllViews()
-                    for (mode in listOf("755", "644", "700", "600")) {
-                        val isModeSel = (selectedChmod == mode)
-                        val mBtn = TextView(this).apply {
-                            text = "chmod $mode"
-                            gravity = Gravity.CENTER
-                            setSingleLine(true)
-                            typeface = if (isModeSel) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                            setTextColor(if (isModeSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                            if (isModeSel) background = tonalBg(uiAccentContainer, dp(10))
-                            setPadding(dp(6), dp(7), dp(6), dp(7))
-                            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                            attachSmoothPressAnimation(this, 0.95f)
-                            setOnClickListener {
-                                triggerHaptic(0.75f)
-                                selectedChmod = mode
-                                rebuildCreateState()
+                    if (isFolder) {
+                        if (contentBox.visibility == View.VISIBLE) {
+                            if (animate) {
+                                contentBox.animate()
+                                    .alpha(0f)
+                                    .translationY(-dpF(10f))
+                                    .setDuration(160L)
+                                    .setInterpolator(aosp17SpatialInterpolator)
+                                    .withEndAction {
+                                        contentBox.visibility = View.GONE
+                                        contentBox.alpha = 1f
+                                        contentBox.translationY = 0f
+                                    }
+                                    .start()
+                            } else {
+                                contentBox.visibility = View.GONE
                             }
                         }
-                        chmodBar.addView(mBtn)
+                    } else {
+                        if (contentBox.visibility != View.VISIBLE) {
+                            contentBox.visibility = View.VISIBLE
+                            if (animate) {
+                                contentBox.alpha = 0f
+                                contentBox.translationY = -dpF(12f)
+                                contentBox.animate()
+                                    .alpha(1f)
+                                    .translationY(0f)
+                                    .setDuration(230L)
+                                    .setInterpolator(aosp17SpatialInterpolator)
+                                    .start()
+                            }
+                        } else if (animate && prevMode != newMode) {
+                            contentBox.alpha = 0.45f
+                            contentBox.translationX = dir * dpF(14f)
+                            contentBox.animate()
+                                .alpha(1f)
+                                .translationX(0f)
+                                .setDuration(220L)
+                                .setInterpolator(aosp17SpatialInterpolator)
+                                .start()
+                        }
                     }
                 }
-                rebuildCreateState()
+
+                val modes = listOf(
+                    Triple(0, M3Icon.FOLDER, tr("Папка", "Folder")),
+                    Triple(1, M3Icon.FILE, tr("Файл", "File")),
+                    Triple(2, M3Icon.TERMINAL, tr("Скрипт .sh", "Script .sh"))
+                )
+                for ((mCode, ic, lbl) in modes) {
+                    val isSel = (createMode == mCode)
+                    val icView = MaterialIconView(
+                        this,
+                        ic,
+                        if (isSel) uiAccent else COLOR_TEXT_DIM,
+                        17f,
+                        2.0f
+                    ).apply {
+                        layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                            marginEnd = dp(5)
+                        }
+                    }
+                    val lblView = TextView(this).apply {
+                        text = lbl
+                        setSingleLine(true)
+                        setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
+                        typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    }
+                    val tab = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER
+                        setPadding(dp(8), dp(9), dp(8), dp(9))
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                        addView(icView)
+                        addView(lblView)
+                        attachSmoothPressAnimation(this, 0.95f)
+                        setOnClickListener {
+                            if (createMode == mCode) return@setOnClickListener
+                            triggerHaptic(0.85f)
+                            val targetChmod = when (mCode) {
+                                0 -> "755"
+                                1 -> "644"
+                                else -> {
+                                    if (contentEt.text.isNullOrBlank()) {
+                                        contentEt.setText("#!/usr/bin/env bash
+set -euo pipefail
+
+")
+                                    }
+                                    if (nameEt.text.isNullOrBlank() || nameEt.text.toString() == "config.json") {
+                                        nameEt.setText("script.sh")
+                                    }
+                                    "755"
+                                }
+                            }
+                            if (mCode == 1 && nameEt.text.toString() == "script.sh") {
+                                nameEt.setText("")
+                            }
+                            updateModeSelection(mCode, animate = true)
+                            updateChmodSelection(targetChmod, animate = true)
+                        }
+                    }
+                    modeTabs.add(tab)
+                    modeIcons.add(icView)
+                    modeLabels.add(lblView)
+                    segBarRow.addView(tab)
+                }
+
+                for (mode in chmodModes) {
+                    val isModeSel = (selectedChmod == mode)
+                    val mBtn = TextView(this).apply {
+                        text = "chmod $mode"
+                        gravity = Gravity.CENTER
+                        setSingleLine(true)
+                        typeface = if (isModeSel) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        setTextColor(if (isModeSel) uiOnAccentContainer else COLOR_TEXT_DIM)
+                        setPadding(dp(6), dp(7), dp(6), dp(7))
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                        attachSmoothPressAnimation(this, 0.95f)
+                        setOnClickListener {
+                            if (selectedChmod == mode) return@setOnClickListener
+                            triggerHaptic(0.75f)
+                            updateChmodSelection(mode, animate = true)
+                        }
+                    }
+                    chmodTabs.add(mBtn)
+                    chmodBarRow.addView(mBtn)
+                }
+
+                segBarRow.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+                    override fun onPreDraw(): Boolean {
+                        if (segBarRow.viewTreeObserver.isAlive) {
+                            segBarRow.viewTreeObserver.removeOnPreDrawListener(this)
+                        }
+                        val firstModeTab = modeTabs.getOrNull(createMode)
+                        if (firstModeTab != null) {
+                            segIndicatorPill.layoutParams = FrameLayout.LayoutParams(firstModeTab.width, firstModeTab.height)
+                            segIndicatorPill.translationX = firstModeTab.left.toFloat()
+                        }
+                        val chmodIdx = chmodModes.indexOf(selectedChmod).coerceAtLeast(0)
+                        val firstChmodTab = chmodTabs.getOrNull(chmodIdx)
+                        if (firstChmodTab != null) {
+                            chmodIndicatorPill.layoutParams = FrameLayout.LayoutParams(firstChmodTab.width, firstChmodTab.height)
+                            chmodIndicatorPill.translationX = firstChmodTab.left.toFloat()
+                        }
+                        return true
+                    }
+                })
 
                 val btnRow = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -7229,11 +7506,6 @@ class TermuxActivity : Activity() {
             }
             contentFrame.addView(outer)
 
-            val installed = parseInstalledDpkgPackagesViaCpp23()
-            val totalKb = installed.sumOf { it.sizeKb }
-            val userPackages = installed.filter { !it.isCore }
-            val corePackages = installed.filter { it.isCore }
-
             val summaryCard = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -7266,12 +7538,12 @@ class TermuxActivity : Activity() {
                     }
                 }
             )
-            allBadge.addView(TextView(this).apply {
-                text = "${tr("Все", "All")}: ${installed.size}"
+            val allBadgeTv = TextView(this).apply {
                 setTextColor(COLOR_TEXT_BRIGHT)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            })
+            }
+            allBadge.addView(allBadgeTv)
             summaryCard.addView(allBadge)
 
             val sizeBadge = LinearLayout(this).apply {
@@ -7287,12 +7559,12 @@ class TermuxActivity : Activity() {
                     }
                 }
             )
-            sizeBadge.addView(TextView(this).apply {
-                text = formatSize(totalKb * 1024L)
+            val sizeBadgeTv = TextView(this).apply {
                 setTextColor(COLOR_TEXT_BRIGHT)
                 typeface = Typeface.MONOSPACE
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            })
+            }
+            sizeBadge.addView(sizeBadgeTv)
             summaryCard.addView(sizeBadge)
 
             summaryCard.addView(View(this).apply {
@@ -7307,7 +7579,8 @@ class TermuxActivity : Activity() {
                 setOnClickListener {
                     triggerHaptic(0.9f)
                     dlg.dismiss()
-                    nativeSendText("pkg upgrade -y\n", false)
+                    nativeSendText("pkg upgrade -y
+", false)
                 }
             }
             summaryCard.addView(upgradeBtn)
@@ -7325,13 +7598,6 @@ class TermuxActivity : Activity() {
                 setPadding(0, dp(2), 0, dp(24))
             }
             pkgScroll.addView(pkgCol)
-
-            val ptrPackages = BakaSuPullToRefreshLayout(this, pkgScroll) {
-                renderPackagesTab()
-            }.apply {
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-            }
-            outer.addView(ptrPackages)
 
             fun makePkgCard(pkg: DpkgPackageInfo, idx: Int, total: Int, allowDelete: Boolean): LinearLayout {
                 return LinearLayout(this).apply {
@@ -7378,7 +7644,8 @@ class TermuxActivity : Activity() {
                                 setOnClickListener {
                                     triggerHaptic(0.9f)
                                     dlg.dismiss()
-                                    nativeSendText("apt remove -y ${pkg.name}\n", false)
+                                    nativeSendText("apt remove -y ${pkg.name}
+", false)
                                 }
                             }
                         )
@@ -7386,29 +7653,48 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            if (userPackages.isNotEmpty()) {
+            fun populatePackagesInPlace() {
+                val installed = parseInstalledDpkgPackagesViaCpp23()
+                val totalKb = installed.sumOf { it.sizeKb }
+                val userPackages = installed.filter { !it.isCore }
+                val corePackages = installed.filter { it.isCore }
+
+                allBadgeTv.text = "${tr("Все", "All")}: ${installed.size}"
+                sizeBadgeTv.text = formatSize(totalKb * 1024L)
+
+                pkgCol.removeAllViews()
+                if (userPackages.isNotEmpty()) {
+                    pkgCol.addView(TextView(this).apply {
+                        text = tr("Установленные пакеты (${userPackages.size})", "Installed packages (${userPackages.size})")
+                        setTextColor(uiAccent)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        setPadding(dp(8), dp(4), dp(8), dp(6))
+                    })
+                    for ((idx, pkg) in userPackages.withIndex()) {
+                        pkgCol.addView(makePkgCard(pkg, idx, userPackages.size, allowDelete = true))
+                    }
+                }
+
                 pkgCol.addView(TextView(this).apply {
-                    text = tr("Установленные пакеты (${userPackages.size})", "Installed packages (${userPackages.size})")
-                    setTextColor(uiAccent)
+                    text = tr("Основные системные пакеты (${corePackages.size})", "Core system packages (${corePackages.size})")
+                    setTextColor(COLOR_TEXT_DIM)
                     typeface = Typeface.DEFAULT_BOLD
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                    setPadding(dp(8), dp(4), dp(8), dp(6))
+                    setPadding(dp(8), dp(8), dp(8), dp(6))
                 })
-                for ((idx, pkg) in userPackages.withIndex()) {
-                    pkgCol.addView(makePkgCard(pkg, idx, userPackages.size, allowDelete = true))
+                for ((idx, pkg) in corePackages.withIndex()) {
+                    pkgCol.addView(makePkgCard(pkg, idx, corePackages.size, allowDelete = false))
                 }
             }
 
-            pkgCol.addView(TextView(this).apply {
-                text = tr("Основные системные пакеты (${corePackages.size})", "Core system packages (${corePackages.size})")
-                setTextColor(COLOR_TEXT_DIM)
-                typeface = Typeface.DEFAULT_BOLD
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                setPadding(dp(8), dp(8), dp(8), dp(6))
-            })
-            for ((idx, pkg) in corePackages.withIndex()) {
-                pkgCol.addView(makePkgCard(pkg, idx, corePackages.size, allowDelete = false))
+            val ptrPackages = BakaSuPullToRefreshLayout(this, pkgScroll) {
+                populatePackagesInPlace()
+            }.apply {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             }
+            outer.addView(ptrPackages)
+            populatePackagesInPlace()
         }
 
         renderActiveTab = {

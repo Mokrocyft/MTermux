@@ -4450,68 +4450,79 @@ Java_com_termuxx_app_TermuxActivity_nativeSetMaxScrollback(JNIEnv* /*env*/, jcla
 namespace {
 
 constexpr float kPi26 = 3.14159265358979323846f;
-constexpr int kM3PolygonVertices = 72;
+constexpr int kM3PolygonVertices = 96;
 
-// Expressive Material 3 spring-like morph curve: fast transition in first 68% with subtle overshoot, settling smoothly
-[[nodiscard]] inline float expressiveMorphCurveCpp26(float u) noexcept {
-    u = std::clamp(u, 0.0f, 1.0f);
-    if (u >= 0.72f) {
-        float tail = (u - 0.72f) / 0.28f;
-        return 1.0f + 0.032f * std::sin(kPi26 * tail) * (1.0f - tail);
+// Smooth Material 3 Expressive spring-like easing curve with subtle overshoot
+[[nodiscard]] constexpr float expressiveMorphCurveCpp26(float tRaw) noexcept {
+    float u = std::clamp(tRaw, 0.0f, 1.0f);
+    if (u >= 0.68f) {
+        float tail = (u - 0.68f) / 0.32f;
+        return 1.0f + 0.048f * std::sin(kPi26 * tail) * (1.0f - tail);
     }
-    float t = u / 0.72f;
-    // Cubic bezier approximation of M3 Expressive FastOutExtraSlowIn with subtle spring
+    float t = u / 0.68f;
     float inv = 1.0f - t;
-    return 3.0f * inv * inv * t * 0.18f + 3.0f * inv * t * t * 1.04f + t * t * t;
+    return 3.0f * inv * inv * t * 0.16f + 3.0f * inv * t * t * 1.06f + t * t * t;
 }
 
-// Evaluates radial distance r(theta) in [0..1] for each of the 7 MaterialShapes in IndeterminateIndicatorPolygons
-// plus shapeId = -1 for Circle
+// Exact C^infinity rounded regular N-gon radial distance using Lp-norm of half-plane projections:
+// Produces flat polygon sides with smoothly rounded vertices (e.g. N=5 Rounded Pentagon, N=4 Cushion).
+[[nodiscard]] inline float roundedRegularPolygonRadiusCpp26(
+    float theta,
+    int nSides,
+    float inradius,
+    float cornerSharpnessP
+) noexcept {
+    float sumPow = 0.0f;
+    float step = (2.0f * kPi26) / static_cast<float>(nSides);
+    for (int k = 0; k < nSides; ++k) {
+        float c = std::cos(theta - static_cast<float>(k) * step);
+        if (c > 0.0f) {
+            sumPow += std::pow(c, cornerSharpnessP);
+        }
+    }
+    if (sumPow <= 1e-6f) return inradius;
+    return std::clamp(inradius / std::pow(sumPow, 1.0f / cornerSharpnessP), 0.55f, 0.99f);
+}
+
+// Evaluates radial distance r(theta) in [0..1] for each MaterialShape in the Google Play / M3 Expressive cycle:
+// -1: Circle (initial pull start)
+//  0: Cookie9Sided / SoftBurst (9-pointed scalloped star shown at full pull & start of refresh)
+//  1: Pentagon (5-sided rounded regular pentagon — immediate first morph target from the star!)
+//  2: Cookie4Sided (4-lobed rounded clover / quatrefoil)
+//  3: Pill (tilted stadium / capsule shape)
+//  4: Sunny (8-pointed sunny star with rounded tips)
+//  5: Cookie6Sided (6-lobed scalloped hexagon flower)
+//  6: RoundedSquare (4-sided rounded cushion / diamond)
 [[nodiscard]] inline float evalMaterialShapeRadiusCpp26(int shapeId, float theta) noexcept {
     switch (shapeId) {
-        case -1: // MaterialShapes.Circle
-            return 0.84f;
+        case -1: // Circle
+            return 0.82f;
 
-        case 0: // MaterialShapes.SoftBurst (10-pointed soft rounded starburst)
-            return 0.84f + 0.145f * std::cos(10.0f * theta);
+        case 0: // 9-pointed rounded star (Cookie9Sided / SoftBurst)
+            return 0.78f + 0.195f * std::cos(9.0f * theta) - 0.025f * std::cos(18.0f * theta);
 
-        case 1: // MaterialShapes.Cookie9Sided (9-lobed scalloped cookie flower)
-            return 0.82f + 0.165f * std::cos(9.0f * theta) + 0.015f * std::cos(18.0f * theta);
+        case 1: // Rounded Pentagon (MaterialShapes.Pentagon)
+            return roundedRegularPolygonRadiusCpp26(theta, 5, 0.78f, 6.6f);
 
-        case 2: { // MaterialShapes.Pentagon (5-sided rounded regular polygon)
-            float sector = (2.0f * kPi26) / 5.0f;
-            float a = std::fmod(theta + 2.0f * kPi26, sector) - (sector * 0.5f);
-            float polyR = std::cos(sector * 0.5f) / std::max(0.35f, std::cos(a));
-            // Blend polygon edge with smooth rounded corners
-            float rounded = 0.74f + 0.22f * polyR + 0.045f * std::cos(5.0f * theta);
-            return std::clamp(rounded, 0.65f, 0.98f);
+        case 2: // 4-lobed clover (MaterialShapes.Cookie4Sided)
+            return 0.76f + 0.215f * std::cos(4.0f * theta) - 0.030f * std::cos(8.0f * theta);
+
+        case 3: { // Stadium Pill (MaterialShapes.Pill)
+            float ac = std::abs(std::cos(theta)) / 0.96f;
+            float as = std::abs(std::sin(theta)) / 0.62f;
+            float denom = std::pow( std::pow(ac, 2.7f) + std::pow(as, 2.7f), 1.0f / 2.7f );
+            return (denom > 1e-4f) ? std::clamp(1.0f / denom, 0.58f, 0.98f) : 0.78f;
         }
 
-        case 3: { // MaterialShapes.Pill (tilted stadium / capsule shape)
-            float c = std::cos(theta);
-            float s = std::sin(theta);
-            float rx = 0.96f;
-            float ry = 0.64f;
-            float denom = std::sqrt((c * c) / (rx * rx) + (s * s) / (ry * ry));
-            float baseR = (denom > 1e-4f) ? (1.0f / denom) : 0.80f;
-            return std::clamp(baseR + 0.03f * std::cos(2.0f * theta), 0.60f, 0.98f);
-        }
+        case 4: // 8-pointed Sunny star (MaterialShapes.Sunny)
+            return 0.78f + 0.190f * std::cos(8.0f * theta) - 0.025f * std::cos(16.0f * theta);
 
-        case 4: // MaterialShapes.Sunny (8-pointed sunny star with rounded tips and deeper valleys)
-            return 0.79f + 0.185f * std::cos(8.0f * theta) - 0.025f * std::cos(16.0f * theta);
+        case 5: // 6-lobed scalloped hexagon (MaterialShapes.Cookie6Sided)
+            return 0.79f + 0.175f * std::cos(6.0f * theta) - 0.020f * std::cos(12.0f * theta);
 
-        case 5: // MaterialShapes.Cookie4Sided (4-lobed rounded clover / quatrefoil)
-            return 0.79f + 0.195f * std::cos(4.0f * theta) - 0.020f * std::cos(8.0f * theta);
-
-        case 6: // MaterialShapes.Oval (smooth tilted ellipse)
-        default: {
-            float c = std::cos(theta);
-            float s = std::sin(theta);
-            float rx = 0.94f;
-            float ry = 0.70f;
-            float denom = std::sqrt((c * c) / (rx * rx) + (s * s) / (ry * ry));
-            return (denom > 1e-4f) ? (1.0f / denom) : 0.82f;
-        }
+        case 6: // Rounded Square / Cushion (MaterialShapes.Square)
+        default:
+            return roundedRegularPolygonRadiusCpp26(theta, 4, 0.77f, 5.4f);
     }
 }
 
@@ -4535,46 +4546,53 @@ Java_com_termuxx_app_TermuxActivity_nativeComputeM3LoadingPolygon(
     float scalePulse = 1.0f;
 
     if (!isRefreshing) {
-        // Determinate pull-to-refresh preview: Circle -> SoftBurst
+        // Determinate pull-to-refresh preview: Circle (-1) -> 9-pointed Star (0)
         float p = std::clamp(static_cast<float>(pullProgress), 0.0f, 1.25f);
         shapeA = -1;
         shapeB = 0;
         morphT = std::clamp(p, 0.0f, 1.0f);
-        rotRad = (18.0f + p * 90.0f) * (kPi26 / 180.0f);
-        scalePulse = 0.85f + 0.15f * morphT;
+        rotRad = (-18.0f + p * 110.0f) * (kPi26 / 180.0f);
+        scalePulse = 0.86f + 0.14f * morphT;
     } else {
-        // Indeterminate 7-polygon cycle: SoftBurst -> Cookie9Sided -> Pentagon -> Pill -> Sunny -> Cookie4Sided -> Oval
+        // Indeterminate Google Play / M3 Expressive 7-shape cycle:
+        // Step 0: Star (0) -> Rounded Pentagon (1)
+        // Step 1: Rounded Pentagon (1) -> 4-Lobed Clover (2)
+        // Step 2: 4-Lobed Clover (2) -> Pill (3)
+        // Step 3: Pill (3) -> 8-Pointed Sunny Star (4)
+        // Step 4: Sunny Star (4) -> 6-Lobed Flower (5)
+        // Step 5: 6-Lobed Flower (5) -> Rounded Square (6)
+        // Step 6: Rounded Square (6) -> Star (0)
         float cleanPhase = std::max(0.0f, static_cast<float>(phase));
         int stepIdx = static_cast<int>(std::floor(cleanPhase));
         float u = cleanPhase - static_cast<float>(stepIdx);
         shapeA = stepIdx % 7;
         shapeB = (stepIdx + 1) % 7;
         morphT = expressiveMorphCurveCpp26(u);
-        float rotDeg = static_cast<float>(stepIdx) * 90.0f + morphT * 65.0f + u * 25.0f;
+        float rotDeg = -18.0f + static_cast<float>(stepIdx) * 90.0f + morphT * 60.0f + u * 30.0f;
         rotRad = rotDeg * (kPi26 / 180.0f);
-        scalePulse = 1.0f - 0.065f * std::sin(kPi26 * std::clamp(u / 0.72f, 0.0f, 1.0f));
+        scalePulse = 0.95f + 0.08f * std::sin(kPi26 * u);
     }
 
-    float effRadius = static_cast<float>(radiusPx) * scalePulse;
+    const float effRadius = static_cast<float>(radiusPx) * scalePulse;
+    const float angleStep = (2.0f * kPi26) / static_cast<float>(kM3PolygonVertices);
 
     for (int i = 0; i < kM3PolygonVertices; ++i) {
-        float localAngle = (2.0f * kPi26 * static_cast<float>(i)) / static_cast<float>(kM3PolygonVertices);
+        float localAngle = static_cast<float>(i) * angleStep;
         float rA = evalMaterialShapeRadiusCpp26(shapeA, localAngle);
         float rB = evalMaterialShapeRadiusCpp26(shapeB, localAngle);
         float r = (rA + (rB - rA) * morphT) * effRadius;
         float worldAngle = localAngle + rotRad;
-        coords[i * 2]     = r * std::cos(worldAngle);
+        coords[i * 2] = r * std::cos(worldAngle);
         coords[i * 2 + 1] = r * std::sin(worldAngle);
     }
 
     jfloatArray out = env->NewFloatArray(kM3PolygonVertices * 2);
-    if (out) {
+    if (out != nullptr) {
         env->SetFloatArrayRegion(out, 0, kM3PolygonVertices * 2, coords);
     }
     return out;
 }
 
-// Stages an SSH private key into ~/.ssh/ with strict 0600 permissions or parses FileZilla sites.xml in C++26
 JNIEXPORT jstring JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeStageKeyOrParseFileZillaXml(
     JNIEnv* env,
