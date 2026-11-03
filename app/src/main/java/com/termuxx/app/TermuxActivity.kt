@@ -6474,11 +6474,16 @@ class TermuxActivity : Activity() {
                     mDlg.dismiss()
                     val targetDir = if (item.isDirectory) item.path else item.path.substringBeforeLast('/').ifEmpty { "/" }
                     if (srv == null) {
-                        nativeWriteToActive("cd ${shellEscapeSingle(targetDir)}\\n".toByteArray(Charsets.UTF_8))
-                        hubDialog.dismiss()
+                        dlg.dismiss()
+                        nativeSendText("cd ${shellEscapeSingle(targetDir)}\n", false)
                     } else {
-                        connectSshServerInTerminal(srv, customInitialDir = targetDir)
-                        hubDialog.dismiss()
+                        val cdCmd = "cd ${shellEscapeSingle(targetDir)}"
+                        val srvWithCd = if (srv.startupCommand.isBlank()) {
+                            srv.copy(startupCommand = "$cdCmd && exec \${'$'}SHELL -l")
+                        } else {
+                            srv.copy(startupCommand = "$cdCmd && ${srv.startupCommand}")
+                        }
+                        connectToSshServerInTerminal(srvWithCd, dlg)
                     }
                 })
 
