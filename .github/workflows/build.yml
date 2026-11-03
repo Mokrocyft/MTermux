@@ -41,11 +41,11 @@ jobs:
         with:
           path: |
             app/src/main/cpp/bootstrap-aarch64.zip
-            app/src/main/cpp/.bootstrap_patched_v3.stamp
+            app/src/main/cpp/.bootstrap_patched_v4.stamp
             app/src/main/assets/fonts/JetBrainsMono.ttf
-          key: termuxx-bootstrap-v3-${{ hashFiles('scripts/update_bootstrap.py') }}
+          key: termuxx-bootstrap-v4-${{ hashFiles('scripts/update_bootstrap.py') }}
           restore-keys: |
-            termuxx-bootstrap-v3-
+            termuxx-bootstrap-v4-
 
       - name: Cache Gradle, CMake & CCache
         uses: actions/cache@main

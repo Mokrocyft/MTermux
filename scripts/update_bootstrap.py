@@ -4,7 +4,7 @@ Build-Time Bootstrap Downloader, Cache-Aware Updater, OpenSSH Pre-Installer,
 APT Lists Pre-Populator & Binary Relocator for Termuxx (com.termuxx).
 Runs during APK build to:
 1. Download JetBrainsMono.ttf and bootstrap-aarch64.zip directly if not already present.
-2. If `.bootstrap_patched_v3.stamp` is already present (restored from CI cache), skip redundant
+2. If `.bootstrap_patched_v4.stamp` is already present (restored from CI cache), skip redundant
    network downloads and .deb slipstreaming for instant cached builds.
 3. Otherwise fetch the live Termux aarch64 package index & InRelease, pre-populate var/lib/apt/lists/,
    slipstream updated core .deb packages AND pre-install `openssh` (with all transitive dependencies)
@@ -25,7 +25,7 @@ INRELEASE_URL = f"{REPO_BASE}/dists/stable/InRelease"
 PACKAGES_URL = f"{REPO_BASE}/dists/stable/main/binary-aarch64/Packages"
 
 BOOTSTRAP_ZIP = "app/src/main/cpp/bootstrap-aarch64.zip"
-STAMP_FILE = "app/src/main/cpp/.bootstrap_patched_v3.stamp"
+STAMP_FILE = "app/src/main/cpp/.bootstrap_patched_v4.stamp"
 FONT_FILE = "app/src/main/assets/fonts/JetBrainsMono.ttf"
 
 BOOTSTRAP_URLS = [
@@ -57,7 +57,7 @@ def ensure_font_downloaded():
 
 
 def ensure_raw_bootstrap_downloaded():
-    if os.path.exists(BOOTSTRAP_ZIP) and os.path.getsize(BOOTSTRAP_ZIP) > 10_000_000:
+    if os.path.exists(BOOTSTRAP_ZIP) and os.path.getsize(BOOTSTRAP_ZIP) > 38_000_000:
         return
     os.makedirs(os.path.dirname(BOOTSTRAP_ZIP), exist_ok=True)
     for url in BOOTSTRAP_URLS:

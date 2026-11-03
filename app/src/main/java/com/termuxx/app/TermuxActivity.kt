@@ -278,6 +278,13 @@ internal enum class M3Icon {
     FONT
 }
 
+private data class Quadruple<out A, out B, out C, out D>(
+    val first: A,
+    val second: B,
+    val third: C,
+    val fourth: D
+)
+
 private data class DpkgPackageInfo(
     val name: String,
     val version: String,
@@ -459,27 +466,32 @@ class TermuxActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(COLOR_AMOLED_BG)
             setPadding(dp(8), dp(4), dp(8), dp(4))
-            clipChildren = false
-            clipToPadding = false
+            clipChildren = true
+            clipToPadding = true
         }
 
         val tabScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
-            clipChildren = false
-            clipToPadding = false
+            isHorizontalFadingEdgeEnabled = true
+            setFadingEdgeLength(dp(18))
+            clipChildren = true
+            clipToPadding = true
+            setPadding(0, 0, dp(4), 0)
         }
         tabStrip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            clipChildren = false
-            clipToPadding = false
-            setPadding(0, dp(2), 0, dp(2))
+            clipChildren = true
+            clipToPadding = true
+            setPadding(0, dp(2), dp(4), dp(2))
         }
         tabScroll.addView(tabStrip)
         headerBar.addView(
             tabScroll,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                marginEnd = dp(6)
+            }
         )
 
         headerBar.addView(
@@ -3449,17 +3461,13 @@ class TermuxActivity : Activity() {
             super.onDraw(canvas)
             val cx = width * 0.5f
             val cy = height * 0.5f
-            val baseR = min(cx, cy) * 0.72f
+            // Official M3 ContainedLoadingIndicator spec: 38dp active indicator inside 48dp circular container
+            val baseR = min(cx, cy) * 0.79f
             if (baseR <= 1f) return
 
-            // Compute exact MaterialShapes vertices in C++26 (96 smooth contour points):
-            // Step 0: 9-Pointed Star (Cookie9Sided) -> Rounded Pentagon (Pentagon)
-            // Step 1: Rounded Pentagon -> 4-Lobed Clover (Cookie4Sided)
-            // Step 2: 4-Lobed Clover -> Stadium Pill (Pill)
-            // Step 3: Stadium Pill -> 8-Pointed Sunny Star (Sunny)
-            // Step 4: Sunny Star -> 6-Lobed Flower (Cookie6Sided)
-            // Step 5: 6-Lobed Flower -> Rounded Square (Square)
-            // Step 6: Rounded Square -> 9-Pointed Star
+            // Compute official M3 Expressive IndeterminateIndicatorPolygons in C++23:
+            // SoftBurst -> Cookie9Sided -> Pentagon -> Pill -> Sunny -> Cookie4Sided -> Oval
+            // with Spring(dampingRatio = 0.6f, stiffness = 200f), 90° step rotation + 360° global rotation + scale bounce
             val coords = nativeComputeM3LoadingPolygon(
                 morphPhase,
                 pullProgress,
@@ -3484,7 +3492,8 @@ class TermuxActivity : Activity() {
                 morphPath.quadTo(currX, currY, (currX + nextX) * 0.5f, (currY + nextY) * 0.5f)
             }
             morphPath.close()
-            shapePaint.color = uiAccent
+            // M3 ContainedLoadingIndicator spec: active indicator uses onPrimaryContainer (uiOnAccentContainer)
+            shapePaint.color = uiOnAccentContainer
             canvas.drawPath(morphPath, shapePaint)
         }
     }
@@ -3496,8 +3505,8 @@ class TermuxActivity : Activity() {
     ) : FrameLayout(context) {
 
         private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
-        private val triggerDistancePx = dpF(62f)
-        private val maxPullPx = dpF(120f)
+        private val triggerDistancePx = dpF(64f)
+        private val maxPullPx = dpF(126f)
 
         private var downX = 0f
         private var downY = 0f
@@ -3523,21 +3532,23 @@ class TermuxActivity : Activity() {
                 isIndeterminateRefreshing = false
                 pullProgress = 0f
             }
-            // Google Play / Material 3 Expressive PullToRefreshDefaults.LoadingIndicator (44dp circular badge)
+            // Official Material 3 Expressive ContainedLoadingIndicator:
+            // 48dp × 48dp Full circle container in primaryContainer (uiAccentContainer)
+            // with 38dp × 38dp morphing active polygon in onPrimaryContainer (uiOnAccentContainer)
             indicatorBadge = FrameLayout(context).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(uiAccentContainer)
                 }
                 elevation = dpF(6f)
-                layoutParams = LayoutParams(dp(44), dp(44), Gravity.TOP or Gravity.CENTER_HORIZONTAL)
-                translationY = -dpF(50f)
+                layoutParams = LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.CENTER_HORIZONTAL)
+                translationY = -dpF(54f)
                 scaleX = 0f
                 scaleY = 0f
                 alpha = 0f
                 addView(
                     morphIndicator,
-                    LayoutParams(dp(32), dp(32), Gravity.CENTER)
+                    LayoutParams(dp(38), dp(38), Gravity.CENTER)
                 )
             }
             addView(indicatorBadge)
@@ -3589,10 +3600,11 @@ class TermuxActivity : Activity() {
                         }
                     }
                     val rawDelta = max(0f, ev.y - pullStartY)
-                    currentPullPx = (rawDelta * 0.50f).coerceAtMost(maxPullPx)
+                    currentPullPx = (rawDelta * 0.52f).coerceAtMost(maxPullPx)
                     val progress = (currentPullPx / triggerDistancePx).coerceIn(0f, 1.25f)
 
-                    indicatorBadge.translationY = -dpF(48f) + min(currentPullPx * 0.88f, dpF(68f))
+                    (indicatorBadge.background as? GradientDrawable)?.setColor(uiAccentContainer)
+                    indicatorBadge.translationY = -dpF(52f) + min(currentPullPx * 0.90f, dpF(72f))
                     val pClamped = progress.coerceIn(0f, 1f)
                     val easedScale = (1f - (1f - pClamped) * (1f - pClamped)).coerceIn(0f, 1f)
                     indicatorBadge.scaleX = easedScale
@@ -3625,54 +3637,43 @@ class TermuxActivity : Activity() {
                                 .scaleX(1.0f)
                                 .scaleY(1.0f)
                                 .alpha(1.0f)
-                                .setDuration(200L)
+                                .setDuration(220L)
                                 .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
 
                             spinAnimator?.cancel()
-                            // 380ms per shape morph:
-                            // 0..1: 9-Pointed Star -> Rounded Pentagon
-                            // 1..2: Rounded Pentagon -> 4-Lobed Clover
-                            // 2..3: 4-Lobed Clover -> Pill
-                            // 3..4: Pill -> 8-Pointed Sunny Star
-                            // 4..5: Sunny Star -> 6-Lobed Flower
-                            // 5..6: 6-Lobed Flower -> Rounded Square
-                            // 6..7: Rounded Square -> 9-Pointed Star
+                            // Official Compose Material 3 LoadingIndicator timing:
+                            // 650ms per shape morph * 7 IndeterminateIndicatorPolygons = 4550ms full cycle
                             spinAnimator = ValueAnimator.ofFloat(0f, 7f).apply {
-                                duration = 2660L
+                                duration = 4550L
                                 repeatCount = ValueAnimator.INFINITE
                                 interpolator = LinearInterpolator()
                                 addUpdateListener { anim ->
-                                    val ph = anim.animatedValue as Float
-                                    morphIndicator.morphPhase = ph
-                                    val sub = ph - kotlin.math.floor(ph)
-                                    val badgePulse = 1.0f + 0.04f * kotlin.math.sin(Math.PI.toFloat() * sub)
-                                    indicatorBadge.scaleX = badgePulse
-                                    indicatorBadge.scaleY = badgePulse
+                                    morphIndicator.morphPhase = anim.animatedValue as Float
                                 }
                                 start()
                             }
 
                             onRefreshTriggered()
 
-                            // Keep morphing indicator visible for 1750ms (~4.6 full shape morphs)
+                            // Display ContainedLoadingIndicator for 2600ms (4 full M3 Expressive shape morphs)
                             postDelayed({
                                 isRefreshing = false
                                 indicatorBadge.animate()
-                                    .translationY(-dpF(50f))
+                                    .translationY(-dpF(54f))
                                     .scaleX(0f)
                                     .scaleY(0f)
                                     .alpha(0f)
-                                    .setDuration(240L)
+                                    .setDuration(250L)
                                     .setInterpolator(predictiveCommitInterpolator)
                                     .withEndAction {
                                         spinAnimator?.cancel()
                                     }
                                     .start()
-                            }, 1750L)
+                            }, 2600L)
                         } else {
                             indicatorBadge.animate()
-                                .translationY(-dpF(50f))
+                                .translationY(-dpF(54f))
                                 .scaleX(0f)
                                 .scaleY(0f)
                                 .alpha(0f)
@@ -3687,25 +3688,17 @@ class TermuxActivity : Activity() {
             return super.onTouchEvent(ev)
         }
     }
-
     internal inner class MaterialIconView(
-        ctx: Context,
+        context: Context,
         var icon: M3Icon,
-        var tintColor: Int = COLOR_TEXT_BRIGHT,
-        val iconSizeDp: Float = 20f,
-        val strokeWidthDp: Float = 2.0f
-    ) : View(ctx) {
-
+        var tintColor: Int,
+        private val iconSizeDp: Float = 22f,
+        private val strokeWidthDp: Float = 2.15f
+    ) : View(context) {
         private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
-        }
-        private val roundedPathPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
-            pathEffect = CornerPathEffect(dpF(1.35f))
         }
         private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
@@ -3713,30 +3706,21 @@ class TermuxActivity : Activity() {
         private val path = Path()
         private val rect = RectF()
 
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val defPx = dp(iconSizeDp.toInt().coerceAtLeast(18))
-            val w = resolveSize(defPx, widthMeasureSpec)
-            val h = resolveSize(defPx, heightMeasureSpec)
-            setMeasuredDimension(w, h)
-        }
-
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val box = dpF(iconSizeDp)
-            val left = (width - box) * 0.5f
-            val top = (height - box) * 0.5f
-            val s = box / 24f
+            val sizePx = min(width.toFloat(), height.toFloat()).coerceAtMost(dpF(iconSizeDp))
+            if (sizePx <= 0f) return
+            val ox = (width - sizePx) * 0.5f
+            val oy = (height - sizePx) * 0.5f
+            val u = sizePx / 24f
 
-            fun x(v: Float) = left + v * s
-            fun y(v: Float) = top + v * s
-
-            val sw = dpF(strokeWidthDp)
             strokePaint.color = tintColor
-            strokePaint.strokeWidth = sw
-            roundedPathPaint.color = tintColor
-            roundedPathPaint.strokeWidth = sw
+            strokePaint.strokeWidth = max(1.6f, dpF(strokeWidthDp))
             fillPaint.color = tintColor
             path.reset()
+
+            fun x(v: Float) = ox + v * u
+            fun y(v: Float) = oy + v * u
 
             when (icon) {
                 M3Icon.ADD -> {
@@ -3747,315 +3731,371 @@ class TermuxActivity : Activity() {
                     canvas.drawLine(x(9.5f), y(4.5f), x(7.5f), y(19.5f), strokePaint)
                     canvas.drawLine(x(16.5f), y(4.5f), x(14.5f), y(19.5f), strokePaint)
                     canvas.drawLine(x(4.5f), y(9.5f), x(19.5f), y(9.5f), strokePaint)
-                    canvas.drawLine(x(4.0f), y(14.5f), x(19.0f), y(14.5f), strokePaint)
+                    canvas.drawLine(x(4.5f), y(14.5f), x(19.5f), y(14.5f), strokePaint)
                 }
                 M3Icon.HUB_GRID -> {
-                    val r = 2.2f * s
-                    rect.set(x(4f), y(4f), x(10.5f), y(10.5f))
+                    val r = 2.2f * u
+                    rect.set(x(3.5f), y(3.5f), x(10.2f), y(10.2f))
                     canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(13.5f), y(4f), x(20f), y(10.5f))
+                    rect.set(x(13.8f), y(3.5f), x(20.5f), y(10.2f))
                     canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(4f), y(13.5f), x(10.5f), y(20f))
+                    rect.set(x(3.5f), y(13.8f), x(10.2f), y(20.5f))
                     canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(13.5f), y(13.5f), x(20f), y(20f))
+                    rect.set(x(13.8f), y(13.8f), x(20.5f), y(20.5f))
+                    fillPaint.alpha = 70
+                    canvas.drawRoundRect(rect, r, r, fillPaint)
+                    fillPaint.alpha = 255
                     canvas.drawRoundRect(rect, r, r, strokePaint)
                 }
                 M3Icon.SETTINGS -> {
-                    val cx = x(12f)
-                    val cy = y(12f)
-                    canvas.drawCircle(cx, cy, 5.6f * s, strokePaint)
-                    canvas.drawCircle(cx, cy, 2.0f * s, fillPaint)
-                    for (deg in 0 until 360 step 45) {
-                        val rad = Math.toRadians(deg.toDouble())
-                        val r1 = 5.6f * s
-                        val r2 = 8.0f * s
-                        canvas.drawLine(
-                            cx + (Math.cos(rad) * r1).toFloat(),
-                            cy + (Math.sin(rad) * r1).toFloat(),
-                            cx + (Math.cos(rad) * r2).toFloat(),
-                            cy + (Math.sin(rad) * r2).toFloat(),
-                            strokePaint
-                        )
-                    }
+                    canvas.drawLine(x(4f), y(7f), x(20f), y(7f), strokePaint)
+                    canvas.drawLine(x(4f), y(17f), x(20f), y(17f), strokePaint)
+                    fillPaint.color = COLOR_SURFACE
+                    canvas.drawCircle(x(9f), y(7f), 2.8f * u, fillPaint)
+                    canvas.drawCircle(x(15f), y(17f), 2.8f * u, fillPaint)
+                    canvas.drawCircle(x(9f), y(7f), 2.8f * u, strokePaint)
+                    canvas.drawCircle(x(15f), y(17f), 2.8f * u, strokePaint)
                 }
                 M3Icon.CLOSE -> {
                     canvas.drawLine(x(6f), y(6f), x(18f), y(18f), strokePaint)
                     canvas.drawLine(x(18f), y(6f), x(6f), y(18f), strokePaint)
                 }
                 M3Icon.SEARCH -> {
-                    canvas.drawCircle(x(10.5f), y(10.5f), 5.8f * s, strokePaint)
-                    canvas.drawLine(x(15f), y(15f), x(19.5f), y(19.5f), strokePaint)
+                    canvas.drawCircle(x(10.8f), y(10.8f), 6.2f * u, strokePaint)
+                    canvas.drawLine(x(15.4f), y(15.4f), x(20.2f), y(20.2f), strokePaint)
                 }
                 M3Icon.TREE -> {
-                    rect.set(x(3.8f), y(3.8f), x(9.2f), y(8.6f))
-                    canvas.drawRoundRect(rect, 1.4f * s, 1.4f * s, strokePaint)
-                    canvas.drawLine(x(6.5f), y(8.6f), x(6.5f), y(17.6f), strokePaint)
-                    canvas.drawLine(x(6.5f), y(11.6f), x(13.5f), y(11.6f), strokePaint)
-                    canvas.drawLine(x(6.5f), y(17.6f), x(13.5f), y(17.6f), strokePaint)
-                    rect.set(x(13.5f), y(9.4f), x(19.8f), y(13.8f))
-                    canvas.drawRoundRect(rect, 1.4f * s, 1.4f * s, strokePaint)
-                    rect.set(x(13.5f), y(15.4f), x(19.8f), y(19.8f))
-                    canvas.drawRoundRect(rect, 1.4f * s, 1.4f * s, strokePaint)
+                    val r = 1.8f * u
+                    rect.set(x(3.5f), y(3.5f), x(9.5f), y(8.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    rect.set(x(14.5f), y(8.5f), x(20.5f), y(13.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    rect.set(x(14.5f), y(15.5f), x(20.5f), y(20.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    path.moveTo(x(6.5f), y(8.5f))
+                    path.lineTo(x(6.5f), y(18f))
+                    path.lineTo(x(14.5f), y(18f))
+                    path.moveTo(x(6.5f), y(11f))
+                    path.lineTo(x(14.5f), y(11f))
+                    canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.EYE -> {
-                    path.moveTo(x(2.5f), y(12f))
-                    path.quadTo(x(12f), y(4.8f), x(21.5f), y(12f))
-                    path.quadTo(x(12f), y(19.2f), x(2.5f), y(12f))
-                    path.close()
-                    canvas.drawPath(path, strokePaint)
-                    canvas.drawCircle(x(12f), y(12f), 2.2f * s, strokePaint)
+                    rect.set(x(2.5f), y(6.5f), x(21.5f), y(17.5f))
+                    canvas.drawOval(rect, strokePaint)
+                    canvas.drawCircle(x(12f), y(12f), 2.4f * u, fillPaint)
                 }
                 M3Icon.CREATE_FOLDER -> {
-                    path.moveTo(x(3.5f), y(6.8f))
-                    path.lineTo(x(9.5f), y(6.8f))
-                    path.lineTo(x(11.6f), y(9.2f))
-                    path.lineTo(x(20.5f), y(9.2f))
-                    path.lineTo(x(20.5f), y(18.5f))
-                    path.lineTo(x(3.5f), y(18.5f))
+                    path.moveTo(x(3f), y(7f))
+                    path.lineTo(x(3f), y(18.5f))
+                    path.quadTo(x(3f), y(20f), x(4.5f), y(20f))
+                    path.lineTo(x(19.5f), y(20f))
+                    path.quadTo(x(21f), y(20f), x(21f), y(18.5f))
+                    path.lineTo(x(21f), y(9f))
+                    path.quadTo(x(21f), y(7.5f), x(19.5f), y(7.5f))
+                    path.lineTo(x(12f), y(7.5f))
+                    path.lineTo(x(9.8f), y(5f))
+                    path.lineTo(x(4.5f), y(5f))
+                    path.quadTo(x(3f), y(5f), x(3f), y(7f))
                     path.close()
-                    canvas.drawPath(path, roundedPathPaint)
-                    canvas.drawLine(x(13.6f), y(11.6f), x(13.6f), y(16.2f), strokePaint)
-                    canvas.drawLine(x(11.3f), y(13.9f), x(15.9f), y(13.9f), strokePaint)
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawLine(x(14.5f), y(11.2f), x(14.5f), y(16.2f), strokePaint)
+                    canvas.drawLine(x(12f), y(13.7f), x(17f), y(13.7f), strokePaint)
                 }
                 M3Icon.REFRESH -> {
-                    rect.set(x(5f), y(5f), x(19f), y(19f))
-                    canvas.drawArc(rect, -35f, 290f, false, strokePaint)
-                    path.moveTo(x(15.2f), y(4.0f))
-                    path.lineTo(x(19.0f), y(7.6f))
-                    path.lineTo(x(14.6f), y(8.2f))
+                    rect.set(x(5.0f), y(5.0f), x(19.0f), y(19.0f))
+                    canvas.drawArc(rect, 42f, 276f, false, strokePaint)
+                    path.moveTo(x(17.6f), y(3.6f))
+                    path.lineTo(x(17.6f), y(8.2f))
+                    path.lineTo(x(13.0f), y(8.2f))
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.UPLOAD -> {
-                    path.moveTo(x(4.5f), y(14.5f))
-                    path.lineTo(x(4.5f), y(18.8f))
-                    path.lineTo(x(19.5f), y(18.8f))
-                    path.lineTo(x(19.5f), y(14.5f))
-                    canvas.drawPath(path, roundedPathPaint)
-                    canvas.drawLine(x(12f), y(14.8f), x(12f), y(5.0f), strokePaint)
-                    path.reset()
-                    path.moveTo(x(7.8f), y(9.2f))
-                    path.lineTo(x(12f), y(5.0f))
-                    path.lineTo(x(16.2f), y(9.2f))
+                    canvas.drawLine(x(12f), y(15.5f), x(12f), y(4.5f), strokePaint)
+                    path.moveTo(x(7.2f), y(9.2f))
+                    path.lineTo(x(12f), y(4.4f))
+                    path.lineTo(x(16.8f), y(9.2f))
+                    canvas.drawPath(path, strokePaint)
+                    path.moveTo(x(4.5f), y(15.5f))
+                    path.lineTo(x(4.5f), y(18.5f))
+                    path.quadTo(x(4.5f), y(20f), x(6f), y(20f))
+                    path.lineTo(x(18f), y(20f))
+                    path.quadTo(x(19.5f), y(20f), x(19.5f), y(18.5f))
+                    path.lineTo(x(19.5f), y(15.5f))
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.DOWNLOAD -> {
-                    path.moveTo(x(4.5f), y(14.5f))
-                    path.lineTo(x(4.5f), y(18.8f))
-                    path.lineTo(x(19.5f), y(18.8f))
-                    path.lineTo(x(19.5f), y(14.5f))
-                    canvas.drawPath(path, roundedPathPaint)
-                    canvas.drawLine(x(12f), y(4.8f), x(12f), y(14.6f), strokePaint)
-                    path.reset()
-                    path.moveTo(x(7.8f), y(10.4f))
-                    path.lineTo(x(12f), y(14.6f))
-                    path.lineTo(x(16.2f), y(10.4f))
+                    canvas.drawLine(x(12f), y(4.5f), x(12f), y(15.5f), strokePaint)
+                    path.moveTo(x(7.2f), y(10.8f))
+                    path.lineTo(x(12f), y(15.6f))
+                    path.lineTo(x(16.8f), y(10.8f))
+                    canvas.drawPath(path, strokePaint)
+                    path.moveTo(x(4.5f), y(15.5f))
+                    path.lineTo(x(4.5f), y(18.5f))
+                    path.quadTo(x(4.5f), y(20f), x(6f), y(20f))
+                    path.lineTo(x(18f), y(20f))
+                    path.quadTo(x(19.5f), y(20f), x(19.5f), y(18.5f))
+                    path.lineTo(x(19.5f), y(15.5f))
                     canvas.drawPath(path, strokePaint)
                 }
-                M3Icon.FOLDER -> {
-                    path.moveTo(x(3.5f), y(6.8f))
-                    path.lineTo(x(9.5f), y(6.8f))
-                    path.lineTo(x(11.6f), y(9.2f))
-                    path.lineTo(x(20.5f), y(9.2f))
-                    path.lineTo(x(20.5f), y(18.5f))
-                    path.lineTo(x(3.5f), y(18.5f))
+                M3Icon.FOLDER, M3Icon.FOLDER_OPEN -> {
+                    path.moveTo(x(3f), y(6.8f))
+                    path.quadTo(x(3f), y(5f), x(4.8f), y(5f))
+                    path.lineTo(x(9.4f), y(5f))
+                    path.lineTo(x(11.6f), y(7.4f))
+                    path.lineTo(x(19.2f), y(7.4f))
+                    path.quadTo(x(21f), y(7.4f), x(21f), y(9.2f))
+                    path.lineTo(x(21f), y(17.7f))
+                    path.quadTo(x(21f), y(19.5f), x(19.2f), y(19.5f))
+                    path.lineTo(x(4.8f), y(19.5f))
+                    path.quadTo(x(3f), y(19.5f), x(3f), y(17.7f))
                     path.close()
-                    canvas.drawPath(path, roundedPathPaint)
-                }
-                M3Icon.FOLDER_OPEN -> {
-                    path.moveTo(x(3.5f), y(6.8f))
-                    path.lineTo(x(9.5f), y(6.8f))
-                    path.lineTo(x(11.6f), y(9.2f))
-                    path.lineTo(x(20.5f), y(9.2f))
-                    path.lineTo(x(20.5f), y(18.5f))
-                    path.lineTo(x(3.5f), y(18.5f))
-                    path.close()
-                    canvas.drawPath(path, roundedPathPaint)
-                    canvas.drawLine(x(3.8f), y(12.4f), x(20.2f), y(12.4f), strokePaint)
+                    fillPaint.color = (0x36 shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawPath(path, fillPaint)
+                    canvas.drawPath(path, strokePaint)
+                    if (icon == M3Icon.FOLDER_OPEN) {
+                        canvas.drawLine(x(3.5f), y(11.2f), x(20.5f), y(11.2f), strokePaint)
+                    }
                 }
                 M3Icon.FILE -> {
-                    path.moveTo(x(5.5f), y(3.8f))
-                    path.lineTo(x(14.2f), y(3.8f))
-                    path.lineTo(x(18.5f), y(8.2f))
-                    path.lineTo(x(18.5f), y(20.2f))
-                    path.lineTo(x(5.5f), y(20.2f))
+                    path.moveTo(x(5.5f), y(3.5f))
+                    path.lineTo(x(14f), y(3.5f))
+                    path.lineTo(x(18.5f), y(8f))
+                    path.lineTo(x(18.5f), y(19f))
+                    path.quadTo(x(18.5f), y(20.5f), x(17f), y(20.5f))
+                    path.lineTo(x(5.5f), y(20.5f))
+                    path.quadTo(x(4f), y(20.5f), x(4f), y(19f))
+                    path.lineTo(x(4f), y(5f))
+                    path.quadTo(x(4f), y(3.5f), x(5.5f), y(3.5f))
                     path.close()
-                    canvas.drawPath(path, roundedPathPaint)
-                    path.reset()
-                    path.moveTo(x(14.0f), y(3.8f))
-                    path.lineTo(x(14.0f), y(8.4f))
-                    path.lineTo(x(18.5f), y(8.4f))
+                    fillPaint.color = (0x1E shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawPath(path, fillPaint)
                     canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(8.5f), y(12.8f), x(15.5f), y(12.8f), strokePaint)
-                    canvas.drawLine(x(8.5f), y(16.0f), x(13.5f), y(16.0f), strokePaint)
+                    path.reset()
+                    path.moveTo(x(13.8f), y(3.8f))
+                    path.lineTo(x(13.8f), y(8.2f))
+                    path.lineTo(x(18.2f), y(8.2f))
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawLine(x(7.5f), y(12.5f), x(15f), y(12.5f), strokePaint)
+                    canvas.drawLine(x(7.5f), y(16f), x(12.5f), y(16f), strokePaint)
                 }
                 M3Icon.MORE_VERT -> {
-                    val r = 1.65f * s
-                    canvas.drawCircle(x(12f), y(6f), r, fillPaint)
+                    fillPaint.color = tintColor
+                    val r = 1.85f * u
+                    canvas.drawCircle(x(12f), y(5.5f), r, fillPaint)
                     canvas.drawCircle(x(12f), y(12f), r, fillPaint)
-                    canvas.drawCircle(x(12f), y(18f), r, fillPaint)
+                    canvas.drawCircle(x(12f), y(18.5f), r, fillPaint)
                 }
                 M3Icon.ARROW_BACK -> {
-                    canvas.drawLine(x(19f), y(12f), x(5f), y(12f), strokePaint)
-                    path.moveTo(x(11.5f), y(5.5f))
-                    path.lineTo(x(5f), y(12f))
-                    path.lineTo(x(11.5f), y(18.5f))
+                    canvas.drawLine(x(19.5f), y(12f), x(5f), y(12f), strokePaint)
+                    path.moveTo(x(11f), y(6f))
+                    path.lineTo(x(4.8f), y(12f))
+                    path.lineTo(x(11f), y(18f))
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.CHEVRON_RIGHT -> {
-                    path.moveTo(x(9.5f), y(6.5f))
+                    path.moveTo(x(9f), y(6f))
                     path.lineTo(x(15f), y(12f))
-                    path.lineTo(x(9.5f), y(17.5f))
+                    path.lineTo(x(9f), y(18f))
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.CHEVRON_DOWN -> {
-                    path.moveTo(x(6.5f), y(9.5f))
+                    path.moveTo(x(6f), y(9f))
                     path.lineTo(x(12f), y(15f))
-                    path.lineTo(x(17.5f), y(9.5f))
+                    path.lineTo(x(18f), y(9f))
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.TERMINAL -> {
-                    rect.set(x(3.5f), y(5f), x(20.5f), y(19f))
-                    canvas.drawRoundRect(rect, 2.8f * s, 2.8f * s, strokePaint)
-                    path.moveTo(x(7.5f), y(9.5f))
+                    rect.set(x(3f), y(4.5f), x(21f), y(19.5f))
+                    canvas.drawRoundRect(rect, 3f * u, 3f * u, strokePaint)
+                    path.moveTo(x(7f), y(9f))
                     path.lineTo(x(10.5f), y(12f))
-                    path.lineTo(x(7.5f), y(14.5f))
+                    path.lineTo(x(7f), y(15f))
                     canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(12.2f), y(14.5f), x(16.2f), y(14.5f), strokePaint)
+                    canvas.drawLine(x(12.5f), y(15f), x(17f), y(15f), strokePaint)
                 }
                 M3Icon.PING -> {
-                    path.moveTo(x(3.5f), y(12f))
-                    path.lineTo(x(7.5f), y(12f))
-                    path.lineTo(x(10f), y(6.5f))
-                    path.lineTo(x(14f), y(17.5f))
-                    path.lineTo(x(16.5f), y(12f))
-                    path.lineTo(x(20.5f), y(12f))
+                    path.moveTo(x(3f), y(12f))
+                    path.lineTo(x(7f), y(12f))
+                    path.lineTo(x(9.5f), y(6f))
+                    path.lineTo(x(14.5f), y(18f))
+                    path.lineTo(x(17f), y(12f))
+                    path.lineTo(x(21f), y(12f))
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.KEY -> {
-                    canvas.drawCircle(x(8.5f), y(12f), 3.8f * s, strokePaint)
-                    canvas.drawLine(x(12.3f), y(12f), x(20.5f), y(12f), strokePaint)
-                    canvas.drawLine(x(17.2f), y(12f), x(17.2f), y(15.5f), strokePaint)
-                    canvas.drawLine(x(20.0f), y(12f), x(20.0f), y(14.8f), strokePaint)
+                    canvas.drawCircle(x(7.5f), y(12f), 4.2f * u, strokePaint)
+                    canvas.drawLine(x(11.7f), y(12f), x(21f), y(12f), strokePaint)
+                    canvas.drawLine(x(17f), y(12f), x(17f), y(15.5f), strokePaint)
+                    canvas.drawLine(x(20f), y(12f), x(20f), y(16f), strokePaint)
                 }
                 M3Icon.CHECK -> {
-                    path.moveTo(x(5.5f), y(12.5f))
-                    path.lineTo(x(10.0f), y(17.0f))
-                    path.lineTo(x(18.8f), y(7.5f))
+                    fillPaint.color = (0x2E shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawCircle(x(12f), y(12f), 9f * u, fillPaint)
+                    canvas.drawCircle(x(12f), y(12f), 9f * u, strokePaint)
+                    path.moveTo(x(8f), y(12.3f))
+                    path.lineTo(x(10.8f), y(15.2f))
+                    path.lineTo(x(16.2f), y(9.2f))
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.TRASH -> {
-                    canvas.drawLine(x(4.5f), y(7f), x(19.5f), y(7f), strokePaint)
-                    path.moveTo(x(9.5f), y(7f))
-                    path.lineTo(x(9.5f), y(4.8f))
-                    path.lineTo(x(14.5f), y(4.8f))
-                    path.lineTo(x(14.5f), y(7f))
+                    canvas.drawLine(x(4.5f), y(6.5f), x(19.5f), y(6.5f), strokePaint)
+                    path.moveTo(x(9.2f), y(6.5f))
+                    path.lineTo(x(9.2f), y(4.6f))
+                    path.quadTo(x(9.2f), y(3.8f), x(10.2f), y(3.8f))
+                    path.lineTo(x(13.8f), y(3.8f))
+                    path.quadTo(x(14.8f), y(3.8f), x(14.8f), y(4.6f))
+                    path.lineTo(x(14.8f), y(6.5f))
                     canvas.drawPath(path, strokePaint)
-                    rect.set(x(6.5f), y(7f), x(17.5f), y(19.5f))
-                    canvas.drawRoundRect(rect, 2f * s, 2f * s, strokePaint)
-                    canvas.drawLine(x(10.2f), y(10.5f), x(10.2f), y(16f), strokePaint)
-                    canvas.drawLine(x(13.8f), y(10.5f), x(13.8f), y(16f), strokePaint)
+                    path.reset()
+                    path.moveTo(x(6.5f), y(6.5f))
+                    path.lineTo(x(7.3f), y(18.2f))
+                    path.quadTo(x(7.4f), y(20.0f), x(9.2f), y(20.0f))
+                    path.lineTo(x(14.8f), y(20.0f))
+                    path.quadTo(x(16.6f), y(20.0f), x(16.7f), y(18.2f))
+                    path.lineTo(x(17.5f), y(6.5f))
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawLine(x(10.2f), y(10.2f), x(10.2f), y(16.2f), strokePaint)
+                    canvas.drawLine(x(13.8f), y(10.2f), x(13.8f), y(16.2f), strokePaint)
                 }
                 M3Icon.ALL_PACKAGES -> {
-                    path.moveTo(x(12f), y(3.5f))
-                    path.lineTo(x(20f), y(8f))
-                    path.lineTo(x(20f), y(16f))
-                    path.lineTo(x(12f), y(20.5f))
-                    path.lineTo(x(4f), y(16f))
-                    path.lineTo(x(4f), y(8f))
+                    val r = 1.8f * u
+                    rect.set(x(3.5f), y(3.5f), x(10.2f), y(10.2f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    rect.set(x(3.5f), y(13.8f), x(10.2f), y(20.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    rect.set(x(13.8f), y(13.8f), x(20.5f), y(20.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    path.moveTo(x(17.1f), y(2.6f))
+                    path.lineTo(x(21.4f), y(6.9f))
+                    path.lineTo(x(17.1f), y(11.2f))
+                    path.lineTo(x(12.8f), y(6.9f))
                     path.close()
-                    canvas.drawPath(path, roundedPathPaint)
-                    canvas.drawLine(x(4f), y(8f), x(12f), y(12.2f), strokePaint)
-                    canvas.drawLine(x(20f), y(8f), x(12f), y(12.2f), strokePaint)
-                    canvas.drawLine(x(12f), y(12.2f), x(12f), y(20.5f), strokePaint)
+                    fillPaint.color = (0x3A shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawPath(path, fillPaint)
+                    canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.STORAGE -> {
-                    rect.set(x(4f), y(5f), x(20f), y(10.8f))
-                    canvas.drawRoundRect(rect, 2.2f * s, 2.2f * s, strokePaint)
-                    rect.set(x(4f), y(13.2f), x(20f), y(19f))
-                    canvas.drawRoundRect(rect, 2.2f * s, 2.2f * s, strokePaint)
-                    canvas.drawCircle(x(8f), y(7.9f), 1.1f * s, fillPaint)
-                    canvas.drawCircle(x(8f), y(16.1f), 1.1f * s, fillPaint)
+                    rect.set(x(4.5f), y(4f), x(19.5f), y(9f))
+                    canvas.drawOval(rect, strokePaint)
+                    path.moveTo(x(4.5f), y(6.5f))
+                    path.lineTo(x(4.5f), y(17.5f))
+                    path.quadTo(x(12f), y(21f), x(19.5f), y(17.5f))
+                    path.lineTo(x(19.5f), y(6.5f))
+                    canvas.drawPath(path, strokePaint)
+                    path.reset()
+                    path.moveTo(x(4.5f), y(12f))
+                    path.quadTo(x(12f), y(15.2f), x(19.5f), y(12f))
+                    canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.CURSOR -> {
-                    rect.set(x(8.5f), y(4.5f), x(15.5f), y(19.5f))
-                    canvas.drawRoundRect(rect, 1.8f * s, 1.8f * s, strokePaint)
-                    canvas.drawLine(x(6f), y(4.5f), x(18f), y(4.5f), strokePaint)
-                    canvas.drawLine(x(6f), y(19.5f), x(18f), y(19.5f), strokePaint)
+                    val r = 2.2f * u
+                    rect.set(x(4f), y(5f), x(12.5f), y(19f))
+                    fillPaint.color = (0x38 shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawRoundRect(rect, r, r, fillPaint)
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    canvas.drawLine(x(17.5f), y(5f), x(17.5f), y(19f), strokePaint)
+                    canvas.drawLine(x(15f), y(5f), x(20f), y(5f), strokePaint)
+                    canvas.drawLine(x(15f), y(19f), x(20f), y(19f), strokePaint)
                 }
                 M3Icon.KEYBOARD -> {
-                    rect.set(x(3f), y(6f), x(21f), y(18f))
-                    canvas.drawRoundRect(rect, 2.6f * s, 2.6f * s, strokePaint)
-                    canvas.drawLine(x(6.5f), y(10f), x(8.5f), y(10f), strokePaint)
-                    canvas.drawLine(x(11f), y(10f), x(13f), y(10f), strokePaint)
-                    canvas.drawLine(x(15.5f), y(10f), x(17.5f), y(10f), strokePaint)
-                    canvas.drawLine(x(7.5f), y(14.5f), x(16.5f), y(14.5f), strokePaint)
+                    val r = 2.6f * u
+                    rect.set(x(2.5f), y(5.5f), x(21.5f), y(18.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    fillPaint.color = tintColor
+                    val dotR = 1.05f * u
+                    for (cx in floatArrayOf(6.5f, 10.2f, 13.8f, 17.5f)) {
+                        canvas.drawCircle(x(cx), y(9.5f), dotR, fillPaint)
+                        canvas.drawCircle(x(cx), y(12.5f), dotR, fillPaint)
+                    }
+                    canvas.drawLine(x(8f), y(15.6f), x(16f), y(15.6f), strokePaint)
                 }
                 M3Icon.VIBRATION -> {
-                    rect.set(x(7.5f), y(5.5f), x(16.5f), y(18.5f))
-                    canvas.drawRoundRect(rect, 2.2f * s, 2.2f * s, strokePaint)
-                    canvas.drawLine(x(4.2f), y(8.2f), x(4.2f), y(15.8f), strokePaint)
-                    canvas.drawLine(x(19.8f), y(8.2f), x(19.8f), y(15.8f), strokePaint)
+                    val r = 2.2f * u
+                    rect.set(x(7.5f), y(4.5f), x(16.5f), y(19.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    canvas.drawLine(x(4.5f), y(8f), x(4.5f), y(16f), strokePaint)
+                    canvas.drawLine(x(2f), y(10f), x(2f), y(14f), strokePaint)
+                    canvas.drawLine(x(19.5f), y(8f), x(19.5f), y(16f), strokePaint)
+                    canvas.drawLine(x(22f), y(10f), x(22f), y(14f), strokePaint)
                 }
                 M3Icon.PALETTE -> {
-                    canvas.drawCircle(x(12f), y(12f), 8.2f * s, strokePaint)
-                    canvas.drawCircle(x(9.0f), y(9.2f), 1.3f * s, fillPaint)
-                    canvas.drawCircle(x(14.2f), y(8.8f), 1.3f * s, fillPaint)
-                    canvas.drawCircle(x(15.5f), y(13.2f), 1.3f * s, fillPaint)
-                    canvas.drawCircle(x(9.5f), y(14.5f), 1.3f * s, fillPaint)
+                    canvas.drawCircle(x(12f), y(12f), 8.5f * u, strokePaint)
+                    fillPaint.color = tintColor
+                    canvas.drawCircle(x(8.2f), y(10.2f), 1.4f * u, fillPaint)
+                    canvas.drawCircle(x(11.2f), y(7.6f), 1.4f * u, fillPaint)
+                    canvas.drawCircle(x(15.0f), y(8.8f), 1.4f * u, fillPaint)
+                    canvas.drawCircle(x(14.5f), y(14.2f), 2.1f * u, strokePaint)
                 }
                 M3Icon.CPU -> {
-                    rect.set(x(7f), y(7f), x(17f), y(17f))
-                    canvas.drawRoundRect(rect, 2f * s, 2f * s, strokePaint)
-                    for (pos in listOf(9.5f, 14.5f)) {
-                        canvas.drawLine(x(pos), y(3.8f), x(pos), y(7f), strokePaint)
-                        canvas.drawLine(x(pos), y(17f), x(pos), y(20.2f), strokePaint)
-                        canvas.drawLine(x(3.8f), y(pos), x(7f), y(pos), strokePaint)
-                        canvas.drawLine(x(17f), y(pos), x(20.2f), y(pos), strokePaint)
+                    val r = 2.0f * u
+                    rect.set(x(6f), y(6f), x(18f), y(18f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    rect.set(x(9.2f), y(9.2f), x(14.8f), y(14.8f))
+                    fillPaint.color = (0x38 shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawRoundRect(rect, 1.0f * u, 1.0f * u, fillPaint)
+                    canvas.drawRoundRect(rect, 1.0f * u, 1.0f * u, strokePaint)
+                    for (p in floatArrayOf(9f, 12f, 15f)) {
+                        canvas.drawLine(x(p), y(3f), x(p), y(6f), strokePaint)
+                        canvas.drawLine(x(p), y(18f), x(p), y(21f), strokePaint)
+                        canvas.drawLine(x(3f), y(p), x(6f), y(p), strokePaint)
+                        canvas.drawLine(x(18f), y(p), x(21f), y(p), strokePaint)
                     }
                 }
                 M3Icon.SLIDERS -> {
-                    canvas.drawLine(x(4f), y(7f), x(20f), y(7f), strokePaint)
+                    canvas.drawLine(x(4f), y(6.5f), x(20f), y(6.5f), strokePaint)
                     canvas.drawLine(x(4f), y(12f), x(20f), y(12f), strokePaint)
-                    canvas.drawLine(x(4f), y(17f), x(20f), y(17f), strokePaint)
-                    canvas.drawCircle(x(9f), y(7f), 2.1f * s, fillPaint)
-                    canvas.drawCircle(x(15f), y(12f), 2.1f * s, fillPaint)
-                    canvas.drawCircle(x(11f), y(17f), 2.1f * s, fillPaint)
+                    canvas.drawLine(x(4f), y(17.5f), x(20f), y(17.5f), strokePaint)
+                    fillPaint.color = uiSurfaceLow
+                    canvas.drawCircle(x(9f), y(6.5f), 2.3f * u, fillPaint)
+                    canvas.drawCircle(x(15.5f), y(12f), 2.3f * u, fillPaint)
+                    canvas.drawCircle(x(11f), y(17.5f), 2.3f * u, fillPaint)
+                    canvas.drawCircle(x(9f), y(6.5f), 2.3f * u, strokePaint)
+                    canvas.drawCircle(x(15.5f), y(12f), 2.3f * u, strokePaint)
+                    canvas.drawCircle(x(11f), y(17.5f), 2.3f * u, strokePaint)
                 }
                 M3Icon.SERVER -> {
-                    rect.set(x(4f), y(4.8f), x(20f), y(10.5f))
-                    canvas.drawRoundRect(rect, 2.2f * s, 2.2f * s, strokePaint)
-                    rect.set(x(4f), y(13.5f), x(20f), y(19.2f))
-                    canvas.drawRoundRect(rect, 2.2f * s, 2.2f * s, strokePaint)
-                    canvas.drawCircle(x(8f), y(7.65f), 1.15f * s, fillPaint)
-                    canvas.drawCircle(x(8f), y(16.35f), 1.15f * s, fillPaint)
-                    canvas.drawLine(x(12.5f), y(7.65f), x(17f), y(7.65f), strokePaint)
-                    canvas.drawLine(x(12.5f), y(16.35f), x(17f), y(16.35f), strokePaint)
+                    val r = 2.0f * u
+                    rect.set(x(3.5f), y(4.5f), x(20.5f), y(10.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    rect.set(x(3.5f), y(13.5f), x(20.5f), y(19.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    fillPaint.color = tintColor
+                    canvas.drawCircle(x(7.2f), y(7.5f), 1.2f * u, fillPaint)
+                    canvas.drawCircle(x(7.2f), y(16.5f), 1.2f * u, fillPaint)
+                    canvas.drawLine(x(11.5f), y(7.5f), x(17.2f), y(7.5f), strokePaint)
+                    canvas.drawLine(x(11.5f), y(16.5f), x(17.2f), y(16.5f), strokePaint)
                 }
                 M3Icon.EDIT -> {
-                    path.moveTo(x(14.5f), y(5.2f))
-                    path.lineTo(x(18.8f), y(9.5f))
-                    path.lineTo(x(8.8f), y(19.5f))
-                    path.lineTo(x(4.5f), y(19.5f))
-                    path.lineTo(x(4.5f), y(15.2f))
+                    path.moveTo(x(4.5f), y(19.5f))
+                    path.lineTo(x(8.5f), y(18.5f))
+                    path.lineTo(x(18.8f), y(8.2f))
+                    path.lineTo(x(15.8f), y(5.2f))
+                    path.lineTo(x(5.5f), y(15.5f))
                     path.close()
-                    canvas.drawPath(path, roundedPathPaint)
+                    canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.COPY -> {
-                    rect.set(x(8.5f), y(8.5f), x(19.5f), y(19.5f))
-                    canvas.drawRoundRect(rect, 2f * s, 2f * s, strokePaint)
+                    val r = 2.0f * u
+                    rect.set(x(8.5f), y(8.5f), x(19.5f), y(20f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
                     path.moveTo(x(15.5f), y(8.5f))
-                    path.lineTo(x(15.5f), y(5.5f))
-                    path.lineTo(x(5.5f), y(5.5f))
-                    path.lineTo(x(5.5f), y(15.5f))
-                    path.lineTo(x(8.5f), y(15.5f))
-                    canvas.drawPath(path, roundedPathPaint)
+                    path.lineTo(x(15.5f), y(5.8f))
+                    path.quadTo(x(15.5f), y(4f), x(13.7f), y(4f))
+                    path.lineTo(x(6.3f), y(4f))
+                    path.quadTo(x(4.5f), y(4f), x(4.5f), y(5.8f))
+                    path.lineTo(x(4.5f), y(14.2f))
+                    path.quadTo(x(4.5f), y(16f), x(6.3f), y(16f))
+                    path.lineTo(x(8.5f), y(16f))
+                    canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.FONT -> {
-                    path.moveTo(x(5.5f), y(19f))
-                    path.lineTo(x(12f), y(5f))
-                    path.lineTo(x(18.5f), y(19f))
+                    path.moveTo(x(3.8f), y(18.5f))
+                    path.lineTo(x(8.8f), y(5.5f))
+                    path.lineTo(x(13.8f), y(18.5f))
                     canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(7.8f), y(14.2f), x(16.2f), y(14.2f), strokePaint)
+                    canvas.drawLine(x(5.5f), y(14.2f), x(12.1f), y(14.2f), strokePaint)
+                    canvas.drawCircle(x(17.8f), y(15.2f), 2.8f * u, strokePaint)
+                    canvas.drawLine(x(20.6f), y(12.2f), x(20.6f), y(18.5f), strokePaint)
                 }
             }
         }
@@ -5709,6 +5749,75 @@ class TermuxActivity : Activity() {
             return null to items
         }
 
+        // Liquid Material 3 Expressive segmented pill animator with leading/trailing edge inertia
+        // Strictly clamped inside [0, innerWidth] so the pill NEVER overflows its container frame!
+        fun animateLiquidSegmentedPill(
+            pillView: View,
+            parentOuter: View,
+            targetTab: View,
+            animate: Boolean
+        ) {
+            (pillView.tag as? ValueAnimator)?.cancel()
+            pillView.scaleX = 1f
+            pillView.scaleY = 1f
+            if (targetTab.width <= 0) return
+
+            val innerWidth = (parentOuter.width - parentOuter.paddingLeft - parentOuter.paddingRight)
+                .toFloat()
+                .coerceAtLeast((targetTab.left + targetTab.width).toFloat())
+            val endLeft = targetTab.left.toFloat().coerceIn(0f, (innerWidth - targetTab.width).coerceAtLeast(0f))
+            val endRight = (endLeft + targetTab.width.toFloat()).coerceIn(endLeft + 1f, innerWidth)
+
+            if (!animate || pillView.layoutParams.width <= 0) {
+                pillView.layoutParams = FrameLayout.LayoutParams(targetTab.width, targetTab.height)
+                pillView.translationX = endLeft
+                return
+            }
+
+            val startLeft = pillView.translationX.coerceIn(0f, innerWidth)
+            val startW = pillView.layoutParams.width.toFloat().coerceAtLeast(dpF(24f))
+            val startRight = (startLeft + startW).coerceIn(startLeft + 1f, innerWidth)
+
+            if (abs(endLeft - startLeft) < 0.5f && abs((endRight - endLeft) - startW) < 0.5f) {
+                pillView.layoutParams = FrameLayout.LayoutParams(targetTab.width, targetTab.height)
+                pillView.translationX = endLeft
+                return
+            }
+
+            val movingRight = endLeft >= startLeft
+            val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 250L
+                interpolator = LinearInterpolator()
+                addUpdateListener { va ->
+                    val t = (va.animatedValue as Float).coerceIn(0f, 1f)
+                    val inv = 1f - t
+                    // Leading edge moves slightly faster than trailing edge, creating natural liquid stretch
+                    // strictly between start and end without ever exceeding [0, innerWidth]!
+                    val leadT = 1f - inv * inv * inv
+                    val trailT = 1f - inv * inv
+                    val curLeft: Float
+                    val curRight: Float
+                    if (movingRight) {
+                        curLeft = startLeft + (endLeft - startLeft) * trailT
+                        curRight = startRight + (endRight - startRight) * leadT
+                    } else {
+                        curLeft = startLeft + (endLeft - startLeft) * leadT
+                        curRight = startRight + (endRight - startRight) * trailT
+                    }
+                    val clampedLeft = curLeft.coerceIn(0f, innerWidth)
+                    val clampedRight = curRight.coerceIn(clampedLeft + dpF(16f), innerWidth)
+                    pillView.translationX = clampedLeft
+                    val lp = (pillView.layoutParams as? FrameLayout.LayoutParams)
+                        ?: FrameLayout.LayoutParams(targetTab.width, targetTab.height)
+                    lp.width = (clampedRight - clampedLeft).roundToInt().coerceAtLeast(1)
+                    lp.height = targetTab.height
+                    pillView.layoutParams = lp
+                }
+            }
+            pillView.tag = anim
+            anim.start()
+        }
+
         fun renderSftpTab(animateTab: Boolean = false, forceRemoteRefresh: Boolean = false) {
             contentFrame.removeAllViews()
             if (animateTab) animateAosp17PageTransition(contentFrame, forward = activeTab >= previousTab)
@@ -5726,18 +5835,25 @@ class TermuxActivity : Activity() {
             val sdDir = Environment.getExternalStorageDirectory()
             val savedServers = loadSshServers()
 
-            val currentSftpSourceIdx = when {
+            fun computeSftpSourceIdx(): Int = when {
                 activeSftpServer != null -> 3
                 localCurrentDir.absolutePath.startsWith(usrDir.absolutePath) -> 1
                 localCurrentDir.absolutePath.startsWith(sdDir.absolutePath) -> 2
                 else -> 0
             }
 
-            // 1. Animated Material 3 Segmented Source Group Bar (Дом (~) | Система | Память | SSH)
-            // with sliding & morphing active pill indicator!
+            fun currentActivePathStr(): String =
+                if (activeSftpServer == null) localCurrentDir.absolutePath else remoteCurrentPath
+
+            var currentSftpSourceIdx = computeSftpSourceIdx()
+
+            // 1. Animated Material 3 Segmented Source Group Bar (Home | Usr | Storage | SSH)
+            // with in-place sliding & liquid-morphing active pill indicator (just like Папка | Файл | Скрипт .sh)!
             val sourceBarOuter = FrameLayout(this).apply {
                 background = tonalBg(uiSurfaceLow, dp(16))
                 setPadding(dp(4), dp(4), dp(4), dp(4))
+                clipChildren = true
+                clipToPadding = true
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -5761,33 +5877,95 @@ class TermuxActivity : Activity() {
             }
             sourceBarOuter.addView(sourceBarWrap)
 
-            val segViews = ArrayList<TextView>()
+            val segTabs = ArrayList<LinearLayout>()
+            val segIcons = ArrayList<MaterialIconView>()
+            val segLabels = ArrayList<TextView>()
+
+            lateinit var rebuildBreadcrumbs: () -> Unit
+            lateinit var rebuildClipBanner: () -> Unit
+            lateinit var refreshSftpListInPlace: (Boolean) -> Unit
+            lateinit var openMaterialCreateItemSheet: () -> Unit
+            lateinit var openMaterialImportSheet: () -> Unit
+
+            fun updateSourceBarSelection(newIdx: Int, animate: Boolean) {
+                currentSftpSourceIdx = newIdx
+                prevSftpSourceIdx = newIdx
+                for (i in 0 until segTabs.size) {
+                    val isSel = (i == newIdx)
+                    segIcons[i].tintColor = if (isSel) uiAccent else COLOR_TEXT_DIM
+                    segIcons[i].invalidate()
+                    segLabels[i].setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
+                    segLabels[i].typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                    if (i == 3 && activeSftpServer != null) {
+                        segLabels[i].text = activeSftpServer!!.label
+                    } else if (i == 3) {
+                        segLabels[i].text = "SSH"
+                    }
+                    if (animate) {
+                        segTabs[i].animate()
+                            .scaleX(if (isSel) 1.04f else 1.0f)
+                            .scaleY(if (isSel) 1.04f else 1.0f)
+                            .setDuration(220L)
+                            .setInterpolator(aosp17SpatialInterpolator)
+                            .start()
+                    } else {
+                        segTabs[i].scaleX = if (isSel) 1.04f else 1.0f
+                        segTabs[i].scaleY = if (isSel) 1.04f else 1.0f
+                    }
+                }
+                val targetTab = segTabs.getOrNull(newIdx) ?: return
+                if (targetTab.width > 0) {
+                    animateLiquidSegmentedPill(slidingSourcePill, sourceBarOuter, targetTab, animate)
+                }
+            }
+
             val localGroups = listOf(
-                Triple("Home", homeDir, false),
-                Triple("Usr", usrDir, false),
-                Triple("Storage", sdDir, true)
+                 Quadruple("Home", M3Icon.FOLDER, homeDir, false),
+                Quadruple("Usr", M3Icon.CPU, usrDir, false),
+                Quadruple("Storage", M3Icon.STORAGE, sdDir, true)
             )
             for ((gIdx, grp) in localGroups.withIndex()) {
-                val (lbl, dir, requiresPerm) = grp
+                val (lbl, ic, dir, requiresPerm) = grp
                 val isSel = (currentSftpSourceIdx == gIdx)
-                val segBtn = TextView(this).apply {
+                val icView = MaterialIconView(
+                    this,
+                    ic,
+                    if (isSel) uiAccent else COLOR_TEXT_DIM,
+                    15.5f,
+                    2.0f
+                ).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply {
+                        marginEnd = dp(4)
+                    }
+                }
+                val lblView = TextView(this).apply {
                     text = lbl
                     gravity = Gravity.CENTER
                     setSingleLine(true)
                     typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                }
+                val segTab = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    setPadding(dp(6), dp(9), dp(6), dp(9))
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                    attachSmoothPressAnimation(this, 0.94f)
+                    addView(icView)
+                    addView(lblView)
+                    attachSmoothPressAnimation(this, 0.95f)
                     setOnClickListener {
                         triggerHaptic(0.8f)
                         val switchToDir = {
-                            sftpTransitionDir = if (gIdx >= currentSftpSourceIdx) 1 else -1
-                            prevSftpSourceIdx = currentSftpSourceIdx
-                            activeSftpServer = null
-                            localCurrentDir = dir
-                            renderSftpTab()
+                            if (currentSftpSourceIdx != gIdx || localCurrentDir != dir || activeSftpServer != null) {
+                                sftpTransitionDir = if (gIdx >= currentSftpSourceIdx) 1 else -1
+                                activeSftpServer = null
+                                localCurrentDir = dir
+                                updateSourceBarSelection(gIdx, animate = true)
+                                rebuildBreadcrumbs()
+                                rebuildClipBanner()
+                                refreshSftpListInPlace(false)
+                            }
                         }
                         if (requiresPerm && !hasAllFilesAccessPermission() && !hasStandardStoragePermission()) {
                             showStoragePermissionsModal {
@@ -5805,31 +5983,54 @@ class TermuxActivity : Activity() {
                         }
                     }
                 }
-                segViews.add(segBtn)
-                sourceBarWrap.addView(segBtn)
+                segTabs.add(segTab)
+                segIcons.add(icView)
+                segLabels.add(lblView)
+                sourceBarWrap.addView(segTab)
             }
 
             if (savedServers.isNotEmpty()) {
                 val isRemoteSel = (currentSftpSourceIdx == 3)
-                val sshSegBtn = TextView(this).apply {
-                    text = if (isRemoteSel) "SSH: ${activeSftpServer!!.label}" else "SSH ▾"
+                val sshIcView = MaterialIconView(
+                    this,
+                    M3Icon.SERVER,
+                    if (isRemoteSel) uiAccent else COLOR_TEXT_DIM,
+                    15.5f,
+                    2.0f
+                ).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply {
+                        marginEnd = dp(4)
+                    }
+                }
+                val sshLblView = TextView(this).apply {
+                    text = if (isRemoteSel && activeSftpServer != null) activeSftpServer!!.label else "SSH"
                     gravity = Gravity.CENTER
                     setSingleLine(true)
                     typeface = if (isRemoteSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     setTextColor(if (isRemoteSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                    setPadding(dp(8), dp(8), dp(8), dp(8))
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.15f)
-                    attachSmoothPressAnimation(this, 0.94f)
+                }
+                val sshSegTab = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    setPadding(dp(6), dp(9), dp(6), dp(9))
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.08f)
+                    addView(sshIcView)
+                    addView(sshLblView)
+                    attachSmoothPressAnimation(this, 0.95f)
                     setOnClickListener {
                         triggerHaptic(0.8f)
-                        if (savedServers.size == 1 && activeSftpServer == null) {
-                            val srv = savedServers[0]
+                        val connectToSrv: (SshServerProfile) -> Unit = { srv ->
                             sftpTransitionDir = 1
-                            prevSftpSourceIdx = currentSftpSourceIdx
                             activeSftpServer = srv
                             remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
-                            renderSftpTab()
+                            updateSourceBarSelection(3, animate = true)
+                            rebuildBreadcrumbs()
+                            rebuildClipBanner()
+                            refreshSftpListInPlace(false)
+                        }
+                        if (savedServers.size == 1 && activeSftpServer == null) {
+                            connectToSrv(savedServers[0])
                         } else {
                             val curIdx = savedServers.indexOfFirst { it.id == activeSftpServer?.id }.coerceAtLeast(0)
                             showBakaSuChooseDialog(
@@ -5838,177 +6039,178 @@ class TermuxActivity : Activity() {
                                 descriptions = savedServers.map { "${it.username}@${it.host}:${it.port}" },
                                 selectedIndex = curIdx
                             ) { chosen ->
-                                val srv = savedServers[chosen]
-                                sftpTransitionDir = 1
-                                prevSftpSourceIdx = currentSftpSourceIdx
-                                activeSftpServer = srv
-                                remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
-                                renderSftpTab()
+                                connectToSrv(savedServers[chosen])
                             }
                         }
                     }
                 }
-                segViews.add(sshSegBtn)
-                sourceBarWrap.addView(sshSegBtn)
+                segTabs.add(sshSegTab)
+                segIcons.add(sshIcView)
+                segLabels.add(sshLblView)
+                sourceBarWrap.addView(sshSegTab)
             }
 
-            // Animate the active capsule sliding smoothly from prevSftpSourceIdx to currentSftpSourceIdx!
-            val fromIdx = prevSftpSourceIdx.coerceIn(0, segViews.lastIndex)
-            val toIdx = currentSftpSourceIdx.coerceIn(0, segViews.lastIndex)
+            val fromIdx = prevSftpSourceIdx.coerceIn(0, segTabs.lastIndex)
+            val toIdx = currentSftpSourceIdx.coerceIn(0, segTabs.lastIndex)
             prevSftpSourceIdx = toIdx
             sourceBarWrap.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
                 override fun onPreDraw(): Boolean {
                     if (sourceBarWrap.viewTreeObserver.isAlive) {
                         sourceBarWrap.viewTreeObserver.removeOnPreDrawListener(this)
                     }
-                    val targetView = segViews.getOrNull(toIdx) ?: return true
-                    val fromView = segViews.getOrNull(fromIdx) ?: targetView
-                    slidingSourcePill.layoutParams = FrameLayout.LayoutParams(targetView.width, targetView.height)
-                    slidingSourcePill.requestLayout()
+                    val targetView = segTabs.getOrNull(toIdx) ?: return true
+                    val fromView = segTabs.getOrNull(fromIdx) ?: targetView
+                    slidingSourcePill.layoutParams = FrameLayout.LayoutParams(fromView.width, fromView.height)
+                    slidingSourcePill.translationX = fromView.left.toFloat()
                     if (fromIdx != toIdx) {
-                        slidingSourcePill.translationX = fromView.left.toFloat()
-                        slidingSourcePill.scaleX = 0.90f
-                        slidingSourcePill.scaleY = 0.90f
-                        slidingSourcePill.animate()
-                            .translationX(targetView.left.toFloat())
-                            .scaleX(1f)
-                            .scaleY(1f)
-                            .setDuration(250L)
-                            .setInterpolator(aosp17SpatialInterpolator)
-                            .start()
+                        animateLiquidSegmentedPill(slidingSourcePill, sourceBarOuter, targetView, animate = true)
                     } else {
-                        slidingSourcePill.translationX = targetView.left.toFloat()
-                        slidingSourcePill.scaleX = 1f
-                        slidingSourcePill.scaleY = 1f
+                        animateLiquidSegmentedPill(slidingSourcePill, sourceBarOuter, targetView, animate = false)
                     }
                     return true
                 }
             })
             mainSftpCol.addView(sourceBarOuter)
 
-            // 2. Material 3 Path Breadcrumbs (Soft gray pills for parents, theme accent pill for current directory)
-            val activePathStr = if (activeSftpServer == null) localCurrentDir.absolutePath else remoteCurrentPath
+            // 2. Material 3 Path Breadcrumbs (updated in-place when switching folders/sources)
             val (bcScroll, bcRow) = makeHorizontalChipRow()
             bcScroll.setPadding(dp(14), dp(4), dp(14), dp(6))
-
-            val parts = activePathStr.split("/").filter { it.isNotEmpty() }
-            val segments = ArrayList<Pair<String, String>>()
-            segments.add("/" to "/")
-            var built = ""
-            for (p in parts) {
-                built += "/$p"
-                segments.add(p to built)
-            }
-            for ((idx, seg) in segments.withIndex()) {
-                val isLast = (idx == segments.lastIndex)
-                if (idx > 0) {
-                    bcRow.addView(TextView(this).apply {
-                        text = "›"
-                        setTextColor(COLOR_TEXT_DIM)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-                        setPadding(dp(4), 0, dp(4), 0)
-                    })
-                }
-                val segChip = TextView(this).apply {
-                    text = seg.first
-                    setSingleLine(true)
-                    typeface = if (isLast) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    if (isLast) {
-                        setTextColor(uiAccent)
-                        background = tonalBg(uiAccentContainer, dp(10))
-                        setPadding(dp(12), dp(5), dp(12), dp(5))
-                    } else {
-                        setTextColor(COLOR_TEXT)
-                        background = tonalBg(uiSurfaceContainer, dp(10))
-                        setPadding(dp(10), dp(5), dp(10), dp(5))
-                    }
-                    attachSmoothPressAnimation(this, 0.94f)
-                    setOnClickListener {
-                        triggerHaptic(0.75f)
-                        if (isLast) {
-                            val (pDlg, pSheet) = createExpressiveDialog(390)
-                            pSheet.addView(TextView(this@TermuxActivity).apply {
-                                text = tr("Перейти по пути", "Go to path")
-                                setTextColor(COLOR_TEXT_BRIGHT)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                                typeface = Typeface.DEFAULT_BOLD
-                                setPadding(0, 0, 0, dp(8))
-                            })
-                            val pathEt = EditText(this@TermuxActivity).apply {
-                                setText(activePathStr)
-                                setTextColor(COLOR_TEXT_BRIGHT)
-                                typeface = Typeface.MONOSPACE
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                                setSingleLine(true)
-                                background = tonalBg(uiSurfaceLow, dp(12))
-                                setPadding(dp(12), dp(9), dp(12), dp(9))
-                            }
-                            pSheet.addView(pathEt)
-                            val bRow = LinearLayout(this@TermuxActivity).apply {
-                                orientation = LinearLayout.HORIZONTAL
-                                gravity = Gravity.END
-                                setPadding(0, dp(12), 0, 0)
-                            }
-                            bRow.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { pDlg.dismiss() })
-                            bRow.addView(makeExpressiveChip(tr("Перейти", "Go"), true) {
-                                val target = pathEt.text.toString().trim()
-                                if (target.isNotEmpty()) {
-                                    if (activeSftpServer == null) {
-                                        val f = File(target)
-                                        if (f.exists() && f.isDirectory) localCurrentDir = f
-                                    } else {
-                                        remoteCurrentPath = target
-                                    }
-                                    renderSftpTab()
-                                }
-                                pDlg.dismiss()
-                            })
-                            pSheet.addView(bRow)
-                            pDlg.show()
-                        } else if (activeSftpServer == null) {
-                            val targetDir = File(seg.second)
-                            if (targetDir.exists() && targetDir.canRead()) {
-                                sftpTransitionDir = -1
-                                localCurrentDir = targetDir
-                                renderSftpTab()
-                            }
-                        } else {
-                            sftpTransitionDir = -1
-                            remoteCurrentPath = seg.second
-                            renderSftpTab()
-                        }
-                    }
-                }
-                bcRow.addView(segChip)
-            }
-            bcScroll.post { bcScroll.fullScroll(View.FOCUS_RIGHT) }
             mainSftpCol.addView(bcScroll)
 
-            val clipFile = fileClipSource
-            if (activeSftpServer == null && clipFile != null && clipFile.exists()) {
-                val clipBanner = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(14), dp(4), dp(14), dp(4))
+            rebuildBreadcrumbs = {
+                bcRow.removeAllViews()
+                val activePathStr = currentActivePathStr()
+                val parts = activePathStr.split("/").filter { it.isNotEmpty() }
+                val segments = ArrayList<Pair<String, String>>()
+                segments.add("/" to "/")
+                var built = ""
+                for (p in parts) {
+                    built += "/$p"
+                    segments.add(p to built)
                 }
-                clipBanner.addView(makeExpressiveChip(tr("Вставить «${clipFile.name}»", "Paste '${clipFile.name}'"), true) {
-                    try {
-                        val dst = File(localCurrentDir, clipFile.name)
-                        if (clipFile.isDirectory) clipFile.copyRecursively(dst, overwrite = true)
-                        else clipFile.copyTo(dst, overwrite = true)
-                        if (fileClipIsMove) clipFile.deleteRecursively()
-                        fileClipSource = null
-                        renderSftpTab()
-                    } catch (e: Throwable) {
-                        Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                for ((idx, seg) in segments.withIndex()) {
+                    val isLast = (idx == segments.lastIndex)
+                    if (idx > 0) {
+                        bcRow.addView(TextView(this).apply {
+                            text = "›"
+                            setTextColor(COLOR_TEXT_DIM)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                            setPadding(dp(4), 0, dp(4), 0)
+                        })
                     }
-                })
-                clipBanner.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) {
-                    fileClipSource = null
-                    renderSftpTab()
-                })
-                mainSftpCol.addView(clipBanner)
+                    val segChip = TextView(this).apply {
+                        text = seg.first
+                        setSingleLine(true)
+                        typeface = if (isLast) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        if (isLast) {
+                            setTextColor(uiAccent)
+                            background = tonalBg(uiAccentContainer, dp(10))
+                            setPadding(dp(12), dp(5), dp(12), dp(5))
+                        } else {
+                            setTextColor(COLOR_TEXT)
+                            background = tonalBg(uiSurfaceContainer, dp(10))
+                            setPadding(dp(10), dp(5), dp(10), dp(5))
+                        }
+                        attachSmoothPressAnimation(this, 0.94f)
+                        setOnClickListener {
+                            triggerHaptic(0.75f)
+                            if (isLast) {
+                                val (pDlg, pSheet) = createExpressiveDialog(390)
+                                pSheet.addView(TextView(this@TermuxActivity).apply {
+                                    text = tr("Перейти по пути", "Go to path")
+                                    setTextColor(COLOR_TEXT_BRIGHT)
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                                    typeface = Typeface.DEFAULT_BOLD
+                                    setPadding(0, 0, 0, dp(8))
+                                })
+                                val pathEt = EditText(this@TermuxActivity).apply {
+                                    setText(activePathStr)
+                                    setTextColor(COLOR_TEXT_BRIGHT)
+                                    typeface = Typeface.MONOSPACE
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                                    setSingleLine(true)
+                                    background = tonalBg(uiSurfaceLow, dp(12))
+                                    setPadding(dp(12), dp(9), dp(12), dp(9))
+                                }
+                                pSheet.addView(pathEt)
+                                val bRow = LinearLayout(this@TermuxActivity).apply {
+                                    orientation = LinearLayout.HORIZONTAL
+                                    gravity = Gravity.END
+                                    setPadding(0, dp(12), 0, 0)
+                                }
+                                bRow.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { pDlg.dismiss() })
+                                bRow.addView(makeExpressiveChip(tr("Перейти", "Go"), true) {
+                                    val target = pathEt.text.toString().trim()
+                                    if (target.isNotEmpty()) {
+                                        sftpTransitionDir = 1
+                                        if (activeSftpServer == null) {
+                                            val f = File(target)
+                                            if (f.exists() && f.isDirectory) localCurrentDir = f
+                                        } else {
+                                            remoteCurrentPath = target
+                                        }
+                                        updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
+                                        rebuildBreadcrumbs()
+                                        refreshSftpListInPlace(false)
+                                    }
+                                    pDlg.dismiss()
+                                })
+                                pSheet.addView(bRow)
+                                pDlg.show()
+                            } else if (activeSftpServer == null) {
+                                val targetDir = File(seg.second)
+                                if (targetDir.exists() && targetDir.canRead()) {
+                                    sftpTransitionDir = -1
+                                    localCurrentDir = targetDir
+                                    updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
+                                    rebuildBreadcrumbs()
+                                    refreshSftpListInPlace(false)
+                                }
+                            } else {
+                                sftpTransitionDir = -1
+                                remoteCurrentPath = seg.second
+                                rebuildBreadcrumbs()
+                                refreshSftpListInPlace(false)
+                            }
+                        }
+                    }
+                    bcRow.addView(segChip)
+                }
+                bcScroll.post { bcScroll.fullScroll(View.FOCUS_RIGHT) }
+            }
+
+            val clipBannerHolder = FrameLayout(this)
+            mainSftpCol.addView(clipBannerHolder)
+
+            rebuildClipBanner = {
+                clipBannerHolder.removeAllViews()
+                val clipFile = fileClipSource
+                if (activeSftpServer == null && clipFile != null && clipFile.exists()) {
+                    val clipBanner = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(14), dp(4), dp(14), dp(4))
+                    }
+                    clipBanner.addView(makeExpressiveChip(tr("Вставить «${clipFile.name}»", "Paste '${clipFile.name}'"), true) {
+                        try {
+                            val dst = File(localCurrentDir, clipFile.name)
+                            if (clipFile.isDirectory) clipFile.copyRecursively(dst, overwrite = true)
+                            else clipFile.copyTo(dst, overwrite = true)
+                            if (fileClipIsMove) clipFile.deleteRecursively()
+                            fileClipSource = null
+                            rebuildClipBanner()
+                            refreshSftpListInPlace(false)
+                        } catch (e: Throwable) {
+                            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    })
+                    clipBanner.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) {
+                        fileClipSource = null
+                        rebuildClipBanner()
+                    })
+                    clipBannerHolder.addView(clipBanner)
+                }
             }
 
             val listScroll = ScrollView(this).apply {
@@ -6024,9 +6226,8 @@ class TermuxActivity : Activity() {
             }
             listScroll.addView(rowsCol)
 
-            lateinit var refreshSftpListInPlace: () -> Unit
             val ptrSftp = BakaSuPullToRefreshLayout(this, listScroll) {
-                refreshSftpListInPlace()
+                refreshSftpListInPlace(true)
             }.apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -6036,10 +6237,8 @@ class TermuxActivity : Activity() {
             }
             mainSftpCol.addView(ptrSftp)
 
-            val srv = activeSftpServer
-            val hasParentRow = (activePathStr != "/" && sftpSearchQuery.isBlank())
-
             fun openEntryMenu(item: SftpItemEntry) {
+                val srv = activeSftpServer
                 val (mDlg, mSheet) = createExpressiveDialog(390)
                 val hdrRow = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -6082,188 +6281,173 @@ class TermuxActivity : Activity() {
                     setSingleLine(true)
                     setTextColor(COLOR_TEXT_DIM)
                     typeface = Typeface.MONOSPACE
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 })
                 hdrRow.addView(hdrCol)
                 mSheet.addView(hdrRow)
 
-                val opts = ArrayList<Triple<M3Icon, String, () -> Unit>>()
-                if (!item.isDirectory) {
-                    opts.add(Triple(M3Icon.EDIT, tr("Открыть / Редактировать", "Open / Edit code")) {
-                        if (srv == null) {
-                            val f = File(item.path)
-                            val content = try {
-                                if (f.length() <= 512 * 1024) f.readText() else "File > 512 KB"
-                            } catch (_: Throwable) { "" }
-                            openCodeViewerAndEditorSubPage(item.name, item.path, content) { updated ->
-                                try {
-                                    f.writeText(updated)
-                                    renderSftpTab()
-                                } catch (_: Throwable) {}
-                            }
-                        } else {
-                            Thread {
-                                val (_, content) = runRemoteSftpViaCpp23(srv, "head -c 262144 ${shellEscapeSingle(item.path)}")
-                                runOnUiThread {
-                                    openCodeViewerAndEditorSubPage(item.name, "${srv.label}:${item.path}", content) { updated ->
-                                        Thread {
-                                            val b64 = android.util.Base64.encodeToString(updated.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
-                                            val (ok, _) = runRemoteSftpViaCpp23(
-                                                srv,
-                                                "printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(item.path)}"
-                                            )
-                                            if (ok) {
-                                                runOnUiThread { renderSftpTab(forceRemoteRefresh = true) }
-                                            }
-                                        }.start()
-                                    }
-                                }
-                            }.start()
-                        }
-                    })
-                    opts.add(Triple(M3Icon.DOWNLOAD, tr("Скачать в Загрузки (/sdcard/Download)", "Download to /sdcard/Download")) {
-                        val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).apply { mkdirs() }
-                        val dst = File(dlDir, item.name)
-                        if (srv == null) {
-                            try {
-                                File(item.path).copyTo(dst, overwrite = true)
-                                Toast.makeText(this, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_SHORT).show()
-                            } catch (e: Throwable) {
-                                Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                            }
-                        } else {
-                            Thread {
-                                val (ok, b64Out) = runRemoteSftpViaCpp23(srv, "base64 ${shellEscapeSingle(item.path)}")
-                                runOnUiThread {
-                                    if (ok) {
-                                        try {
-                                            val bytes = android.util.Base64.decode(b64Out.replace("\n", "").replace("\r", ""), android.util.Base64.DEFAULT)
-                                            dst.writeBytes(bytes)
-                                            Toast.makeText(this, tr("Скачано: ${dst.name}", "Downloaded: ${dst.name}"), Toast.LENGTH_SHORT).show()
-                                        } catch (e: Throwable) {
-                                            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                                        }
-                                    }
-                                }
-                            }.start()
-                        }
-                    })
-                } else {
-                    opts.add(Triple(M3Icon.TERMINAL, tr("Открыть папку в терминале (cd)", "Open folder in terminal (cd)")) {
-                        if (srv == null) {
-                            dlg.dismiss()
-                            nativeSendText("cd ${shellEscapeSingle(item.path)}\n", false)
-                        } else {
-                            connectToSshServerInTerminal(
-                                srv.copy(startupCommand = "cd ${shellEscapeSingle(item.path)} && exec \$SHELL -l"),
-                                dlg
-                            )
+                val actions = ArrayList<Triple<M3Icon, String, () -> Unit>>()
+                if (!item.isDirectory && srv == null) {
+                    actions.add(Triple(M3Icon.EDIT, tr("Редактировать текст", "Edit file")) {
+                        mDlg.dismiss()
+                        openLocalTextEditorDialog(File(item.path)) {
+                            refreshSftpListInPlace(false)
                         }
                     })
                 }
-                opts.add(Triple(M3Icon.EDIT, tr("Переименовать", "Rename")) {
+                if (srv == null) {
+                    actions.add(Triple(M3Icon.COPY, tr("Копировать", "Copy")) {
+                        fileClipSource = File(item.path)
+                        fileClipIsMove = false
+                        mDlg.dismiss()
+                        rebuildClipBanner()
+                    })
+                    actions.add(Triple(M3Icon.FOLDER_OPEN, tr("Вырезать (Переместить)", "Cut (Move)")) {
+                        fileClipSource = File(item.path)
+                        fileClipIsMove = true
+                        mDlg.dismiss()
+                        rebuildClipBanner()
+                    })
+                } else if (!item.isDirectory) {
+                    actions.add(Triple(M3Icon.DOWNLOAD, tr("Скачать в Download", "Download to /sdcard/Download")) {
+                        mDlg.dismiss()
+                        val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                        if (!dlDir.exists()) dlDir.mkdirs()
+                        val dst = File(dlDir, item.name)
+                        Toast.makeText(this, tr("Скачивание ${item.name}…", "Downloading ${item.name}…"), Toast.LENGTH_SHORT).show()
+                        Thread {
+                            val (ok, out) = runRemoteSftpViaCpp23(srv, "base64 ${shellEscapeSingle(item.path)}")
+                            runOnUiThread {
+                                if (ok) {
+                                    try {
+                                        val cleanB64 = out.replace("\s".toRegex(), "")
+                                        val bytes = android.util.Base64.decode(cleanB64, android.util.Base64.DEFAULT)
+                                        dst.writeBytes(bytes)
+                                        Toast.makeText(this, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_LONG).show()
+                                    } catch (e: Throwable) {
+                                        Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    }
+                                } else {
+                                    Toast.makeText(this, "SSH error: ${out.take(120)}", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }.start()
+                    })
+                }
+
+                actions.add(Triple(M3Icon.EDIT, tr("Переименовать", "Rename")) {
+                    mDlg.dismiss()
                     val (rDlg, rSheet) = createExpressiveDialog(380)
                     rSheet.addView(TextView(this).apply {
                         text = tr("Переименовать", "Rename")
                         setTextColor(COLOR_TEXT_BRIGHT)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
                         typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
                         setPadding(0, 0, 0, dp(8))
                     })
-                    val input = EditText(this).apply {
+                    val rEt = EditText(this).apply {
                         setText(item.name)
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.MONOSPACE
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
                         setSingleLine(true)
                         background = tonalBg(uiSurfaceLow, dp(12))
                         setPadding(dp(12), dp(9), dp(12), dp(9))
                     }
-                    rSheet.addView(input)
-                    val bBar = LinearLayout(this).apply {
+                    rSheet.addView(rEt)
+                    val bRow = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.END
                         setPadding(0, dp(12), 0, 0)
                     }
-                    bBar.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { rDlg.dismiss() })
-                    bBar.addView(makeExpressiveChip(tr("Сохранить", "Save"), true) {
-                        val newName = input.text.toString().trim()
-                        if (newName.isNotEmpty() && !newName.contains('/') && newName != item.name) {
+                    bRow.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { rDlg.dismiss() })
+                    bRow.addView(makeExpressiveChip(tr("Сохранить", "Save"), true) {
+                        val newName = rEt.text.toString().trim()
+                        if (newName.isNotEmpty() && newName != item.name) {
                             if (srv == null) {
-                                val f = File(item.path)
-                                f.renameTo(File(f.parentFile, newName))
-                                renderSftpTab()
+                                val src = File(item.path)
+                                val dst = File(src.parentFile, newName)
+                                src.renameTo(dst)
+                                refreshSftpListInPlace(false)
                             } else {
-                                val parent = item.path.substringBeforeLast('/').ifEmpty { "/" }
-                                val newPath = if (parent == "/") "/$newName" else "$parent/$newName"
+                                val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
+                                val newRemote = if (parentDir == "/") "/$newName" else "$parentDir/$newName"
                                 Thread {
-                                    runRemoteSftpViaCpp23(srv, "mv ${shellEscapeSingle(item.path)} ${shellEscapeSingle(newPath)}")
-                                    runOnUiThread { renderSftpTab(forceRemoteRefresh = true) }
+                                    runRemoteSftpViaCpp23(srv, "mv ${shellEscapeSingle(item.path)} ${shellEscapeSingle(newRemote)}")
+                                    runOnUiThread { refreshSftpListInPlace(true) }
                                 }.start()
                             }
                         }
                         rDlg.dismiss()
                     })
-                    rSheet.addView(bBar)
+                    rSheet.addView(bRow)
                     rDlg.show()
                 })
-                opts.add(Triple(M3Icon.KEY, tr("Права доступа (chmod)", "Permissions (chmod)")) {
+
+                actions.add(Triple(M3Icon.KEY, tr("Права доступа (chmod)", "Permissions (chmod)")) {
+                    mDlg.dismiss()
+                    val modes = listOf("755 (rwxr-xr-x)", "644 (rw-r--r--)", "700 (rwx------)", "600 (rw-------)", "777 (rwxrwxrwx)")
                     showBakaSuChooseDialog(
                         title = "chmod: ${item.name}",
-                        items = listOf("755 (rwxr-xr-x)", "700 (rwx------)", "644 (rw-r--r--)", "600 (rw-------)"),
+                        items = modes,
                         selectedIndex = 0
-                    ) { which ->
-                        val code = arrayOf("755", "700", "644", "600")[which]
+                    ) { chosen ->
+                        val octal = modes[chosen].substringBefore(' ')
                         if (srv == null) {
-                            Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", code, item.path)).waitFor()
-                            renderSftpTab()
+                            try {
+                                Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", octal, item.path)).waitFor()
+                            } catch (_: Throwable) {}
+                            refreshSftpListInPlace(false)
                         } else {
                             Thread {
-                                runRemoteSftpViaCpp23(srv, "chmod $code ${shellEscapeSingle(item.path)}")
-                                runOnUiThread { renderSftpTab(forceRemoteRefresh = true) }
+                                runRemoteSftpViaCpp23(srv, "chmod $octal ${shellEscapeSingle(item.path)}")
+                                runOnUiThread { refreshSftpListInPlace(true) }
                             }.start()
                         }
                     }
                 })
-                if (srv == null) {
-                    opts.add(Triple(M3Icon.COPY, tr("Копировать", "Copy")) {
-                        fileClipSource = File(item.path)
-                        fileClipIsMove = false
-                        renderSftpTab()
-                    })
-                }
-                opts.add(Triple(M3Icon.COPY, tr("Скопировать путь", "Copy path")) {
-                    copyToClipboard(item.path, true)
+
+                actions.add(Triple(M3Icon.TERMINAL, tr("Открыть путь в Терминале", "Open path in Terminal")) {
+                    mDlg.dismiss()
+                    val targetDir = if (item.isDirectory) item.path else item.path.substringBeforeLast('/').ifEmpty { "/" }
+                    if (srv == null) {
+                        nativeWriteToActive("cd ${shellEscapeSingle(targetDir)}\n".toByteArray(Charsets.UTF_8))
+                        hubDialog.dismiss()
+                    } else {
+                        connectSshServerInTerminal(srv, customInitialDir = targetDir)
+                        hubDialog.dismiss()
+                    }
                 })
-                opts.add(Triple(M3Icon.TRASH, tr("Удалить", "Delete")) {
+
+                actions.add(Triple(M3Icon.TRASH, tr("Удалить", "Delete")) {
+                    mDlg.dismiss()
                     if (srv == null) {
                         File(item.path).deleteRecursively()
-                        renderSftpTab()
+                        refreshSftpListInPlace(false)
                     } else {
                         Thread {
                             runRemoteSftpViaCpp23(srv, "rm -rf ${shellEscapeSingle(item.path)}")
-                            runOnUiThread { renderSftpTab(forceRemoteRefresh = true) }
+                            runOnUiThread { refreshSftpListInPlace(true) }
                         }.start()
                     }
                 })
 
-                for ((oIdx, opt) in opts.withIndex()) {
+                for ((aIdx, opt) in actions.withIndex()) {
                     val isDel = (opt.first == M3Icon.TRASH)
                     val optRow = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(12), dp(11), dp(12), dp(11))
-                        background = segmentedCardBg(oIdx, opts.size, uiSurfaceLow, 0, 16f, 4f)
+                        background = segmentedCardBg(aIdx, actions.size, uiSurfaceLow, 0, 18f, 4f)
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
                         ).apply {
-                            bottomMargin = dp(2)
+                            bottomMargin = if (aIdx < actions.lastIndex) dp(2) else 0
                         }
-                        attachSmoothPressAnimation(this, 0.97f)
+                        attachSmoothPressAnimation(this, 0.98f)
                         setOnClickListener {
-                            triggerHaptic(0.8f)
-                            mDlg.dismiss()
+                            triggerHaptic(0.85f)
                             opt.third()
                         }
                     }
@@ -6299,6 +6483,9 @@ class TermuxActivity : Activity() {
             }
 
             fun populateEntriesIntoRowsCol(errStr: String?, entries: List<SftpItemEntry>) {
+                val srv = activeSftpServer
+                val activePathStr = currentActivePathStr()
+                val hasParentRow = (activePathStr != "/" && sftpSearchQuery.isBlank())
                 rowsCol.removeAllViews()
                 if (sftpTransitionDir != 0) {
                     val forward = sftpTransitionDir > 0
@@ -6314,7 +6501,7 @@ class TermuxActivity : Activity() {
                         .translationX(0f)
                         .scaleX(1f)
                         .scaleY(1f)
-                        .setDuration(230L)
+                        .setDuration(240L)
                         .setInterpolator(aosp17SpatialInterpolator)
                         .start()
                     bcRow.alpha = 0.35f
@@ -6322,7 +6509,7 @@ class TermuxActivity : Activity() {
                     bcRow.animate()
                         .alpha(1f)
                         .translationX(0f)
-                        .setDuration(210L)
+                        .setDuration(220L)
                         .setInterpolator(aosp17SpatialInterpolator)
                         .start()
                 }
@@ -6350,11 +6537,14 @@ class TermuxActivity : Activity() {
                                 val pf = File(parentPath)
                                 if (pf.exists() && pf.canRead()) {
                                     localCurrentDir = pf
-                                    renderSftpTab()
+                                    updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
+                                    rebuildBreadcrumbs()
+                                    refreshSftpListInPlace(false)
                                 }
                             } else {
                                 remoteCurrentPath = parentPath
-                                renderSftpTab()
+                                rebuildBreadcrumbs()
+                                refreshSftpListInPlace(false)
                             }
                         }
                     }
@@ -6427,18 +6617,21 @@ class TermuxActivity : Activity() {
                                         } else {
                                             expandedTreePaths.add(item.path)
                                         }
-                                        renderSftpTab()
+                                        refreshSftpListInPlace(false)
                                     } else if (srv == null) {
                                         val f = File(item.path)
                                         if (f.canRead()) {
                                             sftpTransitionDir = 1
                                             localCurrentDir = f
-                                            renderSftpTab()
+                                            updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
+                                            rebuildBreadcrumbs()
+                                            refreshSftpListInPlace(false)
                                         }
                                     } else {
                                         sftpTransitionDir = 1
                                         remoteCurrentPath = item.path
-                                        renderSftpTab()
+                                        rebuildBreadcrumbs()
+                                        refreshSftpListInPlace(false)
                                     }
                                 } else {
                                     openEntryMenu(item)
@@ -6543,86 +6736,78 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            refreshSftpListInPlace = {
+            refreshSftpListInPlace = { bypassCache ->
+                val srv = activeSftpServer
                 if (srv == null) {
                     populateEntriesIntoRowsCol(null, listLocalEntriesViaCpp23(localCurrentDir, 0))
                 } else {
                     val cacheKey = "${srv.id}:${remoteCurrentPath}:${sftpShowHidden}:${sftpSearchQuery}"
-                    Thread {
-                        val (err, remoteEntries) = listRemoteSftpEntriesViaCpp23(srv, remoteCurrentPath)
-                        if (err == null) {
-                            sftpRemoteDirCache[cacheKey] = remoteEntries
+                    val cached = if (!bypassCache) sftpRemoteDirCache[cacheKey] else null
+                    if (cached != null) {
+                        populateEntriesIntoRowsCol(null, cached)
+                    } else {
+                        rowsCol.removeAllViews()
+                        val loadingWrap = LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            gravity = Gravity.CENTER
+                            setPadding(dp(20), dp(42), dp(20), dp(42))
                         }
-                        runOnUiThread {
-                            if (activeTab == 1 && activeSftpServer?.id == srv.id) {
-                                populateEntriesIntoRowsCol(err, remoteEntries)
+                        val morphBadge = FrameLayout(this).apply {
+                            background = GradientDrawable().apply {
+                                shape = GradientDrawable.OVAL
+                                setColor(uiAccentContainer)
+                            }
+                            elevation = dpF(4f)
+                            layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+                                bottomMargin = dp(10)
                             }
                         }
-                    }.start()
+                        val morphView = BakaSuMorphingIndicatorView(this)
+                        morphBadge.addView(morphView, FrameLayout.LayoutParams(dp(38), dp(38), Gravity.CENTER))
+                        val loadingAnim = ValueAnimator.ofFloat(0f, 7f).apply {
+                            duration = 4550L
+                            repeatCount = ValueAnimator.INFINITE
+                            interpolator = LinearInterpolator()
+                            addUpdateListener { morphView.morphPhase = it.animatedValue as Float }
+                            start()
+                        }
+                        loadingWrap.addView(morphBadge)
+                        loadingWrap.addView(TextView(this).apply {
+                            text = tr("Загрузка каталога SFTP…", "Loading SFTP directory…")
+                            setTextColor(COLOR_TEXT_DIM)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        })
+                        rowsCol.addView(loadingWrap)
+
+                        Thread {
+                            val (err, remoteEntries) = listRemoteSftpEntriesViaCpp23(srv, remoteCurrentPath)
+                            if (err == null) {
+                                sftpRemoteDirCache[cacheKey] = remoteEntries
+                            }
+                            runOnUiThread {
+                                loadingAnim.cancel()
+                                if (activeTab == 1 && activeSftpServer?.id == srv.id) {
+                                    populateEntriesIntoRowsCol(err, remoteEntries)
+                                }
+                            }
+                        }.start()
+                    }
                 }
             }
 
-            if (srv == null) {
-                populateEntriesIntoRowsCol(null, listLocalEntriesViaCpp23(localCurrentDir, 0))
-            } else {
-                val cacheKey = "${srv.id}:${remoteCurrentPath}:${sftpShowHidden}:${sftpSearchQuery}"
-                val cached = if (!forceRemoteRefresh) sftpRemoteDirCache[cacheKey] else null
-                if (cached != null) {
-                    populateEntriesIntoRowsCol(null, cached)
-                } else {
-                    // Show BakaSU Morphing LoadingIndicator while fetching asynchronously on background worker!
-                    val loadingWrap = LinearLayout(this).apply {
-                        orientation = LinearLayout.VERTICAL
-                        gravity = Gravity.CENTER
-                        setPadding(dp(20), dp(42), dp(20), dp(42))
-                    }
-                    val morphBadge = FrameLayout(this).apply {
-                        background = tonalBg(uiAccentContainer, dp(22))
-                        layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
-                            bottomMargin = dp(10)
-                        }
-                    }
-                    val morphView = BakaSuMorphingIndicatorView(this)
-                    morphBadge.addView(morphView, FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER))
-                    val loadingAnim = ValueAnimator.ofFloat(0f, 5f).apply {
-                        duration = 2100L
-                        repeatCount = ValueAnimator.INFINITE
-                        interpolator = LinearInterpolator()
-                        addUpdateListener { morphView.morphPhase = it.animatedValue as Float }
-                        start()
-                    }
-                    loadingWrap.addView(morphBadge)
-                    loadingWrap.addView(TextView(this).apply {
-                        text = tr("Загрузка каталога SFTP…", "Loading SFTP directory…")
-                        setTextColor(COLOR_TEXT_DIM)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                    })
-                    rowsCol.addView(loadingWrap)
-
-                    Thread {
-                        val (err, remoteEntries) = listRemoteSftpEntriesViaCpp23(srv, remoteCurrentPath)
-                        if (err == null) {
-                            sftpRemoteDirCache[cacheKey] = remoteEntries
-                        }
-                        runOnUiThread {
-                            loadingAnim.cancel()
-                            if (activeTab == 1 && activeSftpServer?.id == srv.id) {
-                                populateEntriesIntoRowsCol(err, remoteEntries)
-                            }
-                        }
-                    }.start()
-                }
-            }
+            rebuildBreadcrumbs()
+            rebuildClipBanner()
+            refreshSftpListInPlace(forceRemoteRefresh)
 
             // ================================================================
             // Material Design 3 Expressive Create Folder / File / Script Sheet
             // ================================================================
-            fun openMaterialCreateItemSheet() {
+            openMaterialCreateItemSheet = {
+                val srv = activeSftpServer
+                val activePathStr = currentActivePathStr()
                 val (cDlg, cSheet) = createExpressiveDialog(430)
-                cSheet.layoutTransition = LayoutTransition().apply {
-                    enableTransitionType(LayoutTransition.CHANGING)
-                    setDuration(230L)
-                }
+                // Note: Do NOT attach LayoutTransition to cSheet so PhoneWindow wraps height synchronously
+                // without ever clipping the bottom buttons or leaving empty space!
                 var createMode = 0 // 0 = Folder, 1 = File, 2 = Bash Script (.sh)
                 var selectedChmod = "755"
 
@@ -6666,10 +6851,12 @@ class TermuxActivity : Activity() {
                 }
                 cSheet.addView(hdrPathChip)
 
-                // Segmented M3 Type Selector Bar (Папка | Файл | Скрипт .sh) with Sliding Pill Animation
+                // Segmented M3 Type Selector Bar (Папка | Файл | Скрипт .sh) with Clamped Liquid Pill Animation
                 val segBarOuter = FrameLayout(this).apply {
                     background = tonalBg(uiSurfaceLow, dp(16))
                     setPadding(dp(4), dp(4), dp(4), dp(4))
+                    clipChildren = true
+                    clipToPadding = true
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
@@ -6760,10 +6947,12 @@ class TermuxActivity : Activity() {
                 contentBox.addView(contentEt)
                 cSheet.addView(contentBox)
 
-                // Segmented Chmod Selector Bar with Sliding Pill Animation
+                // Segmented Chmod Selector Bar with Clamped Liquid Pill Animation
                 val chmodBarOuter = FrameLayout(this).apply {
                     background = tonalBg(uiSurfaceLow, dp(14))
                     setPadding(dp(4), dp(4), dp(4), dp(4))
+                    clipChildren = true
+                    clipToPadding = true
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
@@ -6788,6 +6977,11 @@ class TermuxActivity : Activity() {
                 chmodBarOuter.addView(chmodBarRow)
                 cSheet.addView(chmodBarOuter)
 
+                val btnRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+
                 val modeTabs = ArrayList<LinearLayout>(3)
                 val modeIcons = ArrayList<MaterialIconView>(3)
                 val modeLabels = ArrayList<TextView>(3)
@@ -6808,30 +7002,14 @@ class TermuxActivity : Activity() {
                                 .setDuration(200L)
                                 .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
+                        } else {
+                            tv.scaleX = if (isSel) 1.04f else 1.0f
+                            tv.scaleY = if (isSel) 1.04f else 1.0f
                         }
                     }
                     val targetTab = chmodTabs.getOrNull(targetIdx) ?: return
                     if (targetTab.width > 0) {
-                        if (chmodIndicatorPill.layoutParams.width != targetTab.width) {
-                            chmodIndicatorPill.layoutParams = FrameLayout.LayoutParams(targetTab.width, targetTab.height)
-                        }
-                        if (animate) {
-                            chmodIndicatorPill.animate()
-                                .translationX(targetTab.left.toFloat())
-                                .scaleX(1.06f)
-                                .setDuration(130L)
-                                .setInterpolator(aosp17SpatialInterpolator)
-                                .withEndAction {
-                                    chmodIndicatorPill.animate()
-                                        .scaleX(1.0f)
-                                        .setDuration(130L)
-                                        .setInterpolator(aosp17SpatialInterpolator)
-                                        .start()
-                                }
-                                .start()
-                        } else {
-                            chmodIndicatorPill.translationX = targetTab.left.toFloat()
-                        }
+                        animateLiquidSegmentedPill(chmodIndicatorPill, chmodBarOuter, targetTab, animate)
                     }
                 }
 
@@ -6853,31 +7031,15 @@ class TermuxActivity : Activity() {
                                 .setDuration(220L)
                                 .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
+                        } else {
+                            modeTabs[idx].scaleX = if (isSel) 1.04f else 1.0f
+                            modeTabs[idx].scaleY = if (isSel) 1.04f else 1.0f
                         }
                     }
 
                     val targetTab = modeTabs.getOrNull(newMode)
                     if (targetTab != null && targetTab.width > 0) {
-                        if (segIndicatorPill.layoutParams.width != targetTab.width) {
-                            segIndicatorPill.layoutParams = FrameLayout.LayoutParams(targetTab.width, targetTab.height)
-                        }
-                        if (animate) {
-                            segIndicatorPill.animate()
-                                .translationX(targetTab.left.toFloat())
-                                .scaleX(1.08f)
-                                .setDuration(135L)
-                                .setInterpolator(aosp17SpatialInterpolator)
-                                .withEndAction {
-                                    segIndicatorPill.animate()
-                                        .scaleX(1.0f)
-                                        .setDuration(140L)
-                                        .setInterpolator(aosp17SpatialInterpolator)
-                                        .start()
-                                }
-                                .start()
-                        } else {
-                            segIndicatorPill.translationX = targetTab.left.toFloat()
-                        }
+                        animateLiquidSegmentedPill(segIndicatorPill, segBarOuter, targetTab, animate)
                     }
 
                     val isFolder = (newMode == 0)
@@ -6889,32 +7051,32 @@ class TermuxActivity : Activity() {
                     heroIcon.invalidate()
 
                     if (animate && prevMode != newMode) {
-                        heroBadge.scaleX = 0.72f
-                        heroBadge.scaleY = 0.72f
-                        heroBadge.rotation = dir * -14f
+                        heroBadge.scaleX = 0.76f
+                        heroBadge.scaleY = 0.76f
+                        heroBadge.rotation = dir * -12f
                         heroBadge.animate()
                             .scaleX(1.0f)
                             .scaleY(1.0f)
                             .rotation(0f)
-                            .setDuration(280L)
-                            .setInterpolator(OvershootInterpolator(1.75f))
+                            .setDuration(260L)
+                            .setInterpolator(OvershootInterpolator(1.65f))
                             .start()
 
-                        hdrTitle.alpha = 0.25f
-                        hdrTitle.translationX = dir * dpF(16f)
+                        hdrTitle.alpha = 0.3f
+                        hdrTitle.translationX = dir * dpF(14f)
                         hdrTitle.animate()
                             .alpha(1.0f)
                             .translationX(0f)
-                            .setDuration(220L)
+                            .setDuration(210L)
                             .setInterpolator(aosp17SpatialInterpolator)
                             .start()
 
-                        nameBox.alpha = 0.55f
-                        nameBox.translationX = dir * dpF(12f)
+                        nameBox.alpha = 0.6f
+                        nameBox.translationX = dir * dpF(10f)
                         nameBox.animate()
                             .alpha(1.0f)
                             .translationX(0f)
-                            .setDuration(220L)
+                            .setDuration(210L)
                             .setInterpolator(aosp17SpatialInterpolator)
                             .start()
                     }
@@ -6935,48 +7097,43 @@ class TermuxActivity : Activity() {
                         else -> "deploy.sh"
                     }
 
+                    // Synchronously update contentBox visibility so Dialog window wraps exact height immediately
+                    // with zero clipping (image_973de6.jpg) and zero blank space (image_973de3.jpg)!
+                    contentBox.animate().cancel()
+                    val wasVisible = (contentBox.visibility == View.VISIBLE)
                     if (isFolder) {
-                        if (contentBox.visibility == View.VISIBLE) {
-                            if (animate) {
-                                contentBox.animate()
-                                    .alpha(0f)
-                                    .translationY(-dpF(10f))
-                                    .setDuration(160L)
-                                    .setInterpolator(aosp17SpatialInterpolator)
-                                    .withEndAction {
-                                        contentBox.visibility = View.GONE
-                                        contentBox.alpha = 1f
-                                        contentBox.translationY = 0f
-                                    }
-                                    .start()
-                            } else {
-                                contentBox.visibility = View.GONE
-                            }
+                        contentBox.visibility = View.GONE
+                        contentBox.alpha = 1f
+                        contentBox.translationY = 0f
+                        if (animate && wasVisible) {
+                            chmodBarOuter.translationY = -dpF(10f)
+                            btnRow.translationY = -dpF(10f)
+                            chmodBarOuter.animate().translationY(0f).setDuration(200L).setInterpolator(aosp17SpatialInterpolator).start()
+                            btnRow.animate().translationY(0f).setDuration(200L).setInterpolator(aosp17SpatialInterpolator).start()
                         }
                     } else {
-                        if (contentBox.visibility != View.VISIBLE) {
-                            contentBox.visibility = View.VISIBLE
-                            if (animate) {
-                                contentBox.alpha = 0f
-                                contentBox.translationY = -dpF(12f)
-                                contentBox.animate()
-                                    .alpha(1f)
-                                    .translationY(0f)
-                                    .setDuration(230L)
-                                    .setInterpolator(aosp17SpatialInterpolator)
-                                    .start()
-                            }
+                        contentBox.visibility = View.VISIBLE
+                        if (animate && !wasVisible) {
+                            contentBox.alpha = 0f
+                            contentBox.translationY = -dpF(10f)
+                            contentBox.animate()
+                                .alpha(1f)
+                                .translationY(0f)
+                                .setDuration(210L)
+                                .setInterpolator(aosp17SpatialInterpolator)
+                                .start()
                         } else if (animate && prevMode != newMode) {
-                            contentBox.alpha = 0.45f
-                            contentBox.translationX = dir * dpF(14f)
+                            contentBox.alpha = 0.5f
+                            contentBox.translationX = dir * dpF(12f)
                             contentBox.animate()
                                 .alpha(1f)
                                 .translationX(0f)
-                                .setDuration(220L)
+                                .setDuration(210L)
                                 .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
                         }
                     }
+                    cSheet.requestLayout()
                 }
 
                 val modes = listOf(
@@ -7070,23 +7227,17 @@ class TermuxActivity : Activity() {
                         }
                         val firstModeTab = modeTabs.getOrNull(createMode)
                         if (firstModeTab != null) {
-                            segIndicatorPill.layoutParams = FrameLayout.LayoutParams(firstModeTab.width, firstModeTab.height)
-                            segIndicatorPill.translationX = firstModeTab.left.toFloat()
+                            animateLiquidSegmentedPill(segIndicatorPill, segBarOuter, firstModeTab, animate = false)
                         }
                         val chmodIdx = chmodModes.indexOf(selectedChmod).coerceAtLeast(0)
                         val firstChmodTab = chmodTabs.getOrNull(chmodIdx)
                         if (firstChmodTab != null) {
-                            chmodIndicatorPill.layoutParams = FrameLayout.LayoutParams(firstChmodTab.width, firstChmodTab.height)
-                            chmodIndicatorPill.translationX = firstChmodTab.left.toFloat()
+                            animateLiquidSegmentedPill(chmodIndicatorPill, chmodBarOuter, firstChmodTab, animate = false)
                         }
                         return true
                     }
                 })
 
-                val btnRow = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                }
                 val cancelBtn = TextView(this).apply {
                     text = tr("Отмена", "Cancel")
                     gravity = Gravity.CENTER
@@ -7134,7 +7285,7 @@ class TermuxActivity : Activity() {
                                 Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", selectedChmod, target.absolutePath)).waitFor()
                             } catch (_: Throwable) {}
                             cDlg.dismiss()
-                            renderSftpTab()
+                            refreshSftpListInPlace(false)
                         } else {
                             val fullRemote = if (remoteCurrentPath == "/") "/$n" else "$remoteCurrentPath/$n"
                             val initTxt = contentEt.text.toString()
@@ -7148,7 +7299,7 @@ class TermuxActivity : Activity() {
                                     val b64 = android.util.Base64.encodeToString(initTxt.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
                                     runRemoteSftpViaCpp23(srv, "printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(fullRemote)} && chmod $selectedChmod ${shellEscapeSingle(fullRemote)}")
                                 }
-                                runOnUiThread { renderSftpTab(forceRemoteRefresh = true) }
+                                runOnUiThread { refreshSftpListInPlace(true) }
                             }.start()
                         }
                     }
@@ -7161,15 +7312,15 @@ class TermuxActivity : Activity() {
 
             // ================================================================
             // Material Design 3 Expressive File Import / Upload Sheet
-            // (System Document Picker + Quick Download Files + Path Input)
             // ================================================================
             fun importBytesToCurrentDestination(fileName: String, bytes: ByteArray) {
+                val srv = activeSftpServer
                 if (srv == null) {
                     try {
                         val dst = File(localCurrentDir, fileName)
                         dst.writeBytes(bytes)
                         Toast.makeText(this, tr("Импортировано: $fileName", "Imported: $fileName"), Toast.LENGTH_SHORT).show()
-                        renderSftpTab()
+                        refreshSftpListInPlace(false)
                     } catch (e: Throwable) {
                         Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
@@ -7185,7 +7336,7 @@ class TermuxActivity : Activity() {
                         runOnUiThread {
                             if (ok) {
                                 Toast.makeText(this, tr("Загружено: $fileName", "Uploaded: $fileName"), Toast.LENGTH_SHORT).show()
-                                renderSftpTab(forceRemoteRefresh = true)
+                                refreshSftpListInPlace(true)
                             } else {
                                 Toast.makeText(this, "Error: ${err.take(120)}", Toast.LENGTH_LONG).show()
                             }
@@ -7194,7 +7345,9 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            fun openMaterialImportSheet() {
+            openMaterialImportSheet = {
+                val srv = activeSftpServer
+                val activePathStr = currentActivePathStr()
                 val (uDlg, uSheet) = createExpressiveDialog(430)
 
                 val heroBadge = FrameLayout(this).apply {
@@ -7224,7 +7377,6 @@ class TermuxActivity : Activity() {
                     setPadding(0, dp(4), 0, dp(14))
                 })
 
-                // Primary Action Card: System File Picker (ACTION_OPEN_DOCUMENT)
                 val sysPickerCard = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
@@ -7287,7 +7439,6 @@ class TermuxActivity : Activity() {
                 sysPickerCard.addView(spCol)
                 uSheet.addView(sysPickerCard)
 
-                // Quick Recent Files from /sdcard/Download
                 val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                 val recentDlFiles = try {
                     dlDir.listFiles()?.filter { it.isFile && it.canRead() }
@@ -7380,13 +7531,16 @@ class TermuxActivity : Activity() {
                 uDlg.show()
             }
 
-            // 4. Unified Material Design 3 Floating Bottom Bar in SFTP
+            // 4. Living Material Design 3 Expressive Bento Floating Bottom Toolbar in SFTP
+            // Matches mpy2t3cm-00_Bento_Deck_Light_Purple.mp4 & image_97bd27.png..image_97b983.png:
+            // Individual circular/pill buttons that morph width (46dp -> 74dp -> 64dp/46dp)
+            // and corner radius (23dp circle -> 11dp squircle -> 23dp stadium pill) with neighbor compression!
             val bottomBarRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
                 clipChildren = false
                 clipToPadding = false
-                setPadding(dp(18), dp(4), dp(18), dp(16))
+                setPadding(dp(16), dp(4), dp(16), dp(16))
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -7397,46 +7551,171 @@ class TermuxActivity : Activity() {
             val floatingPill = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                background = makeM3FloatingSurfaceDrawable(dp(31), tintWithAccent = false)
+                background = makeM3FloatingSurfaceDrawable(dp(32), tintWithAccent = false)
                 elevation = dpF(12f)
-                setPadding(dp(6), dp(5), dp(6), dp(5))
+                setPadding(dp(6), dp(6), dp(6), dp(6))
                 layoutParams = if (sftpSearchActive) {
-                    LinearLayout.LayoutParams(0, dp(62), 1f)
+                    LinearLayout.LayoutParams(0, dp(60), 1f)
                 } else {
-                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(62))
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(60))
                 }
             }
 
-            fun makePillVectorBtn(icon: M3Icon, active: Boolean = false, onClick: () -> Unit): FrameLayout {
-                return FrameLayout(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(52), dp(50)).apply {
-                        setMargins(dp(2), 0, dp(2), 0)
-                    }
-                    if (active) {
-                        background = tonalBg(uiAccentContainer, dp(25))
-                    }
-                    addView(
-                        MaterialIconView(
-                            this@TermuxActivity,
-                            icon = icon,
-                            tintColor = if (active) uiAccent else COLOR_TEXT_BRIGHT,
-                            iconSizeDp = 22.5f,
-                            strokeWidthDp = 2.15f
-                        )
-                    )
-                    attachSmoothPressAnimation(this, 0.88f)
-                    setOnClickListener {
-                        triggerHaptic(0.8f)
-                        onClick()
+            val bentoButtons = ArrayList<FrameLayout>()
+            val bentoDrawables = ArrayList<GradientDrawable>()
+            val bentoIcons = ArrayList<MaterialIconView>()
+            val bentoActiveStates = ArrayList<Boolean>()
+
+            val inactiveBentoColor = blendColors(uiSurfaceHigh, uiAccentContainer, 0.28f)
+            val activeBentoColor = uiAccentContainer
+            val primaryActionBentoColor = uiAccent
+
+            fun baseBentoWidthPx(idx: Int): Int {
+                val isAct = bentoActiveStates.getOrNull(idx) == true
+                return if (isAct) dp(64) else dp(46)
+            }
+
+            fun animateBentoLivingPress(pressedIdx: Int, newActiveState: Boolean, isPrimaryAccent: Boolean = false, onSettled: (() -> Unit)? = null) {
+                val btn = bentoButtons.getOrNull(pressedIdx) ?: return
+                val bg = bentoDrawables.getOrNull(pressedIdx) ?: return
+                val ic = bentoIcons.getOrNull(pressedIdx) ?: return
+
+                (btn.tag as? ValueAnimator)?.cancel()
+                bentoActiveStates[pressedIdx] = newActiveState
+
+                val startW = btn.layoutParams.width.toFloat().coerceAtLeast(dpF(46f))
+                val peakW = dpF(74f)
+                val endW = if (newActiveState) dpF(64f) else dpF(46f)
+
+                val startRadius = dpF(23f)
+                val minSquircleRadius = dpF(11f)
+                val endRadius = dpF(23f)
+
+                val targetFill = when {
+                    isPrimaryAccent -> primaryActionBentoColor
+                    newActiveState -> activeBentoColor
+                    else -> inactiveBentoColor
+                }
+                val targetTint = when {
+                    isPrimaryAccent -> uiSurface
+                    newActiveState -> uiOnAccentContainer
+                    else -> COLOR_TEXT_BRIGHT
+                }
+                bg.setColor(targetFill)
+                ic.tintColor = targetTint
+                ic.invalidate()
+
+                val leftIdx = pressedIdx - 1
+                val rightIdx = pressedIdx + 1
+                val leftBaseW = if (leftIdx >= 0) baseBentoWidthPx(leftIdx).toFloat() else 0f
+                val rightBaseW = if (rightIdx < bentoButtons.size) baseBentoWidthPx(rightIdx).toFloat() else 0f
+
+                val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 420L
+                    interpolator = LinearInterpolator()
+                    addUpdateListener { va ->
+                        val t = (va.animatedValue as Float).coerceIn(0f, 1f)
+                        val curW: Float
+                        val curRad: Float
+                        val neighborCompress: Float
+                        if (t < 0.38f) {
+                            // Phase 1 (image_97bce5.png): Rapid expansion into squircle (radius 23dp -> 11dp, width -> 74dp)
+                            val p = t / 0.38f
+                            val easeOut = 1f - (1f - p) * (1f - p)
+                            curW = startW + (peakW - startW) * easeOut
+                            curRad = startRadius + (minSquircleRadius - startRadius) * easeOut
+                            neighborCompress = dpF(4.5f) * easeOut
+                        } else {
+                            // Phase 2 (image_97bcc5.png -> image_97b983.png): Elastic settle back to stadium pill/circle
+                            val p = (t - 0.38f) / 0.62f
+                            val dampedSpring = 1f - kotlin.math.exp(-4.2f * p) * kotlin.math.cos(4.8f * p)
+                            curW = peakW + (endW - peakW) * dampedSpring
+                            val radEase = 1f - (1f - p) * (1f - p)
+                            curRad = minSquircleRadius + (endRadius - minSquircleRadius) * radEase
+                            neighborCompress = dpF(4.5f) * (1f - p).coerceAtLeast(0f)
+                        }
+
+                        bg.cornerRadius = curRad
+                        val lp = btn.layoutParams as LinearLayout.LayoutParams
+                        lp.width = curW.roundToInt()
+                        btn.layoutParams = lp
+
+                        if (leftIdx >= 0) {
+                            val lBtn = bentoButtons[leftIdx]
+                            val lLp = lBtn.layoutParams as LinearLayout.LayoutParams
+                            lLp.width = (leftBaseW - neighborCompress).roundToInt()
+                            lBtn.layoutParams = lLp
+                        }
+                        if (rightIdx < bentoButtons.size) {
+                            val rBtn = bentoButtons[rightIdx]
+                            val rLp = rBtn.layoutParams as LinearLayout.LayoutParams
+                            rLp.width = (rightBaseW - neighborCompress).roundToInt()
+                            rBtn.layoutParams = rLp
+                        }
                     }
                 }
+                btn.tag = anim
+                anim.start()
+                onSettled?.invoke()
+            }
+
+            fun makeBentoPillBtn(
+                icon: M3Icon,
+                initialActive: Boolean = false,
+                isPrimaryAccent: Boolean = false,
+                onClick: (Int) -> Unit
+            ): FrameLayout {
+                val idx = bentoButtons.size
+                bentoActiveStates.add(initialActive)
+                val initFill = when {
+                    isPrimaryAccent -> primaryActionBentoColor
+                    initialActive -> activeBentoColor
+                    else -> inactiveBentoColor
+                }
+                val initTint = when {
+                    isPrimaryAccent -> uiSurface
+                    initialActive -> uiOnAccentContainer
+                    else -> COLOR_TEXT_BRIGHT
+                }
+                val bgDrawable = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dpF(23f)
+                    setColor(initFill)
+                }
+                val icView = MaterialIconView(
+                    this@TermuxActivity,
+                    icon = icon,
+                    tintColor = initTint,
+                    iconSizeDp = 21.5f,
+                    strokeWidthDp = 2.1f
+                )
+                val frame = FrameLayout(this).apply {
+                    background = bgDrawable
+                    layoutParams = LinearLayout.LayoutParams(
+                        if (initialActive) dp(64) else dp(46),
+                        dp(46)
+                    ).apply {
+                        setMargins(dp(3), 0, dp(3), 0)
+                    }
+                    addView(icView)
+                    setOnClickListener {
+                        triggerHaptic(0.85f)
+                        onClick(idx)
+                    }
+                }
+                bentoButtons.add(frame)
+                bentoDrawables.add(bgDrawable)
+                bentoIcons.add(icView)
+                return frame
             }
 
             if (sftpSearchActive) {
-                floatingPill.addView(makePillVectorBtn(M3Icon.ARROW_BACK) {
-                    sftpSearchActive = false
-                    sftpSearchQuery = ""
-                    renderSftpTab()
+                floatingPill.addView(makeBentoPillBtn(M3Icon.ARROW_BACK, initialActive = false) { idx ->
+                    animateBentoLivingPress(idx, false) {
+                        sftpSearchActive = false
+                        sftpSearchQuery = ""
+                        renderSftpTab()
+                    }
                 })
                 val searchEt = EditText(this).apply {
                     setText(sftpSearchQuery)
@@ -7447,38 +7726,57 @@ class TermuxActivity : Activity() {
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     setSingleLine(true)
                     background = null
-                    setPadding(dp(6), 0, dp(6), 0)
+                    setPadding(dp(8), 0, dp(8), 0)
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
                 floatingPill.addView(searchEt)
-                floatingPill.addView(makePillVectorBtn(M3Icon.SEARCH, true) {
-                    sftpSearchQuery = searchEt.text.toString()
-                    renderSftpTab()
+                floatingPill.addView(makeBentoPillBtn(M3Icon.SEARCH, initialActive = true) { idx ->
+                    animateBentoLivingPress(idx, true) {
+                        sftpSearchQuery = searchEt.text.toString()
+                        refreshSftpListInPlace(false)
+                    }
                 })
                 if (sftpSearchQuery.isNotEmpty()) {
-                    floatingPill.addView(makePillVectorBtn(M3Icon.CLOSE) {
-                        sftpSearchQuery = ""
-                        renderSftpTab()
+                    floatingPill.addView(makeBentoPillBtn(M3Icon.CLOSE, initialActive = false) { idx ->
+                        animateBentoLivingPress(idx, false) {
+                            sftpSearchQuery = ""
+                            searchEt.setText("")
+                            refreshSftpListInPlace(false)
+                        }
                     })
                 }
             } else {
-                floatingPill.addView(makePillVectorBtn(M3Icon.SEARCH) {
-                    sftpSearchActive = true
-                    renderSftpTab()
+                floatingPill.addView(makeBentoPillBtn(M3Icon.SEARCH, initialActive = false) { idx ->
+                    animateBentoLivingPress(idx, true) {
+                        floatingPill.postDelayed({
+                            sftpSearchActive = true
+                            renderSftpTab()
+                        }, 160L)
+                    }
                 })
-                floatingPill.addView(makePillVectorBtn(M3Icon.TREE, sftpTreeMode) {
+                floatingPill.addView(makeBentoPillBtn(M3Icon.TREE, initialActive = sftpTreeMode) { idx ->
                     sftpTreeMode = !sftpTreeMode
-                    renderSftpTab()
+                    animateBentoLivingPress(idx, sftpTreeMode) {
+                        sftpTransitionDir = if (sftpTreeMode) 1 else -1
+                        refreshSftpListInPlace(false)
+                    }
                 })
-                floatingPill.addView(makePillVectorBtn(M3Icon.EYE, sftpShowHidden) {
+                floatingPill.addView(makeBentoPillBtn(M3Icon.EYE, initialActive = sftpShowHidden) { idx ->
                     sftpShowHidden = !sftpShowHidden
-                    renderSftpTab()
+                    animateBentoLivingPress(idx, sftpShowHidden) {
+                        sftpTransitionDir = if (sftpShowHidden) 1 else -1
+                        refreshSftpListInPlace(false)
+                    }
                 })
-                floatingPill.addView(makePillVectorBtn(M3Icon.CREATE_FOLDER) {
-                    openMaterialCreateItemSheet()
+                floatingPill.addView(makeBentoPillBtn(M3Icon.CREATE_FOLDER, initialActive = false) { idx ->
+                    animateBentoLivingPress(idx, false) {
+                        openMaterialCreateItemSheet()
+                    }
                 })
-                floatingPill.addView(makePillVectorBtn(M3Icon.UPLOAD, true) {
-                    openMaterialImportSheet()
+                floatingPill.addView(makeBentoPillBtn(M3Icon.UPLOAD, initialActive = true, isPrimaryAccent = true) { idx ->
+                    animateBentoLivingPress(idx, true, isPrimaryAccent = true) {
+                        openMaterialImportSheet()
+                    }
                 })
             }
 
@@ -7875,6 +8173,12 @@ class TermuxActivity : Activity() {
                 }
             }
             tabStrip.addView(tab)
+        }
+        (tabStrip.parent as? HorizontalScrollView)?.post {
+            val activeView = tabStrip.getChildAt(active) ?: return@post
+            val scrollView = tabStrip.parent as? HorizontalScrollView ?: return@post
+            val targetScrollX = (activeView.left - (scrollView.width - activeView.width) / 2).coerceAtLeast(0)
+            scrollView.smoothScrollTo(targetScrollX, 0)
         }
     }
 

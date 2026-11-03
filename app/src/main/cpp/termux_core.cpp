@@ -2630,8 +2630,8 @@ static void sendCodepointInternal(NeoTerminalEngine* engine, int codepoint, bool
 
 static void* bootstrapWorkerThread(void* /*arg*/) {
     bool extracted = false;
-    if (access("/data/data/com.termuxx/file/usr/bin/bash", R_OK) != 0 &&
-        access("/data/data/com.termuxx/file/usr/bin/apt", R_OK) != 0 &&
+    if ((access("/data/data/com.termuxx/file/usr/bin/bash", R_OK) != 0 ||
+         access("/data/data/com.termuxx/file/usr/bin/ssh", R_OK) != 0) &&
         blob_size > 0) {
         extracted = extractBootstrapInCpp23(
             reinterpret_cast<const uint8_t*>(blob),
@@ -3894,7 +3894,16 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
     jstring jRemoteShCmd) {
 
     std::string sshBin = std::string(BIN_PATH) + "/ssh";
-    if (access(sshBin.c_str(), X_OK) != 0) {
+    if (access(sshBin.c_str(), R_OK) != 0 && blob_size > 0) {
+        pthread_mutex_lock(&gGlobalMutex);
+        std::string libDir = gNativeLibDir;
+        pthread_mutex_unlock(&gGlobalMutex);
+        if (extractBootstrapInCpp23(reinterpret_cast<const uint8_t*>(blob), static_cast<size_t>(blob_size))) {
+            initializeEnvironmentAndAutoUpdater(libDir.c_str(), true);
+        }
+    }
+    chmod(sshBin.c_str(), 0700);
+    if (access(sshBin.c_str(), R_OK) != 0) {
         return env->NewStringUTF("ERR\nБинарный файл ssh ещё не готов. Подождите завершения распаковки окружения или выполните pkg install -y openssh");
     }
 
@@ -3986,7 +3995,23 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
         dup2(errPipe[1], STDERR_FILENO);
         close(outPipe[1]);
         close(errPipe[1]);
-        execl(shBin.c_str(), "sh", "-c", fullShellLine.c_str(), static_cast<char*>(nullptr));
+
+        std::string pathEnv = std::string(BIN_PATH) + ":" + std::string(BIN_PATH) + "/applets:/system/bin:/system/xbin:/sbin";
+        setenv("HOME", HOME_PATH, 1);
+        setenv("PREFIX", PREFIX_PATH, 1);
+        setenv("TMPDIR", TMP_PATH, 1);
+        setenv("TMP", TMP_PATH, 1);
+        setenv("PATH", pathEnv.c_str(), 1);
+        setenv("LD_LIBRARY_PATH", LIB_PATH, 1);
+        if (access(redirectSo.c_str(), R_OK) == 0) {
+            setenv("LD_PRELOAD", redirectSo.c_str(), 1);
+        }
+
+        if (access(shBin.c_str(), R_OK) == 0) {
+            execl(shBin.c_str(), "sh", "-c", fullShellLine.c_str(), static_cast<char*>(nullptr));
+            execl("/system/bin/linker64", "/system/bin/linker64", shBin.c_str(), "-c", fullShellLine.c_str(), static_cast<char*>(nullptr));
+        }
+        execl("/system/bin/sh", "sh", "-c", fullShellLine.c_str(), static_cast<char*>(nullptr));
         _exit(127);
     }
 
@@ -4452,20 +4477,48 @@ namespace {
 constexpr float kPi26 = 3.14159265358979323846f;
 constexpr int kM3PolygonVertices = 96;
 
-// Smooth Material 3 Expressive spring-like easing curve with subtle overshoot
-[[nodiscard]] constexpr float expressiveMorphCurveCpp26(float tRaw) noexcept {
-    float u = std::clamp(tRaw, 0.0f, 1.0f);
-    if (u >= 0.68f) {
-        float tail = (u - 0.68f) / 0.32f;
-        return 1.0f + 0.048f * std::sin(kPi26 * tail) * (1.0f - tail);
-    }
-    float t = u / 0.68f;
-    float inv = 1.0f - t;
-    return 3.0f * inv * inv * t * 0.16f + 3.0f * inv * t * t * 1.06f + t * t * t;
+// Exact analytical solution of Material 3 Expressive LoadingIndicator's underdamped morph spring:
+// Spring(dampingRatio = 0.6f, stiffness = 200f) over MORPH_INTERVAL = 650ms (0.65s).
+// omega_n = sqrt(200) = 14.1421356 rad/s, zeta * omega_n = 8.4852814, omega_d = 11.3137085 rad/s.
+[[nodiscard]] inline float m3LoadingMorphSpringCpp26(float uNormalized) noexcept {
+    float u = std::clamp(uNormalized, 0.0f, 1.0f);
+    float tSec = u * 0.65f;
+    float decay = std::exp(-8.4852814f * tSec);
+    float angle = 11.3137085f * tSec;
+    return 1.0f - decay * (std::cos(angle) + 0.75f * std::sin(angle));
 }
 
-// Exact C^infinity rounded regular N-gon radial distance using Lp-norm of half-plane projections:
-// Produces flat polygon sides with smoothly rounded vertices (e.g. N=5 Rounded Pentagon, N=4 Cushion).
+// Per-shape 90-degree step rotation over 194ms using CubicBezier(0.24, 0.0, 0.68, 0.91)
+// so spring settling never reverses rotation, combined with continuous 360deg / 4666ms rotation.
+[[nodiscard]] inline float m3StepRotationProgressCpp26(float uNormalized) noexcept {
+    float tMs = std::clamp(uNormalized, 0.0f, 1.0f) * 650.0f;
+    if (tMs >= 194.0f) return 1.0f;
+    float s = tMs / 194.0f;
+    float inv = 1.0f - s;
+    return 3.0f * inv * inv * s * 0.08f + 3.0f * inv * s * s * 0.91f + s * s * s;
+}
+
+// Independent 500ms scale bounce keyframes from Material 3 Expressive LoadingIndicator:
+// 1.0x at 0ms -> 0.985x at 75ms -> 1.10x at 175ms -> 0.975x at 400ms -> 1.0x at 500..650ms
+[[nodiscard]] inline float m3ScaleBounceKeyframesCpp26(float uNormalized) noexcept {
+    float tMs = std::clamp(uNormalized, 0.0f, 1.0f) * 650.0f;
+    auto smoothStep = [](float a, float b, float x) noexcept {
+        float f = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+        return f * f * (3.0f - 2.0f * f);
+    };
+    if (tMs < 75.0f) {
+        return 1.0f + (0.985f - 1.0f) * smoothStep(0.0f, 75.0f, tMs);
+    } else if (tMs < 175.0f) {
+        return 0.985f + (1.10f - 0.985f) * smoothStep(75.0f, 175.0f, tMs);
+    } else if (tMs < 400.0f) {
+        return 1.10f + (0.975f - 1.10f) * smoothStep(175.0f, 400.0f, tMs);
+    } else if (tMs < 500.0f) {
+        return 0.975f + (1.0f - 0.975f) * smoothStep(400.0f, 500.0f, tMs);
+    }
+    return 1.0f;
+}
+
+// Exact C^infinity rounded regular N-gon radial distance using Lp-norm of half-plane projections
 [[nodiscard]] inline float roundedRegularPolygonRadiusCpp26(
     float theta,
     int nSides,
@@ -4481,48 +4534,54 @@ constexpr int kM3PolygonVertices = 96;
         }
     }
     if (sumPow <= 1e-6f) return inradius;
-    return std::clamp(inradius / std::pow(sumPow, 1.0f / cornerSharpnessP), 0.55f, 0.99f);
+    return std::clamp(inradius / std::pow(sumPow, 1.0f / cornerSharpnessP), 0.52f, 0.99f);
 }
 
-// Evaluates radial distance r(theta) in [0..1] for each MaterialShape in the Google Play / M3 Expressive cycle:
-// -1: Circle (initial pull start)
-//  0: Cookie9Sided / SoftBurst (9-pointed scalloped star shown at full pull & start of refresh)
-//  1: Pentagon (5-sided rounded regular pentagon — immediate first morph target from the star!)
-//  2: Cookie4Sided (4-lobed rounded clover / quatrefoil)
-//  3: Pill (tilted stadium / capsule shape)
-//  4: Sunny (8-pointed sunny star with rounded tips)
-//  5: Cookie6Sided (6-lobed scalloped hexagon flower)
-//  6: RoundedSquare (4-sided rounded cushion / diamond)
+// Exact 7 shapes of LoadingIndicatorDefaults.IndeterminateIndicatorPolygons:
+// -1: MaterialShapes.Circle (rotated 18deg for DeterminateIndicatorPolygons)
+//  0: MaterialShapes.SoftBurst (10-pointed soft rounded starburst)
+//  1: MaterialShapes.Cookie9Sided (9-lobed scalloped cookie flower)
+//  2: MaterialShapes.Pentagon (5-sided rounded regular pentagon)
+//  3: MaterialShapes.Pill (stadium capsule tilted at 45deg)
+//  4: MaterialShapes.Sunny (8-pointed sunny star with rounded tips and deeper valleys)
+//  5: MaterialShapes.Cookie4Sided (4-lobed rounded clover / quatrefoil)
+//  6: MaterialShapes.Oval (smooth ellipse tilted at 45deg)
 [[nodiscard]] inline float evalMaterialShapeRadiusCpp26(int shapeId, float theta) noexcept {
     switch (shapeId) {
-        case -1: // Circle
-            return 0.82f;
+        case -1: // MaterialShapes.Circle
+            return 0.80f;
 
-        case 0: // 9-pointed rounded star (Cookie9Sided / SoftBurst)
-            return 0.78f + 0.195f * std::cos(9.0f * theta) - 0.025f * std::cos(18.0f * theta);
+        case 0: // MaterialShapes.SoftBurst (10-pointed soft starburst)
+            return 0.80f + 0.145f * std::cos(10.0f * theta) - 0.015f * std::cos(20.0f * theta);
 
-        case 1: // Rounded Pentagon (MaterialShapes.Pentagon)
-            return roundedRegularPolygonRadiusCpp26(theta, 5, 0.78f, 6.6f);
+        case 1: // MaterialShapes.Cookie9Sided (9-lobed scalloped cookie)
+            return 0.78f + 0.175f * std::cos(9.0f * theta) - 0.022f * std::cos(18.0f * theta);
 
-        case 2: // 4-lobed clover (MaterialShapes.Cookie4Sided)
-            return 0.76f + 0.215f * std::cos(4.0f * theta) - 0.030f * std::cos(8.0f * theta);
+        case 2: // MaterialShapes.Pentagon (5-sided rounded regular pentagon)
+            return roundedRegularPolygonRadiusCpp26(theta, 5, 0.76f, 6.4f);
 
-        case 3: { // Stadium Pill (MaterialShapes.Pill)
-            float ac = std::abs(std::cos(theta)) / 0.96f;
-            float as = std::abs(std::sin(theta)) / 0.62f;
-            float denom = std::pow( std::pow(ac, 2.7f) + std::pow(as, 2.7f), 1.0f / 2.7f );
-            return (denom > 1e-4f) ? std::clamp(1.0f / denom, 0.58f, 0.98f) : 0.78f;
+        case 3: { // MaterialShapes.Pill (tilted stadium / capsule shape)
+            float rotTheta = theta - (kPi26 * 0.25f);
+            float ac = std::abs(std::cos(rotTheta)) / 0.93f;
+            float as = std::abs(std::sin(rotTheta)) / 0.62f;
+            float denom = std::pow(std::pow(ac, 2.8f) + std::pow(as, 2.8f), 1.0f / 2.8f);
+            return (denom > 1e-4f) ? std::clamp(1.0f / denom, 0.56f, 0.96f) : 0.76f;
         }
 
-        case 4: // 8-pointed Sunny star (MaterialShapes.Sunny)
-            return 0.78f + 0.190f * std::cos(8.0f * theta) - 0.025f * std::cos(16.0f * theta);
+        case 4: // MaterialShapes.Sunny (8-pointed sunny star with deeper valleys)
+            return 0.76f + 0.195f * std::cos(8.0f * theta) - 0.028f * std::cos(16.0f * theta);
 
-        case 5: // 6-lobed scalloped hexagon (MaterialShapes.Cookie6Sided)
-            return 0.79f + 0.175f * std::cos(6.0f * theta) - 0.020f * std::cos(12.0f * theta);
+        case 5: // MaterialShapes.Cookie4Sided (4-lobed rounded clover / quatrefoil)
+            return 0.75f + 0.205f * std::cos(4.0f * theta) - 0.028f * std::cos(8.0f * theta);
 
-        case 6: // Rounded Square / Cushion (MaterialShapes.Square)
-        default:
-            return roundedRegularPolygonRadiusCpp26(theta, 4, 0.77f, 5.4f);
+        case 6: // MaterialShapes.Oval (smooth tilted ellipse)
+        default: {
+            float rotTheta = theta - (kPi26 * 0.25f);
+            float c = std::cos(rotTheta) / 0.92f;
+            float s = std::sin(rotTheta) / 0.68f;
+            float denom = std::sqrt(c * c + s * s);
+            return (denom > 1e-4f) ? std::clamp(1.0f / denom, 0.60f, 0.95f) : 0.78f;
+        }
     }
 }
 
@@ -4546,31 +4605,33 @@ Java_com_termuxx_app_TermuxActivity_nativeComputeM3LoadingPolygon(
     float scalePulse = 1.0f;
 
     if (!isRefreshing) {
-        // Determinate pull-to-refresh preview: Circle (-1) -> 9-pointed Star (0)
+        // DeterminateIndicatorPolygons: Circle.rotated(18deg) -> SoftBurst
         float p = std::clamp(static_cast<float>(pullProgress), 0.0f, 1.25f);
         shapeA = -1;
         shapeB = 0;
         morphT = std::clamp(p, 0.0f, 1.0f);
-        rotRad = (-18.0f + p * 110.0f) * (kPi26 / 180.0f);
-        scalePulse = 0.86f + 0.14f * morphT;
+        rotRad = (18.0f + p * 90.0f) * (kPi26 / 180.0f);
+        scalePulse = 0.85f + 0.15f * morphT;
     } else {
-        // Indeterminate Google Play / M3 Expressive 7-shape cycle:
-        // Step 0: Star (0) -> Rounded Pentagon (1)
-        // Step 1: Rounded Pentagon (1) -> 4-Lobed Clover (2)
-        // Step 2: 4-Lobed Clover (2) -> Pill (3)
-        // Step 3: Pill (3) -> 8-Pointed Sunny Star (4)
-        // Step 4: Sunny Star (4) -> 6-Lobed Flower (5)
-        // Step 5: 6-Lobed Flower (5) -> Rounded Square (6)
-        // Step 6: Rounded Square (6) -> Star (0)
+        // Official IndeterminateIndicatorPolygons 7-shape cycle (650ms per step):
+        // SoftBurst (0) -> Cookie9Sided (1) -> Pentagon (2) -> Pill (3) -> Sunny (4) -> Cookie4Sided (5) -> Oval (6)
         float cleanPhase = std::max(0.0f, static_cast<float>(phase));
         int stepIdx = static_cast<int>(std::floor(cleanPhase));
         float u = cleanPhase - static_cast<float>(stepIdx);
         shapeA = stepIdx % 7;
         shapeB = (stepIdx + 1) % 7;
-        morphT = expressiveMorphCurveCpp26(u);
-        float rotDeg = -18.0f + static_cast<float>(stepIdx) * 90.0f + morphT * 60.0f + u * 30.0f;
-        rotRad = rotDeg * (kPi26 / 180.0f);
-        scalePulse = 0.95f + 0.08f * std::sin(kPi26 * u);
+
+        // Underdamped spring (zeta = 0.6, stiffness = 200) with real 9.5% overshoot
+        morphT = m3LoadingMorphSpringCpp26(u);
+
+        // 90deg step rotation over 194ms + continuous 360deg / 4666ms global rotation
+        float totalTimeMs = cleanPhase * 650.0f;
+        float globalRotDeg = (totalTimeMs / 4666.0f) * 360.0f;
+        float stepRotDeg = (static_cast<float>(stepIdx) + m3StepRotationProgressCpp26(u)) * 90.0f;
+        rotRad = (18.0f + globalRotDeg + stepRotDeg) * (kPi26 / 180.0f);
+
+        // 500ms keyframed scale bounce (1.0 -> 0.985 -> 1.10 -> 0.975 -> 1.0)
+        scalePulse = m3ScaleBounceKeyframesCpp26(u);
     }
 
     const float effRadius = static_cast<float>(radiusPx) * scalePulse;
@@ -4580,7 +4641,7 @@ Java_com_termuxx_app_TermuxActivity_nativeComputeM3LoadingPolygon(
         float localAngle = static_cast<float>(i) * angleStep;
         float rA = evalMaterialShapeRadiusCpp26(shapeA, localAngle);
         float rB = evalMaterialShapeRadiusCpp26(shapeB, localAngle);
-        float r = (rA + (rB - rA) * morphT) * effRadius;
+        float r = std::clamp(rA + (rB - rA) * morphT, 0.42f, 1.08f) * effRadius;
         float worldAngle = localAngle + rotRad;
         coords[i * 2] = r * std::cos(worldAngle);
         coords[i * 2 + 1] = r * std::sin(worldAngle);

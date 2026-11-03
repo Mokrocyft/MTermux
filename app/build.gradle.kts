@@ -1,16 +1,8 @@
 @file:Suppress("UnstableApiUsage", "DEPRECATION")
 
-import java.io.BufferedOutputStream
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URI
-
 plugins {
     alias(libs.plugins.android.application)
 }
-
-val fallbackBootstrapVersion: String = providers.gradleProperty("termux.bootstrapVersion")
-    .getOrElse("2026.02.12-r1%2Bapt.android-7")
 
 android {
     namespace = "com.termuxx"
@@ -95,100 +87,18 @@ androidComponents {
 }
 
 dependencies {
-    // Zero external Java libraries — 100% pure Kotlin + Android framework + C++23 native core!
+    // Zero external Java libraries — 100% pure Kotlin + Android framework + C++26 native core!
 }
 
-abstract class DownloadLatestBootstrapTask : DefaultTask() {
-    @get:Input
-    abstract val fallbackVersion: Property<String>
-
-    @get:OutputFile
-    abstract val outputFile: RegularFileProperty
-
-    @TaskAction
-    fun download() {
-        val file = outputFile.get().asFile
-        if (file.exists() && file.length() > 10_000_000L) return
-        file.parentFile.mkdirs()
-
-        val urls = listOf(
-            "https://github.com/termux/termux-packages/releases/latest/download/bootstrap-aarch64.zip",
-            "https://github.com/termux/termux-packages/releases/download/bootstrap-${fallbackVersion.get()}/bootstrap-aarch64.zip"
-        )
-
-        var downloaded = false
-        for (url in urls) {
-            try {
-                logger.quiet("Downloading latest aarch64 bootstrap from $url ...")
-                val conn = (URI.create(url).toURL().openConnection() as HttpURLConnection).apply {
-                    instanceFollowRedirects = true
-                    connectTimeout = 30000
-                    readTimeout = 60000
-                }
-                if (conn.responseCode in 200..299) {
-                    conn.inputStream.use { input ->
-                        BufferedOutputStream(FileOutputStream(file)).use { output ->
-                            input.copyTo(output, bufferSize = 65536)
-                        }
-                    }
-                    if (file.length() > 10_000_000L) {
-                        logger.quiet("Downloaded bootstrap-aarch64.zip (${file.length()} bytes)")
-                        downloaded = true
-                        break
-                    }
-                }
-            } catch (e: Exception) {
-                logger.warn("Bootstrap download attempt from $url failed: ${e.message}")
-            }
-        }
-
-        if (!downloaded || !file.exists() || file.length() <= 10_000_000L) {
-            file.delete()
-            throw GradleException("Failed to download aarch64 bootstrap archive")
-        }
+val prepareBootstrapAndFont = tasks.register<Exec>("prepareBootstrapAndFont") {
+    description = "Ensures pre-patched bootstrap-aarch64.zip (with OpenSSH) and JetBrainsMono.ttf are ready"
+    workingDir = rootProject.projectDir
+    commandLine("python3", "scripts/update_bootstrap.py")
+    onlyIf {
+        val bs = layout.projectDirectory.file("src/main/cpp/bootstrap-aarch64.zip").asFile
+        val font = layout.projectDirectory.file("src/main/assets/fonts/JetBrainsMono.ttf").asFile
+        !bs.exists() || bs.length() < 38_000_000L || !font.exists() || font.length() < 50_000L
     }
-}
-
-abstract class DownloadFontTask : DefaultTask() {
-    @get:Input
-    abstract val fontUrl: Property<String>
-
-    @get:OutputFile
-    abstract val outputFile: RegularFileProperty
-
-    @TaskAction
-    fun download() {
-        val file = outputFile.get().asFile
-        if (file.exists() && file.length() > 50_000L) return
-        file.parentFile.mkdirs()
-        logger.quiet("Downloading JetBrainsMono[wght].ttf from ${fontUrl.get()} ...")
-        val connection = (URI.create(fontUrl.get()).toURL().openConnection() as HttpURLConnection).apply {
-            instanceFollowRedirects = true
-            connectTimeout = 30000
-            readTimeout = 60000
-        }
-        connection.inputStream.use { input ->
-            BufferedOutputStream(FileOutputStream(file)).use { output ->
-                input.copyTo(output, bufferSize = 32768)
-            }
-        }
-        if (file.length() < 50_000L) {
-            file.delete()
-            throw GradleException("Downloaded JetBrainsMono.ttf is unexpectedly small")
-        }
-    }
-}
-
-val downloadBootstraps = tasks.register<DownloadLatestBootstrapTask>("downloadBootstraps") {
-    description = "Downloads the latest official Termux aarch64 bootstrap archive"
-    fallbackVersion.set(fallbackBootstrapVersion)
-    outputFile.set(layout.projectDirectory.file("src/main/cpp/bootstrap-aarch64.zip"))
-}
-
-val downloadJetBrainsMono = tasks.register<DownloadFontTask>("downloadJetBrainsMono") {
-    description = "Downloads JetBrainsMono[wght].ttf into assets/fonts/JetBrainsMono.ttf"
-    fontUrl.set("https://raw.githubusercontent.com/google/fonts/main/ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf")
-    outputFile.set(layout.projectDirectory.file("src/main/assets/fonts/JetBrainsMono.ttf"))
 }
 
 tasks.named<Delete>("clean") {
@@ -197,5 +107,5 @@ tasks.named<Delete>("clean") {
 }
 
 tasks.named("preBuild") {
-    dependsOn(downloadBootstraps, downloadJetBrainsMono)
+    dependsOn(prepareBootstrapAndFont)
 }
