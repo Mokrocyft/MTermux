@@ -3541,9 +3541,9 @@ static std::string createOneShotAskPassEnvCpp(int authType, const std::string& s
     std::string askPath = std::string(TMP_PATH) + "/.ssh_askpass_helper.sh";
     int fd = open(askPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
     if (fd < 0) return "";
-    std::string shBin = std::string(BIN_PATH) + "/sh";
-    if (access(shBin.c_str(), X_OK) != 0) shBin = "/system/bin/sh";
-    std::string script = "#!" + shBin + "\n"
+    // Always use /system/bin/sh for askpass helper to guarantee kernel direct execution
+    // without dynamic linker namespace or W^X restrictions on modern Android
+    std::string script = "#!/system/bin/sh\n"
                          "printf '%s\\n' " + shellEscapeSingleCpp(secret) + "\n";
     writeAllFd(fd, script.data(), script.size());
     close(fd);
@@ -3954,7 +3954,13 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
     if (access(redirectSo.c_str(), R_OK) == 0) {
         fullShellLine += "export LD_PRELOAD=\"" + redirectSo + "\"; ";
     }
-    fullShellLine += askPassPrefix + shellEscapeSingleCpp(sshBin) + " " + sshArgs + " " +
+    std::string sshExec;
+    if (access("/system/bin/linker64", X_OK) == 0) {
+        sshExec = "/system/bin/linker64 " + shellEscapeSingleCpp(sshBin);
+    } else {
+        sshExec = shellEscapeSingleCpp(sshBin);
+    }
+    fullShellLine += askPassPrefix + sshExec + " " + sshArgs + " " +
                      shellEscapeSingleCpp(user + "@" + host) + " " +
                      shellEscapeSingleCpp(remoteSh);
 

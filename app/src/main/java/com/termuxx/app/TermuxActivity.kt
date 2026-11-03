@@ -950,6 +950,9 @@ class TermuxActivity : Activity() {
     }
 
     override fun onDestroy() {
+        if (activeInstance == this) {
+            activeInstance = null
+        }
         onBackInvokedDispatcher.unregisterOnBackInvokedCallback(backCallback)
         nativeRegisterSurface(null)
         if (isFinishing) {
@@ -5712,16 +5715,22 @@ class TermuxActivity : Activity() {
         // Ultra-fast single-pass remote stat via persistent ControlMaster SSH multiplexer
         fun listRemoteSftpEntriesViaCpp23(server: SshServerProfile, remoteDir: String): Pair<String?, List<SftpItemEntry>> {
             val pattern = if (sftpShowHidden) "* .[!.]* ..?*" else "*"
-            val remoteScript = "(cd ${shellEscapeSingle(remoteDir)} 2>/dev/null || cd ~) && pwd && " +
-                "(stat -c '%F\t%s\t%Y\t%A\t%n' $pattern 2>/dev/null || true)"
+            // Robust remote listing with @@PWD@@ sentinel so MOTD/banner output never corrupts the current path,
+            // with dual GNU stat -c and BSD stat -f fallback support
+            val remoteScript = "(cd ${shellEscapeSingle(remoteDir)} 2>/dev/null || cd ~) && printf '@@PWD@@%s\\n' \"\\$PWD\" && " +
+                "(stat -c '%F\\t%s\\t%Y\\t%A\\t%n' $pattern 2>/dev/null || stat -f '%HT\\t%z\\t%m\\t%Sp\\t%N' $pattern 2>/dev/null || true)"
             val (ok, output) = runRemoteSftpViaCpp23(server, remoteScript)
             if (!ok) return output.ifBlank { tr("Не удалось подключиться по SFTP/SSH", "Failed to connect via SFTP/SSH") } to emptyList()
             val lines = output.lines().filter { it.isNotBlank() }
-            val resolvedPwd = lines.firstOrNull { it.trim().startsWith("/") }?.trim() ?: remoteDir
+            val pwdLine = lines.firstOrNull { it.startsWith("@@PWD@@") }
+            val resolvedPwd = pwdLine?.removePrefix("@@PWD@@")?.trim()
+                ?: lines.firstOrNull { it.trim().startsWith("/") }?.trim()
+                ?: remoteDir
             remoteCurrentPath = resolvedPwd
             val items = ArrayList<SftpItemEntry>()
             val q = sftpSearchQuery.trim()
             for (line in lines) {
+                if (line.startsWith("@@PWD@@")) continue
                 val cols = line.split("\t")
                 if (cols.size >= 5) {
                     val fType = cols[0].lowercase()
@@ -6287,14 +6296,57 @@ class TermuxActivity : Activity() {
                 mSheet.addView(hdrRow)
 
                 val actions = ArrayList<Triple<M3Icon, String, () -> Unit>>()
-                if (!item.isDirectory && srv == null) {
+                if (!item.isDirectory) {
                     actions.add(Triple(M3Icon.EDIT, tr("Редактировать текст", "Edit file")) {
                         mDlg.dismiss()
-                        openLocalTextEditorDialog(File(item.path)) {
-                            refreshSftpListInPlace(false)
+                        if (srv == null) {
+                            val f = File(item.path)
+                            val content = try {
+                                if (f.length() <= 512 * 1024) f.readText() else tr("Файл превышает 512 КБ", "File > 512 KB")
+                            } catch (e: Throwable) {
+                                e.message ?: ""
+                            }
+                            openCodeViewerAndEditorSubPage(item.name, item.path, content) { updated ->
+                                try {
+                                    f.writeText(updated)
+                                    refreshSftpListInPlace(false)
+                                } catch (e: Throwable) {
+                                    Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        } else {
+                            Toast.makeText(this@TermuxActivity, tr("Загрузка содержимого…", "Loading content…"), Toast.LENGTH_SHORT).show()
+                            Thread {
+                                val (ok, content) = runRemoteSftpViaCpp23(srv, "head -c 262144 -- ${shellEscapeSingle(item.path)}")
+                                runOnUiThread {
+                                    if (ok) {
+                                        openCodeViewerAndEditorSubPage(item.name, "${srv.label}:${item.path}", content) { updated ->
+                                            Toast.makeText(this@TermuxActivity, tr("Сохранение на сервере…", "Saving to server…"), Toast.LENGTH_SHORT).show()
+                                            Thread {
+                                                val b64 = android.util.Base64.encodeToString(updated.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                                                val (sOk, sErr) = runRemoteSftpViaCpp23(
+                                                    srv,
+                                                    "printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(item.path)}"
+                                                )
+                                                runOnUiThread {
+                                                    if (sOk) {
+                                                        Toast.makeText(this@TermuxActivity, tr("Сохранено на ${srv.label}", "Saved on ${srv.label}"), Toast.LENGTH_SHORT).show()
+                                                        refreshSftpListInPlace(true)
+                                                    } else {
+                                                        Toast.makeText(this@TermuxActivity, "Error: ${sErr.take(120)}", Toast.LENGTH_LONG).show()
+                                                    }
+                                                }
+                                            }.start()
+                                        }
+                                    } else {
+                                        Toast.makeText(this@TermuxActivity, "SSH error: ${content.take(120)}", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }.start()
                         }
                     })
                 }
+
                 if (srv == null) {
                     actions.add(Triple(M3Icon.COPY, tr("Копировать", "Copy")) {
                         fileClipSource = File(item.path)
@@ -6308,44 +6360,55 @@ class TermuxActivity : Activity() {
                         mDlg.dismiss()
                         rebuildClipBanner()
                     })
-                } else if (!item.isDirectory) {
-                    actions.add(Triple(M3Icon.DOWNLOAD, tr("Скачать в Download", "Download to /sdcard/Download")) {
+                }
+
+                if (!item.isDirectory) {
+                    actions.add(Triple(M3Icon.DOWNLOAD, tr("Скачать в Загрузки", "Download to /sdcard/Download")) {
                         mDlg.dismiss()
                         val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                         if (!dlDir.exists()) dlDir.mkdirs()
                         val dst = File(dlDir, item.name)
-                        Toast.makeText(this, tr("Скачивание ${item.name}…", "Downloading ${item.name}…"), Toast.LENGTH_SHORT).show()
-                        Thread {
-                            val (ok, out) = runRemoteSftpViaCpp23(srv, "base64 ${shellEscapeSingle(item.path)}")
-                            runOnUiThread {
-                                if (ok) {
-                                    try {
-                                        val cleanB64 = out.replace("\s".toRegex(), "")
-                                        val bytes = android.util.Base64.decode(cleanB64, android.util.Base64.DEFAULT)
-                                        dst.writeBytes(bytes)
-                                        Toast.makeText(this, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_LONG).show()
-                                    } catch (e: Throwable) {
-                                        Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                                    }
-                                } else {
-                                    Toast.makeText(this, "SSH error: ${out.take(120)}", Toast.LENGTH_LONG).show()
-                                }
+                        if (srv == null) {
+                            try {
+                                File(item.path).copyTo(dst, overwrite = true)
+                                Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_SHORT).show()
+                            } catch (e: Throwable) {
+                                Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                             }
-                        }.start()
+                        } else {
+                            Toast.makeText(this@TermuxActivity, tr("Скачивание ${item.name}…", "Downloading ${item.name}…"), Toast.LENGTH_SHORT).show()
+                            Thread {
+                                val (ok, out) = runRemoteSftpViaCpp23(srv, "base64 -- ${shellEscapeSingle(item.path)}")
+                                runOnUiThread {
+                                    if (ok) {
+                                        try {
+                                            val cleanB64 = out.replace("\\s".toRegex(), "")
+                                            val bytes = android.util.Base64.decode(cleanB64, android.util.Base64.DEFAULT)
+                                            dst.writeBytes(bytes)
+                                            Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_LONG).show()
+                                        } catch (e: Throwable) {
+                                            Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        Toast.makeText(this@TermuxActivity, "SSH error: ${out.take(120)}", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }.start()
+                        }
                     })
                 }
 
                 actions.add(Triple(M3Icon.EDIT, tr("Переименовать", "Rename")) {
                     mDlg.dismiss()
                     val (rDlg, rSheet) = createExpressiveDialog(380)
-                    rSheet.addView(TextView(this).apply {
+                    rSheet.addView(TextView(this@TermuxActivity).apply {
                         text = tr("Переименовать", "Rename")
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.DEFAULT_BOLD
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
                         setPadding(0, 0, 0, dp(8))
                     })
-                    val rEt = EditText(this).apply {
+                    val rEt = EditText(this@TermuxActivity).apply {
                         setText(item.name)
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.MONOSPACE
@@ -6355,7 +6418,7 @@ class TermuxActivity : Activity() {
                         setPadding(dp(12), dp(9), dp(12), dp(9))
                     }
                     rSheet.addView(rEt)
-                    val bRow = LinearLayout(this).apply {
+                    val bRow = LinearLayout(this@TermuxActivity).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.END
                         setPadding(0, dp(12), 0, 0)
@@ -6363,7 +6426,7 @@ class TermuxActivity : Activity() {
                     bRow.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { rDlg.dismiss() })
                     bRow.addView(makeExpressiveChip(tr("Сохранить", "Save"), true) {
                         val newName = rEt.text.toString().trim()
-                        if (newName.isNotEmpty() && newName != item.name) {
+                        if (newName.isNotEmpty() && newName != item.name && !newName.contains("..") && !newName.contains("/")) {
                             if (srv == null) {
                                 val src = File(item.path)
                                 val dst = File(src.parentFile, newName)
@@ -6373,7 +6436,7 @@ class TermuxActivity : Activity() {
                                 val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
                                 val newRemote = if (parentDir == "/") "/$newName" else "$parentDir/$newName"
                                 Thread {
-                                    runRemoteSftpViaCpp23(srv, "mv ${shellEscapeSingle(item.path)} ${shellEscapeSingle(newRemote)}")
+                                    runRemoteSftpViaCpp23(srv, "mv -- ${shellEscapeSingle(item.path)} ${shellEscapeSingle(newRemote)}")
                                     runOnUiThread { refreshSftpListInPlace(true) }
                                 }.start()
                             }
@@ -6400,7 +6463,7 @@ class TermuxActivity : Activity() {
                             refreshSftpListInPlace(false)
                         } else {
                             Thread {
-                                runRemoteSftpViaCpp23(srv, "chmod $octal ${shellEscapeSingle(item.path)}")
+                                runRemoteSftpViaCpp23(srv, "chmod $octal -- ${shellEscapeSingle(item.path)}")
                                 runOnUiThread { refreshSftpListInPlace(true) }
                             }.start()
                         }
@@ -6411,7 +6474,7 @@ class TermuxActivity : Activity() {
                     mDlg.dismiss()
                     val targetDir = if (item.isDirectory) item.path else item.path.substringBeforeLast('/').ifEmpty { "/" }
                     if (srv == null) {
-                        nativeWriteToActive("cd ${shellEscapeSingle(targetDir)}\n".toByteArray(Charsets.UTF_8))
+                        nativeWriteToActive("cd ${shellEscapeSingle(targetDir)}\\n".toByteArray(Charsets.UTF_8))
                         hubDialog.dismiss()
                     } else {
                         connectSshServerInTerminal(srv, customInitialDir = targetDir)
@@ -6426,7 +6489,7 @@ class TermuxActivity : Activity() {
                         refreshSftpListInPlace(false)
                     } else {
                         Thread {
-                            runRemoteSftpViaCpp23(srv, "rm -rf ${shellEscapeSingle(item.path)}")
+                            runRemoteSftpViaCpp23(srv, "rm -rf -- ${shellEscapeSingle(item.path)}")
                             runOnUiThread { refreshSftpListInPlace(true) }
                         }.start()
                     }
@@ -7268,13 +7331,17 @@ class TermuxActivity : Activity() {
                     setOnClickListener {
                         triggerHaptic(0.9f)
                         val n = nameEt.text.toString().trim().trim('/')
-                        if (n.isEmpty()) {
-                            Toast.makeText(this@TermuxActivity, tr("Введите имя", "Enter a name"), Toast.LENGTH_SHORT).show()
+                        if (n.isEmpty() || n.contains("..") || n.contains("\\")) {
+                            Toast.makeText(this@TermuxActivity, tr("Недопустимое имя", "Invalid name"), Toast.LENGTH_SHORT).show()
                             return@setOnClickListener
                         }
                         val isFolder = (createMode == 0)
                         if (srv == null) {
-                            val target = File(localCurrentDir, n)
+                            val target = File(localCurrentDir, n).canonicalFile
+                            if (!target.path.startsWith(localCurrentDir.canonicalPath)) {
+                                Toast.makeText(this@TermuxActivity, tr("Недопустимый путь", "Invalid path"), Toast.LENGTH_SHORT).show()
+                                return@setOnClickListener
+                            }
                             if (isFolder) {
                                 target.mkdirs()
                             } else {
@@ -7292,12 +7359,12 @@ class TermuxActivity : Activity() {
                             cDlg.dismiss()
                             Thread {
                                 if (isFolder) {
-                                    runRemoteSftpViaCpp23(srv, "mkdir -p ${shellEscapeSingle(fullRemote)} && chmod $selectedChmod ${shellEscapeSingle(fullRemote)}")
+                                    runRemoteSftpViaCpp23(srv, "mkdir -p -- ${shellEscapeSingle(fullRemote)} && chmod $selectedChmod -- ${shellEscapeSingle(fullRemote)}")
                                 } else if (initTxt.isEmpty()) {
-                                    runRemoteSftpViaCpp23(srv, "touch ${shellEscapeSingle(fullRemote)} && chmod $selectedChmod ${shellEscapeSingle(fullRemote)}")
+                                    runRemoteSftpViaCpp23(srv, "touch -- ${shellEscapeSingle(fullRemote)} && chmod $selectedChmod -- ${shellEscapeSingle(fullRemote)}")
                                 } else {
                                     val b64 = android.util.Base64.encodeToString(initTxt.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
-                                    runRemoteSftpViaCpp23(srv, "printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(fullRemote)} && chmod $selectedChmod ${shellEscapeSingle(fullRemote)}")
+                                    runRemoteSftpViaCpp23(srv, "printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(fullRemote)} && chmod $selectedChmod -- ${shellEscapeSingle(fullRemote)}")
                                 }
                                 runOnUiThread { refreshSftpListInPlace(true) }
                             }.start()
