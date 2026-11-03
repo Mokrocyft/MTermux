@@ -5297,9 +5297,40 @@ class TermuxActivity : Activity() {
             }
             scroll.addView(listCol)
 
-            val ptrLayout = BakaSuPullToRefreshLayout(this, scroll) {
-                for (s in servers) {
-                    pingServerAsync(s, pingBadgeViews[s.id])
+            val ptrLayout = BakaSuPullToRefreshLayout(this, scroll) { finishPtr ->
+                if (servers.isEmpty()) {
+                    finishPtr()
+                } else {
+                    var remaining = servers.size
+                    for (s in servers) {
+                        val badgeTv = pingBadgeViews[s.id]
+                        badgeTv?.text = tr("Пинг…", "Ping…")
+                        badgeTv?.setTextColor(COLOR_TEXT_DIM)
+                        Thread {
+                            val rtt = nativePingHostMs(s.host, s.port, 2200)
+                            serverPingCacheMs[s.id] = rtt
+                            runOnUiThread {
+                                if (badgeTv != null) {
+                                    if (rtt >= 0) {
+                                        badgeTv.text = "$rtt ${tr("мс", "ms")}"
+                                        val col = when {
+                                            rtt < 85 -> COLOR_PING_GOOD
+                                            rtt < 200 -> COLOR_PING_WARN
+                                            else -> COLOR_ROOT
+                                        }
+                                        badgeTv.setTextColor(col)
+                                    } else {
+                                        badgeTv.text = tr("Не в сети", "Offline")
+                                        badgeTv.setTextColor(COLOR_ROOT)
+                                    }
+                                }
+                                remaining--
+                                if (remaining <= 0) {
+                                    finishPtr()
+                                }
+                            }
+                        }.start()
+                    }
                 }
             }
             contentFrame.addView(
@@ -5714,54 +5745,52 @@ class TermuxActivity : Activity() {
             return out
         }
 
-        // Ultra-fast single-pass remote stat via persistent ControlMaster SSH multiplexer
+        // Ultra-fast single-pass remote SFTP directory listing powered by C++26 nativeListRemoteSftpDir
         fun listRemoteSftpEntriesViaCpp23(server: SshServerProfile, remoteDir: String): Pair<String?, List<SftpItemEntry>> {
-            val pattern = if (sftpShowHidden) "* .[!.]* ..?*" else "*"
-            // Robust remote listing with @@PWD@@ sentinel so MOTD/banner output never corrupts the current path,
-            // with dual GNU stat -c and BSD stat -f fallback support
-            val remoteScript = "(cd ${shellEscapeSingle(remoteDir)} 2>/dev/null || cd ~) && printf '@@PWD@@' && pwd && " +
-                "(stat -c '%F\\t%s\\t%Y\\t%A\\t%n' $pattern 2>/dev/null || stat -f '%HT\\t%z\\t%m\\t%Sp\\t%N' $pattern 2>/dev/null || true)"
-            val (ok, output) = runRemoteSftpViaCpp23(server, remoteScript)
-            if (!ok) return output.ifBlank { tr("Не удалось подключиться по SFTP/SSH", "Failed to connect via SFTP/SSH") } to emptyList()
-            val lines = output.lines().filter { it.isNotBlank() }
-            val pwdLine = lines.firstOrNull { it.startsWith("@@PWD@@") }
-            val resolvedPwd = pwdLine?.removePrefix("@@PWD@@")?.trim()
-                ?: lines.firstOrNull { it.trim().startsWith("/") }?.trim()
-                ?: remoteDir
-            remoteCurrentPath = resolvedPwd
+            val raw = nativeListRemoteSftpDir(
+                server.host,
+                server.port,
+                server.username,
+                server.authType,
+                server.secretOrKeyPath,
+                server.jumpHost,
+                remoteDir,
+                sftpShowHidden,
+                sftpSearchQuery
+            )
+            if (!raw.startsWith("OK\n")) {
+                val errTxt = raw.removePrefix("ERR\n").trim()
+                return errTxt.ifEmpty { tr("Не удалось подключиться по SFTP/SSH", "Failed to connect via SFTP/SSH") } to emptyList()
+            }
+            val lines = raw.removePrefix("OK\n").split("\n")
+            if (lines.isNotEmpty() && lines[0].isNotBlank()) {
+                remoteCurrentPath = lines[0].trim()
+            }
             val items = ArrayList<SftpItemEntry>()
-            val q = sftpSearchQuery.trim()
-            for (line in lines) {
-                if (line.startsWith("@@PWD@@")) continue
-                val cols = line.split("\t")
-                if (cols.size >= 5) {
-                    val fType = cols[0].lowercase()
-                    val isDir = fType.contains("directory") || fType == "d"
-                    val sz = cols[1].trim().toLongOrNull() ?: 0L
-                    val mtSec = cols[2].trim().toLongOrNull() ?: 0L
-                    val pm = cols[3].trim()
-                    val name = cols[4].trim().removePrefix("./")
-                    if (name.isEmpty() || name == "." || name == "..") continue
-                    if (q.isNotEmpty() && !name.contains(q, ignoreCase = true)) continue
-                    val fullP = if (resolvedPwd == "/") "/$name" else "$resolvedPwd/$name"
+            for (i in 1 until lines.size) {
+                val line = lines[i]
+                if (line.isBlank()) continue
+                val parts = line.split("\t")
+                if (parts.size >= 6) {
                     items.add(
                         SftpItemEntry(
-                            name = name,
-                            path = fullP,
-                            isDirectory = isDir,
-                            sizeBytes = sz,
-                            modifiedEpochMs = mtSec * 1000L,
-                            permissions = pm
+                            name = parts[0],
+                            path = parts[1],
+                            isDirectory = parts[2] == "1",
+                            sizeBytes = parts[3].toLongOrNull() ?: 0L,
+                            modifiedEpochMs = parts[4].toLongOrNull() ?: 0L,
+                            permissions = parts[5]
                         )
                     )
                 }
             }
-            items.sortWith(compareBy<SftpItemEntry>({ !it.isDirectory }, { it.name.lowercase() }))
             return null to items
         }
 
-        // Liquid Material 3 Expressive segmented pill animator with leading/trailing edge inertia
-        // Strictly clamped inside [0, innerWidth] so the pill NEVER overflows its container frame!
+        // Liquid Glass Capsule Animator:
+        // Leading edge races ahead while trailing edge lags and snaps with an underdamped liquid spring,
+        // compressing vertical thickness slightly in mid-flight and rebounding like a liquid glass droplet,
+        // while keeping horizontal edges strictly clamped inside [0, innerWidth]!
         fun animateLiquidSegmentedPill(
             pillView: View,
             parentOuter: View,
@@ -5770,7 +5799,6 @@ class TermuxActivity : Activity() {
         ) {
             (pillView.tag as? ValueAnimator)?.cancel()
             pillView.scaleX = 1f
-            pillView.scaleY = 1f
             if (targetTab.width <= 0) return
 
             val innerWidth = (parentOuter.width - parentOuter.paddingLeft - parentOuter.paddingRight)
@@ -5778,8 +5806,10 @@ class TermuxActivity : Activity() {
                 .coerceAtLeast((targetTab.left + targetTab.width).toFloat())
             val endLeft = targetTab.left.toFloat().coerceIn(0f, (innerWidth - targetTab.width).coerceAtLeast(0f))
             val endRight = (endLeft + targetTab.width.toFloat()).coerceIn(endLeft + 1f, innerWidth)
+            val targetW = (endRight - endLeft).coerceAtLeast(1f)
 
             if (!animate || pillView.layoutParams.width <= 0) {
+                pillView.scaleY = 1f
                 pillView.layoutParams = FrameLayout.LayoutParams(targetTab.width, targetTab.height)
                 pillView.translationX = endLeft
                 return
@@ -5789,7 +5819,8 @@ class TermuxActivity : Activity() {
             val startW = pillView.layoutParams.width.toFloat().coerceAtLeast(dpF(24f))
             val startRight = (startLeft + startW).coerceIn(startLeft + 1f, innerWidth)
 
-            if (abs(endLeft - startLeft) < 0.5f && abs((endRight - endLeft) - startW) < 0.5f) {
+            if (abs(endLeft - startLeft) < 0.5f && abs(targetW - startW) < 0.5f) {
+                pillView.scaleY = 1f
                 pillView.layoutParams = FrameLayout.LayoutParams(targetTab.width, targetTab.height)
                 pillView.translationX = endLeft
                 return
@@ -5797,15 +5828,19 @@ class TermuxActivity : Activity() {
 
             val movingRight = endLeft >= startLeft
             val anim = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 250L
+                duration = 320L
                 interpolator = LinearInterpolator()
                 addUpdateListener { va ->
                     val t = (va.animatedValue as Float).coerceIn(0f, 1f)
                     val inv = 1f - t
-                    // Leading edge moves slightly faster than trailing edge, creating natural liquid stretch
-                    // strictly between start and end without ever exceeding [0, innerWidth]!
-                    val leadT = 1f - inv * inv * inv
-                    val trailT = 1f - inv * inv
+                    val leadT = 1f - inv * inv * inv * inv
+                    val trailT = if (t < 0.28f) {
+                        (t / 0.28f) * (t / 0.28f) * 0.18f
+                    } else {
+                        val p = (t - 0.28f) / 0.72f
+                        val spring = 1f - kotlin.math.exp(-4.6f * p) * kotlin.math.cos(4.8f * p)
+                        (0.18f + 0.82f * spring).coerceIn(0f, 1.04f)
+                    }
                     val curLeft: Float
                     val curRight: Float
                     if (movingRight) {
@@ -5817,10 +5852,19 @@ class TermuxActivity : Activity() {
                     }
                     val clampedLeft = curLeft.coerceIn(0f, innerWidth)
                     val clampedRight = curRight.coerceIn(clampedLeft + dpF(16f), innerWidth)
+                    val curW = (clampedRight - clampedLeft).coerceAtLeast(1f)
+
+                    val stretchRatio = (curW / targetW).coerceIn(0.85f, 1.85f)
+                    val settleBounce = if (t > 0.65f) {
+                        val sp = (t - 0.65f) / 0.35f
+                        0.035f * kotlin.math.sin(sp * Math.PI.toFloat())
+                    } else 0f
+                    pillView.scaleY = ((1f / kotlin.math.sqrt(stretchRatio)).coerceIn(0.88f, 1.02f) + settleBounce).coerceIn(0.88f, 1.04f)
+
                     pillView.translationX = clampedLeft
                     val lp = (pillView.layoutParams as? FrameLayout.LayoutParams)
                         ?: FrameLayout.LayoutParams(targetTab.width, targetTab.height)
-                    lp.width = (clampedRight - clampedLeft).roundToInt().coerceAtLeast(1)
+                    lp.width = curW.roundToInt().coerceAtLeast(1)
                     lp.height = targetTab.height
                     pillView.layoutParams = lp
                 }
@@ -5849,7 +5893,9 @@ class TermuxActivity : Activity() {
             fun computeSftpSourceIdx(): Int = when {
                 activeSftpServer != null -> 3
                 localCurrentDir.absolutePath.startsWith(usrDir.absolutePath) -> 1
-                localCurrentDir.absolutePath.startsWith(sdDir.absolutePath) -> 2
+                localCurrentDir.absolutePath.startsWith(sdDir.absolutePath) ||
+                    localCurrentDir.absolutePath.startsWith("/sdcard") ||
+                    localCurrentDir.absolutePath.startsWith("/storage") -> 2
                 else -> 0
             }
 
@@ -5858,8 +5904,6 @@ class TermuxActivity : Activity() {
 
             var currentSftpSourceIdx = computeSftpSourceIdx()
 
-            // 1. Animated Material 3 Segmented Source Group Bar (Home | Usr | Storage | SSH)
-            // with in-place sliding & liquid-morphing active pill indicator (just like Папка | Файл | Скрипт .sh)!
             val sourceBarOuter = FrameLayout(this).apply {
                 background = tonalBg(uiSurfaceLow, dp(16))
                 setPadding(dp(4), dp(4), dp(4), dp(4))
@@ -5873,7 +5917,7 @@ class TermuxActivity : Activity() {
                 }
             }
             val slidingSourcePill = View(this).apply {
-                background = tonalBg(uiAccentContainer, dp(12))
+                background = makeLiquidGlassPillDrawable(uiAccentContainer, dp(12))
                 layoutParams = FrameLayout.LayoutParams(0, 0)
             }
             sourceBarOuter.addView(slidingSourcePill)
@@ -5892,13 +5936,15 @@ class TermuxActivity : Activity() {
             val segIcons = ArrayList<MaterialIconView>()
             val segLabels = ArrayList<TextView>()
 
-            lateinit var rebuildBreadcrumbs: () -> Unit
+            lateinit var rebuildBreadcrumbs: (Boolean) -> Unit
             lateinit var rebuildClipBanner: () -> Unit
-            lateinit var refreshSftpListInPlace: (Boolean) -> Unit
+            lateinit var refreshSftpListInPlace: (Boolean, (() -> Unit)?) -> Unit
             lateinit var openMaterialCreateItemSheet: () -> Unit
             lateinit var openMaterialImportSheet: () -> Unit
 
             fun updateSourceBarSelection(newIdx: Int, animate: Boolean) {
+                val prevIdx = currentSftpSourceIdx
+                val dir = if (newIdx >= prevIdx) 1 else -1
                 currentSftpSourceIdx = newIdx
                 prevSftpSourceIdx = newIdx
                 for (i in 0 until segTabs.size) {
@@ -5913,6 +5959,9 @@ class TermuxActivity : Activity() {
                         segLabels[i].text = "SSH"
                     }
                     if (animate) {
+                        if (isSel && prevIdx != newIdx) {
+                            triggerFolderShakeAnimation(segIcons[i], dir)
+                        }
                         segTabs[i].animate()
                             .scaleX(if (isSel) 1.04f else 1.0f)
                             .scaleY(if (isSel) 1.04f else 1.0f)
@@ -5931,8 +5980,8 @@ class TermuxActivity : Activity() {
             }
 
             val localGroups = listOf(
-                 Quadruple("Home", M3Icon.FOLDER, homeDir, false),
-                Quadruple("Usr", M3Icon.CPU, usrDir, false),
+                Quadruple("Home", M3Icon.FOLDER, homeDir, false),
+                Quadruple("Usr", M3Icon.FOLDER, usrDir, false),
                 Quadruple("Storage", M3Icon.STORAGE, sdDir, true)
             )
             for ((gIdx, grp) in localGroups.withIndex()) {
@@ -5943,7 +5992,7 @@ class TermuxActivity : Activity() {
                     ic,
                     if (isSel) uiAccent else COLOR_TEXT_DIM,
                     15.5f,
-                    2.0f
+                    1.95f
                 ).apply {
                     layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply {
                         marginEnd = dp(4)
@@ -5973,25 +6022,21 @@ class TermuxActivity : Activity() {
                                 activeSftpServer = null
                                 localCurrentDir = dir
                                 updateSourceBarSelection(gIdx, animate = true)
-                                rebuildBreadcrumbs()
+                                rebuildBreadcrumbs(true)
                                 rebuildClipBanner()
-                                refreshSftpListInPlace(false)
+                                refreshSftpListInPlace(false, null)
+                            } else {
+                                triggerFolderShakeAnimation(icView, 1)
                             }
                         }
                         if (requiresPerm && !hasAllFilesAccessPermission() && !hasStandardStoragePermission()) {
                             showStoragePermissionsModal {
-                                if (dir.exists() && dir.canRead()) switchToDir()
+                                switchToDir()
                             }
                             return@setOnClickListener
                         }
                         if (!dir.exists()) dir.mkdirs()
-                        if (dir.exists() && dir.canRead()) {
-                            switchToDir()
-                        } else {
-                            showStoragePermissionsModal {
-                                if (dir.exists() && dir.canRead()) switchToDir()
-                            }
-                        }
+                        switchToDir()
                     }
                 }
                 segTabs.add(segTab)
@@ -6007,7 +6052,7 @@ class TermuxActivity : Activity() {
                     M3Icon.SERVER,
                     if (isRemoteSel) uiAccent else COLOR_TEXT_DIM,
                     15.5f,
-                    2.0f
+                    1.6f
                 ).apply {
                     layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply {
                         marginEnd = dp(4)
@@ -6036,9 +6081,9 @@ class TermuxActivity : Activity() {
                             activeSftpServer = srv
                             remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
                             updateSourceBarSelection(3, animate = true)
-                            rebuildBreadcrumbs()
+                            rebuildBreadcrumbs(true)
                             rebuildClipBanner()
-                            refreshSftpListInPlace(false)
+                            refreshSftpListInPlace(false, null)
                         }
                         if (savedServers.size == 1 && activeSftpServer == null) {
                             connectToSrv(savedServers[0])
@@ -6083,12 +6128,11 @@ class TermuxActivity : Activity() {
             })
             mainSftpCol.addView(sourceBarOuter)
 
-            // 2. Material 3 Path Breadcrumbs (updated in-place when switching folders/sources)
             val (bcScroll, bcRow) = makeHorizontalChipRow()
             bcScroll.setPadding(dp(14), dp(4), dp(14), dp(6))
             mainSftpCol.addView(bcScroll)
 
-            rebuildBreadcrumbs = {
+            rebuildBreadcrumbs = { animateChips ->
                 bcRow.removeAllViews()
                 val activePathStr = currentActivePathStr()
                 val parts = activePathStr.split("/").filter { it.isNotEmpty() }
@@ -6102,12 +6146,22 @@ class TermuxActivity : Activity() {
                 for ((idx, seg) in segments.withIndex()) {
                     val isLast = (idx == segments.lastIndex)
                     if (idx > 0) {
-                        bcRow.addView(TextView(this).apply {
+                        val sepTv = TextView(this).apply {
                             text = "›"
                             setTextColor(COLOR_TEXT_DIM)
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
                             setPadding(dp(4), 0, dp(4), 0)
-                        })
+                        }
+                        if (animateChips) {
+                            sepTv.alpha = 0f
+                            sepTv.animate()
+                                .alpha(1f)
+                                .setStartDelay((idx * 18L).coerceAtMost(90L))
+                                .setDuration(200L)
+                                .setInterpolator(aosp17SpatialInterpolator)
+                                .start()
+                        }
+                        bcRow.addView(sepTv)
                     }
                     val segChip = TextView(this).apply {
                         text = seg.first
@@ -6115,13 +6169,28 @@ class TermuxActivity : Activity() {
                         typeface = if (isLast) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         if (isLast) {
-                            setTextColor(uiAccent)
-                            background = tonalBg(uiAccentContainer, dp(10))
+                            setTextColor(uiOnAccentContainer)
+                            background = makeLiquidGlassPillDrawable(uiAccentContainer, dp(10))
                             setPadding(dp(12), dp(5), dp(12), dp(5))
                         } else {
                             setTextColor(COLOR_TEXT)
                             background = tonalBg(uiSurfaceContainer, dp(10))
                             setPadding(dp(10), dp(5), dp(10), dp(5))
+                        }
+                        if (animateChips) {
+                            alpha = 0f
+                            translationY = dpF(6f)
+                            scaleX = if (isLast) 0.88f else 0.94f
+                            scaleY = if (isLast) 0.88f else 0.94f
+                            animate()
+                                .alpha(1f)
+                                .translationY(0f)
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .setStartDelay((idx * 22L).coerceAtMost(110L))
+                                .setDuration(240L)
+                                .setInterpolator(aosp17SpatialInterpolator)
+                                .start()
                         }
                         attachSmoothPressAnimation(this, 0.94f)
                         setOnClickListener {
@@ -6129,7 +6198,7 @@ class TermuxActivity : Activity() {
                             if (isLast) {
                                 val (pDlg, pSheet) = createExpressiveDialog(390)
                                 pSheet.addView(TextView(this@TermuxActivity).apply {
-                                    text = tr("Перейти по пути", "Go to path")
+                                    text = tr("Перейти по пути (поддерживается root /)", "Go to path (supports root /)")
                                     setTextColor(COLOR_TEXT_BRIGHT)
                                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
                                     typeface = Typeface.DEFAULT_BOLD
@@ -6156,33 +6225,29 @@ class TermuxActivity : Activity() {
                                     if (target.isNotEmpty()) {
                                         sftpTransitionDir = 1
                                         if (activeSftpServer == null) {
-                                            val f = File(target)
-                                            if (f.exists() && f.isDirectory) localCurrentDir = f
+                                            localCurrentDir = File(target)
                                         } else {
                                             remoteCurrentPath = target
                                         }
                                         updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
-                                        rebuildBreadcrumbs()
-                                        refreshSftpListInPlace(false)
+                                        rebuildBreadcrumbs(true)
+                                        refreshSftpListInPlace(false, null)
                                     }
                                     pDlg.dismiss()
                                 })
                                 pSheet.addView(bRow)
                                 pDlg.show()
                             } else if (activeSftpServer == null) {
-                                val targetDir = File(seg.second)
-                                if (targetDir.exists() && targetDir.canRead()) {
-                                    sftpTransitionDir = -1
-                                    localCurrentDir = targetDir
-                                    updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
-                                    rebuildBreadcrumbs()
-                                    refreshSftpListInPlace(false)
-                                }
+                                sftpTransitionDir = -1
+                                localCurrentDir = File(seg.second)
+                                updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
+                                rebuildBreadcrumbs(true)
+                                refreshSftpListInPlace(false, null)
                             } else {
                                 sftpTransitionDir = -1
                                 remoteCurrentPath = seg.second
-                                rebuildBreadcrumbs()
-                                refreshSftpListInPlace(false)
+                                rebuildBreadcrumbs(true)
+                                refreshSftpListInPlace(false, null)
                             }
                         }
                     }
@@ -6197,21 +6262,33 @@ class TermuxActivity : Activity() {
             rebuildClipBanner = {
                 clipBannerHolder.removeAllViews()
                 val clipFile = fileClipSource
-                if (activeSftpServer == null && clipFile != null && clipFile.exists()) {
+                if (activeSftpServer == null && clipFile != null) {
                     val clipBanner = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(14), dp(4), dp(14), dp(4))
                     }
                     clipBanner.addView(makeExpressiveChip(tr("Вставить «${clipFile.name}»", "Paste '${clipFile.name}'"), true) {
+                        val dst = File(localCurrentDir, clipFile.name)
                         try {
-                            val dst = File(localCurrentDir, clipFile.name)
-                            if (clipFile.isDirectory) clipFile.copyRecursively(dst, overwrite = true)
-                            else clipFile.copyTo(dst, overwrite = true)
-                            if (fileClipIsMove) clipFile.deleteRecursively()
-                            fileClipSource = null
-                            rebuildClipBanner()
-                            refreshSftpListInPlace(false)
+                            if (clipFile.exists() && localCurrentDir.canWrite()) {
+                                if (clipFile.isDirectory) clipFile.copyRecursively(dst, overwrite = true)
+                                else clipFile.copyTo(dst, overwrite = true)
+                                if (fileClipIsMove) clipFile.deleteRecursively()
+                                fileClipSource = null
+                                rebuildClipBanner()
+                                refreshSftpListInPlace(false, null)
+                            } else {
+                                val op = if (fileClipIsMove) "mv -f" else "cp -rf"
+                                Thread {
+                                    nativeExecLocalRootCmd("$op -- ${shellEscapeSingle(clipFile.absolutePath)} ${shellEscapeSingle(dst.absolutePath)}")
+                                    runOnUiThread {
+                                        fileClipSource = null
+                                        rebuildClipBanner()
+                                        refreshSftpListInPlace(false, null)
+                                    }
+                                }.start()
+                            }
                         } catch (e: Throwable) {
                             Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                         }
@@ -6237,8 +6314,8 @@ class TermuxActivity : Activity() {
             }
             listScroll.addView(rowsCol)
 
-            val ptrSftp = BakaSuPullToRefreshLayout(this, listScroll) {
-                refreshSftpListInPlace(true)
+            val ptrSftp = BakaSuPullToRefreshLayout(this, listScroll) { finishPtr ->
+                refreshSftpListInPlace(true, finishPtr)
             }.apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -6256,26 +6333,29 @@ class TermuxActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(2), 0, dp(2), dp(10))
                 }
-                hdrRow.addView(
-                    FrameLayout(this).apply {
-                        background = tonalBg(
-                            if (item.isDirectory) uiAccentContainer else uiSurfaceLow,
-                            dp(12)
-                        )
-                        layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
-                            marginEnd = dp(12)
-                        }
-                        addView(
-                            MaterialIconView(
-                                this@TermuxActivity,
-                                if (item.isDirectory) M3Icon.FOLDER else M3Icon.FILE,
-                                if (item.isDirectory) uiAccent else COLOR_TEXT_BRIGHT,
-                                21f,
-                                2.0f
-                            )
-                        )
+                val hdrIconBadge = FrameLayout(this).apply {
+                    background = tonalBg(
+                        if (item.isDirectory) uiAccentContainer else uiSurfaceLow,
+                        dp(12)
+                    )
+                    layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                        marginEnd = dp(12)
                     }
-                )
+                    addView(
+                        MaterialIconView(
+                            this@TermuxActivity,
+                            if (item.isDirectory) M3Icon.FOLDER else M3Icon.FILE,
+                            if (item.isDirectory) uiAccent else COLOR_TEXT_BRIGHT,
+                            21f,
+                            2.0f
+                        )
+                    )
+                }
+                hdrRow.addView(hdrIconBadge)
+                if (item.isDirectory) {
+                    hdrIconBadge.post { triggerFolderShakeAnimation(hdrIconBadge, 1) }
+                }
+
                 val hdrCol = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -6303,18 +6383,42 @@ class TermuxActivity : Activity() {
                         mDlg.dismiss()
                         if (srv == null) {
                             val f = File(item.path)
-                            val content = try {
-                                if (f.length() <= 512 * 1024) f.readText() else tr("Файл превышает 512 КБ", "File > 512 KB")
-                            } catch (e: Throwable) {
-                                e.message ?: ""
-                            }
-                            openCodeViewerAndEditorSubPage(item.name, item.path, content) { updated ->
-                                try {
-                                    f.writeText(updated)
-                                    refreshSftpListInPlace(false)
+                            if (f.canRead()) {
+                                val content = try {
+                                    if (f.length() <= 512 * 1024) f.readText() else tr("Файл превышает 512 КБ", "File > 512 KB")
                                 } catch (e: Throwable) {
-                                    Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    e.message ?: ""
                                 }
+                                openCodeViewerAndEditorSubPage(item.name, item.path, content) { updated ->
+                                    if (f.canWrite()) {
+                                        try {
+                                            f.writeText(updated)
+                                            refreshSftpListInPlace(false, null)
+                                        } catch (e: Throwable) {
+                                            Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        Thread {
+                                            val b64 = android.util.Base64.encodeToString(updated.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                                            nativeExecLocalRootCmd("printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(item.path)}")
+                                            runOnUiThread { refreshSftpListInPlace(false, null) }
+                                        }.start()
+                                    }
+                                }
+                            } else {
+                                Thread {
+                                    val rawRes = nativeExecLocalRootCmd("head -c 262144 -- ${shellEscapeSingle(item.path)}")
+                                    val content = rawRes.removePrefix("OK\n").removePrefix("ERR\n")
+                                    runOnUiThread {
+                                        openCodeViewerAndEditorSubPage(item.name, item.path, content) { updated ->
+                                            Thread {
+                                                val b64 = android.util.Base64.encodeToString(updated.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                                                nativeExecLocalRootCmd("printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(item.path)}")
+                                                runOnUiThread { refreshSftpListInPlace(false, null) }
+                                            }.start()
+                                        }
+                                    }
+                                }.start()
                             }
                         } else {
                             Toast.makeText(this@TermuxActivity, tr("Загрузка содержимого…", "Loading content…"), Toast.LENGTH_SHORT).show()
@@ -6333,7 +6437,7 @@ class TermuxActivity : Activity() {
                                                 runOnUiThread {
                                                     if (sOk) {
                                                         Toast.makeText(this@TermuxActivity, tr("Сохранено на ${srv.label}", "Saved on ${srv.label}"), Toast.LENGTH_SHORT).show()
-                                                        refreshSftpListInPlace(true)
+                                                        refreshSftpListInPlace(true, null)
                                                     } else {
                                                         Toast.makeText(this@TermuxActivity, "Error: ${sErr.take(120)}", Toast.LENGTH_LONG).show()
                                                     }
@@ -6372,8 +6476,18 @@ class TermuxActivity : Activity() {
                         val dst = File(dlDir, item.name)
                         if (srv == null) {
                             try {
-                                File(item.path).copyTo(dst, overwrite = true)
-                                Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_SHORT).show()
+                                val src = File(item.path)
+                                if (src.canRead()) {
+                                    src.copyTo(dst, overwrite = true)
+                                    Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Thread {
+                                        nativeExecLocalRootCmd("cp -f -- ${shellEscapeSingle(item.path)} ${shellEscapeSingle(dst.absolutePath)}")
+                                        runOnUiThread {
+                                            Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_SHORT).show()
+                                        }
+                                    }.start()
+                                }
                             } catch (e: Throwable) {
                                 Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                             }
@@ -6429,17 +6543,23 @@ class TermuxActivity : Activity() {
                     bRow.addView(makeExpressiveChip(tr("Сохранить", "Save"), true) {
                         val newName = rEt.text.toString().trim()
                         if (newName.isNotEmpty() && newName != item.name && !newName.contains("..") && !newName.contains("/")) {
+                            val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
+                            val newTarget = if (parentDir == "/") "/$newName" else "$parentDir/$newName"
                             if (srv == null) {
                                 val src = File(item.path)
-                                val dst = File(src.parentFile, newName)
-                                src.renameTo(dst)
-                                refreshSftpListInPlace(false)
+                                val dst = File(newTarget)
+                                if (src.renameTo(dst)) {
+                                    refreshSftpListInPlace(false, null)
+                                } else {
+                                    Thread {
+                                        nativeExecLocalRootCmd("mv -f -- ${shellEscapeSingle(item.path)} ${shellEscapeSingle(newTarget)}")
+                                        runOnUiThread { refreshSftpListInPlace(false, null) }
+                                    }.start()
+                                }
                             } else {
-                                val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
-                                val newRemote = if (parentDir == "/") "/$newName" else "$parentDir/$newName"
                                 Thread {
-                                    runRemoteSftpViaCpp23(srv, "mv -- ${shellEscapeSingle(item.path)} ${shellEscapeSingle(newRemote)}")
-                                    runOnUiThread { refreshSftpListInPlace(true) }
+                                    runRemoteSftpViaCpp23(srv, "mv -- ${shellEscapeSingle(item.path)} ${shellEscapeSingle(newTarget)}")
+                                    runOnUiThread { refreshSftpListInPlace(true, null) }
                                 }.start()
                             }
                         }
@@ -6459,14 +6579,21 @@ class TermuxActivity : Activity() {
                     ) { chosen ->
                         val octal = modes[chosen].substringBefore(' ')
                         if (srv == null) {
-                            try {
-                                Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", octal, item.path)).waitFor()
-                            } catch (_: Throwable) {}
-                            refreshSftpListInPlace(false)
+                            Thread {
+                                try {
+                                    val p = Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", octal, item.path))
+                                    if (p.waitFor() != 0) {
+                                        nativeExecLocalRootCmd("chmod $octal -- ${shellEscapeSingle(item.path)}")
+                                    }
+                                } catch (_: Throwable) {
+                                    nativeExecLocalRootCmd("chmod $octal -- ${shellEscapeSingle(item.path)}")
+                                }
+                                runOnUiThread { refreshSftpListInPlace(false, null) }
+                            }.start()
                         } else {
                             Thread {
                                 runRemoteSftpViaCpp23(srv, "chmod $octal -- ${shellEscapeSingle(item.path)}")
-                                runOnUiThread { refreshSftpListInPlace(true) }
+                                runOnUiThread { refreshSftpListInPlace(true, null) }
                             }.start()
                         }
                     }
@@ -6492,12 +6619,19 @@ class TermuxActivity : Activity() {
                 actions.add(Triple(M3Icon.TRASH, tr("Удалить", "Delete")) {
                     mDlg.dismiss()
                     if (srv == null) {
-                        File(item.path).deleteRecursively()
-                        refreshSftpListInPlace(false)
+                        val f = File(item.path)
+                        if (f.deleteRecursively()) {
+                            refreshSftpListInPlace(false, null)
+                        } else {
+                            Thread {
+                                nativeExecLocalRootCmd("rm -rf -- ${shellEscapeSingle(item.path)}")
+                                runOnUiThread { refreshSftpListInPlace(false, null) }
+                            }.start()
+                        }
                     } else {
                         Thread {
                             runRemoteSftpViaCpp23(srv, "rm -rf -- ${shellEscapeSingle(item.path)}")
-                            runOnUiThread { refreshSftpListInPlace(true) }
+                            runOnUiThread { refreshSftpListInPlace(true, null) }
                         }.start()
                     }
                 })
@@ -6556,15 +6690,16 @@ class TermuxActivity : Activity() {
                 val srv = activeSftpServer
                 val activePathStr = currentActivePathStr()
                 val hasParentRow = (activePathStr != "/" && sftpSearchQuery.isBlank())
+                val animateDir = sftpTransitionDir
                 rowsCol.removeAllViews()
-                if (sftpTransitionDir != 0) {
-                    val forward = sftpTransitionDir > 0
+                if (animateDir != 0) {
+                    val forward = animateDir > 0
                     sftpTransitionDir = 0
-                    val shiftPx = if (forward) dpF(28f) else -dpF(28f)
+                    val shiftPx = if (forward) dpF(24f) else -dpF(24f)
                     rowsCol.alpha = 0f
                     rowsCol.translationX = shiftPx
-                    rowsCol.scaleX = 0.975f
-                    rowsCol.scaleY = 0.975f
+                    rowsCol.scaleX = 0.98f
+                    rowsCol.scaleY = 0.98f
                     rowsCol.post { ensureCenteredPivot(rowsCol) }
                     rowsCol.animate()
                         .alpha(1f)
@@ -6574,19 +6709,18 @@ class TermuxActivity : Activity() {
                         .setDuration(240L)
                         .setInterpolator(aosp17SpatialInterpolator)
                         .start()
-                    bcRow.alpha = 0.35f
-                    bcRow.translationX = shiftPx * 0.5f
-                    bcRow.animate()
-                        .alpha(1f)
-                        .translationX(0f)
-                        .setDuration(220L)
-                        .setInterpolator(aosp17SpatialInterpolator)
-                        .start()
                 }
                 val totalCards = entries.size + (if (hasParentRow) 1 else 0)
                 var currentCardIdx = 0
 
                 if (hasParentRow) {
+                    val upIconBadge = FrameLayout(this).apply {
+                        background = tonalBg(uiAccentContainer, dp(11))
+                        layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
+                            marginEnd = dp(12)
+                        }
+                        addView(MaterialIconView(this@TermuxActivity, M3Icon.FOLDER, uiAccent, 21f, 2.0f))
+                    }
                     val upCard = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
@@ -6601,32 +6735,22 @@ class TermuxActivity : Activity() {
                         attachSmoothPressAnimation(this, 0.98f)
                         setOnClickListener {
                             triggerHaptic(0.75f)
+                            triggerFolderShakeAnimation(upIconBadge, -1)
                             val parentPath = activePathStr.substringBeforeLast('/').ifEmpty { "/" }
                             sftpTransitionDir = -1
                             if (srv == null) {
-                                val pf = File(parentPath)
-                                if (pf.exists() && pf.canRead()) {
-                                    localCurrentDir = pf
-                                    updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
-                                    rebuildBreadcrumbs()
-                                    refreshSftpListInPlace(false)
-                                }
+                                localCurrentDir = File(parentPath)
+                                updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
+                                rebuildBreadcrumbs(true)
+                                refreshSftpListInPlace(false, null)
                             } else {
                                 remoteCurrentPath = parentPath
-                                rebuildBreadcrumbs()
-                                refreshSftpListInPlace(false)
+                                rebuildBreadcrumbs(true)
+                                refreshSftpListInPlace(false, null)
                             }
                         }
                     }
-                    upCard.addView(
-                        FrameLayout(this).apply {
-                            background = tonalBg(uiAccentContainer, dp(11))
-                            layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
-                                marginEnd = dp(12)
-                            }
-                            addView(MaterialIconView(this@TermuxActivity, M3Icon.FOLDER, uiAccent, 21f, 2.0f))
-                        }
-                    )
+                    upCard.addView(upIconBadge)
                     val upCol = LinearLayout(this).apply {
                         orientation = LinearLayout.VERTICAL
                         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -6665,7 +6789,32 @@ class TermuxActivity : Activity() {
                         setPadding(dp(20), dp(48), dp(20), dp(48))
                     })
                 } else {
+                    var animatedFolderCount = 0
                     for (item in entries) {
+                        val iconType = when {
+                            !item.isDirectory -> M3Icon.FILE
+                            item.isExpanded -> M3Icon.FOLDER_OPEN
+                            else -> M3Icon.FOLDER
+                        }
+                        val iconTint = if (item.isDirectory) uiAccent else COLOR_TEXT_BRIGHT
+                        val itemIconBadge = FrameLayout(this).apply {
+                            background = tonalBg(
+                                if (item.isDirectory) uiAccentContainer else uiSurfaceContainer,
+                                dp(11)
+                            )
+                            layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
+                                marginEnd = dp(12)
+                            }
+                            addView(MaterialIconView(this@TermuxActivity, iconType, iconTint, 20.5f, 2.0f))
+                        }
+                        if (animateDir != 0 && item.isDirectory && animatedFolderCount < 8) {
+                            animatedFolderCount++
+                            val delayMs = animatedFolderCount * 18L
+                            itemIconBadge.postDelayed({
+                                triggerFolderShakeAnimation(itemIconBadge, animateDir)
+                            }, delayMs)
+                        }
+
                         val row = LinearLayout(this).apply {
                             orientation = LinearLayout.HORIZONTAL
                             gravity = Gravity.CENTER_VERTICAL
@@ -6681,27 +6830,25 @@ class TermuxActivity : Activity() {
                             setOnClickListener {
                                 triggerHaptic(0.75f)
                                 if (item.isDirectory) {
+                                    triggerFolderShakeAnimation(itemIconBadge, 1)
                                     if (srv == null && sftpTreeMode) {
                                         if (expandedTreePaths.contains(item.path)) {
                                             expandedTreePaths.remove(item.path)
                                         } else {
                                             expandedTreePaths.add(item.path)
                                         }
-                                        refreshSftpListInPlace(false)
+                                        refreshSftpListInPlace(false, null)
                                     } else if (srv == null) {
-                                        val f = File(item.path)
-                                        if (f.canRead()) {
-                                            sftpTransitionDir = 1
-                                            localCurrentDir = f
-                                            updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
-                                            rebuildBreadcrumbs()
-                                            refreshSftpListInPlace(false)
-                                        }
+                                        sftpTransitionDir = 1
+                                        localCurrentDir = File(item.path)
+                                        updateSourceBarSelection(computeSftpSourceIdx(), animate = true)
+                                        rebuildBreadcrumbs(true)
+                                        refreshSftpListInPlace(false, null)
                                     } else {
                                         sftpTransitionDir = 1
                                         remoteCurrentPath = item.path
-                                        rebuildBreadcrumbs()
-                                        refreshSftpListInPlace(false)
+                                        rebuildBreadcrumbs(true)
+                                        refreshSftpListInPlace(false, null)
                                     }
                                 } else {
                                     openEntryMenu(item)
@@ -6731,24 +6878,7 @@ class TermuxActivity : Activity() {
                             )
                         }
 
-                        val iconType = when {
-                            !item.isDirectory -> M3Icon.FILE
-                            item.isExpanded -> M3Icon.FOLDER_OPEN
-                            else -> M3Icon.FOLDER
-                        }
-                        val iconTint = if (item.isDirectory) uiAccent else COLOR_TEXT_BRIGHT
-                        row.addView(
-                            FrameLayout(this).apply {
-                                background = tonalBg(
-                                    if (item.isDirectory) uiAccentContainer else uiSurfaceContainer,
-                                    dp(11)
-                                )
-                                layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
-                                    marginEnd = dp(12)
-                                }
-                                addView(MaterialIconView(this@TermuxActivity, iconType, iconTint, 20.5f, 2.0f))
-                            }
-                        )
+                        row.addView(itemIconBadge)
 
                         val metaCol = LinearLayout(this).apply {
                             orientation = LinearLayout.VERTICAL
@@ -6806,79 +6936,97 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            refreshSftpListInPlace = { bypassCache ->
+            refreshSftpListInPlace = { bypassCache, onDone ->
                 val srv = activeSftpServer
                 if (srv == null) {
-                    populateEntriesIntoRowsCol(null, listLocalEntriesViaCpp23(localCurrentDir, 0))
+                    val directRead = localCurrentDir.exists() && localCurrentDir.canRead()
+                    if (directRead) {
+                        populateEntriesIntoRowsCol(null, listLocalEntriesViaCpp23(localCurrentDir, 0))
+                        onDone?.invoke()
+                    } else {
+                        Thread {
+                            val entries = listLocalEntriesViaCpp23(localCurrentDir, 0)
+                            runOnUiThread {
+                                if (activeTab == 1 && activeSftpServer == null) {
+                                    populateEntriesIntoRowsCol(null, entries)
+                                }
+                                onDone?.invoke()
+                            }
+                        }.start()
+                    }
                 } else {
                     val cacheKey = "${srv.id}:${remoteCurrentPath}:${sftpShowHidden}:${sftpSearchQuery}"
                     val cached = if (!bypassCache) sftpRemoteDirCache[cacheKey] else null
                     if (cached != null) {
                         populateEntriesIntoRowsCol(null, cached)
+                        onDone?.invoke()
                     } else {
-                        rowsCol.removeAllViews()
-                        val loadingWrap = LinearLayout(this).apply {
-                            orientation = LinearLayout.VERTICAL
-                            gravity = Gravity.CENTER
-                            setPadding(dp(20), dp(42), dp(20), dp(42))
-                        }
-                        val morphBadge = FrameLayout(this).apply {
-                            background = GradientDrawable().apply {
-                                shape = GradientDrawable.OVAL
-                                setColor(uiAccentContainer)
+                        var loadingAnim: ValueAnimator? = null
+                        if (onDone == null) {
+                            rowsCol.removeAllViews()
+                            val loadingWrap = LinearLayout(this).apply {
+                                orientation = LinearLayout.VERTICAL
+                                gravity = Gravity.CENTER
+                                setPadding(dp(20), dp(42), dp(20), dp(42))
                             }
-                            elevation = dpF(4f)
-                            layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply {
-                                bottomMargin = dp(10)
+                            val morphBadge = FrameLayout(this).apply {
+                                background = GradientDrawable().apply {
+                                    shape = GradientDrawable.OVAL
+                                    setColor(uiAccentContainer)
+                                }
+                                elevation = dpF(4f)
+                                layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+                                    bottomMargin = dp(10)
+                                }
                             }
+                            val morphView = BakaSuMorphingIndicatorView(this)
+                            morphBadge.addView(morphView, FrameLayout.LayoutParams(dp(38), dp(38), Gravity.CENTER))
+                            loadingAnim = ValueAnimator.ofFloat(0f, 6f).apply {
+                                duration = 3900L
+                                repeatCount = ValueAnimator.INFINITE
+                                interpolator = LinearInterpolator()
+                                addUpdateListener { morphView.morphPhase = it.animatedValue as Float }
+                                start()
+                            }
+                            loadingWrap.addView(morphBadge)
+                            loadingWrap.addView(TextView(this).apply {
+                                text = tr("Загрузка каталога SFTP…", "Loading SFTP directory…")
+                                setTextColor(COLOR_TEXT_DIM)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                            })
+                            rowsCol.addView(loadingWrap)
                         }
-                        val morphView = BakaSuMorphingIndicatorView(this)
-                        morphBadge.addView(morphView, FrameLayout.LayoutParams(dp(38), dp(38), Gravity.CENTER))
-                        val loadingAnim = ValueAnimator.ofFloat(0f, 7f).apply {
-                            duration = 4550L
-                            repeatCount = ValueAnimator.INFINITE
-                            interpolator = LinearInterpolator()
-                            addUpdateListener { morphView.morphPhase = it.animatedValue as Float }
-                            start()
-                        }
-                        loadingWrap.addView(morphBadge)
-                        loadingWrap.addView(TextView(this).apply {
-                            text = tr("Загрузка каталога SFTP…", "Loading SFTP directory…")
-                            setTextColor(COLOR_TEXT_DIM)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                        })
-                        rowsCol.addView(loadingWrap)
 
                         Thread {
+                            val prevPath = remoteCurrentPath
                             val (err, remoteEntries) = listRemoteSftpEntriesViaCpp23(srv, remoteCurrentPath)
                             if (err == null) {
                                 sftpRemoteDirCache[cacheKey] = remoteEntries
                             }
                             runOnUiThread {
-                                loadingAnim.cancel()
+                                loadingAnim?.cancel()
                                 if (activeTab == 1 && activeSftpServer?.id == srv.id) {
+                                    if (remoteCurrentPath != prevPath) {
+                                        rebuildBreadcrumbs(true)
+                                    }
                                     populateEntriesIntoRowsCol(err, remoteEntries)
                                 }
+                                onDone?.invoke()
                             }
                         }.start()
                     }
                 }
             }
 
-            rebuildBreadcrumbs()
+            rebuildBreadcrumbs(false)
             rebuildClipBanner()
-            refreshSftpListInPlace(forceRemoteRefresh)
+            refreshSftpListInPlace(forceRemoteRefresh, null)
 
-            // ================================================================
-            // Material Design 3 Expressive Create Folder / File / Script Sheet
-            // ================================================================
             openMaterialCreateItemSheet = {
                 val srv = activeSftpServer
                 val activePathStr = currentActivePathStr()
                 val (cDlg, cSheet) = createExpressiveDialog(430)
-                // Note: Do NOT attach LayoutTransition to cSheet so PhoneWindow wraps height synchronously
-                // without ever clipping the bottom buttons or leaving empty space!
-                var createMode = 0 // 0 = Folder, 1 = File, 2 = Bash Script (.sh)
+                var createMode = 0
                 var selectedChmod = "755"
 
                 val heroBadge = FrameLayout(this).apply {
@@ -6921,7 +7069,6 @@ class TermuxActivity : Activity() {
                 }
                 cSheet.addView(hdrPathChip)
 
-                // Segmented M3 Type Selector Bar (Папка | Файл | Скрипт .sh) with Clamped Liquid Pill Animation
                 val segBarOuter = FrameLayout(this).apply {
                     background = tonalBg(uiSurfaceLow, dp(16))
                     setPadding(dp(4), dp(4), dp(4), dp(4))
@@ -6935,7 +7082,7 @@ class TermuxActivity : Activity() {
                     }
                 }
                 val segIndicatorPill = View(this).apply {
-                    background = tonalBg(uiAccentContainer, dp(12))
+                    background = makeLiquidGlassPillDrawable(uiAccentContainer, dp(12))
                     layoutParams = FrameLayout.LayoutParams(0, 0)
                 }
                 segBarOuter.addView(segIndicatorPill)
@@ -6951,7 +7098,6 @@ class TermuxActivity : Activity() {
                 segBarOuter.addView(segBarRow)
                 cSheet.addView(segBarOuter)
 
-                // M3 Filled Input Container for Name
                 val nameBox = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     background = tonalBg(uiSurfaceLow, dp(18))
@@ -6983,7 +7129,6 @@ class TermuxActivity : Activity() {
                 nameBox.addView(nameEt)
                 cSheet.addView(nameBox)
 
-                // Optional File Content Container
                 val contentBox = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     background = tonalBg(uiSurfaceLow, dp(18))
@@ -7017,7 +7162,6 @@ class TermuxActivity : Activity() {
                 contentBox.addView(contentEt)
                 cSheet.addView(contentBox)
 
-                // Segmented Chmod Selector Bar with Clamped Liquid Pill Animation
                 val chmodBarOuter = FrameLayout(this).apply {
                     background = tonalBg(uiSurfaceLow, dp(14))
                     setPadding(dp(4), dp(4), dp(4), dp(4))
@@ -7031,7 +7175,7 @@ class TermuxActivity : Activity() {
                     }
                 }
                 val chmodIndicatorPill = View(this).apply {
-                    background = tonalBg(uiAccentContainer, dp(10))
+                    background = makeLiquidGlassPillDrawable(uiAccentContainer, dp(10))
                     layoutParams = FrameLayout.LayoutParams(0, 0)
                 }
                 chmodBarOuter.addView(chmodIndicatorPill)
@@ -7121,16 +7265,7 @@ class TermuxActivity : Activity() {
                     heroIcon.invalidate()
 
                     if (animate && prevMode != newMode) {
-                        heroBadge.scaleX = 0.76f
-                        heroBadge.scaleY = 0.76f
-                        heroBadge.rotation = dir * -12f
-                        heroBadge.animate()
-                            .scaleX(1.0f)
-                            .scaleY(1.0f)
-                            .rotation(0f)
-                            .setDuration(260L)
-                            .setInterpolator(OvershootInterpolator(1.65f))
-                            .start()
+                        triggerFolderShakeAnimation(heroBadge, dir)
 
                         hdrTitle.alpha = 0.3f
                         hdrTitle.translationX = dir * dpF(14f)
@@ -7166,9 +7301,11 @@ class TermuxActivity : Activity() {
                         1 -> "config.json"
                         else -> "deploy.sh"
                     }
+                    contentEt.hint = when (newMode) {
+                        2 -> "#!/usr/bin/env bash\nset -euo pipefail\n..."
+                        else -> tr("Необязательно…", "Optional…")
+                    }
 
-                    // Synchronously update contentBox visibility so Dialog window wraps exact height immediately
-                    // with zero clipping (image_973de6.jpg) and zero blank space (image_973de3.jpg)!
                     contentBox.animate().cancel()
                     val wasVisible = (contentBox.visibility == View.VISIBLE)
                     if (isFolder) {
@@ -7242,22 +7379,7 @@ class TermuxActivity : Activity() {
                         setOnClickListener {
                             if (createMode == mCode) return@setOnClickListener
                             triggerHaptic(0.85f)
-                            val targetChmod = when (mCode) {
-                                0 -> "755"
-                                1 -> "644"
-                                else -> {
-                                    if (contentEt.text.isNullOrBlank()) {
-                                        contentEt.setText("#!/usr/bin/env bash\nset -euo pipefail\n\n")
-                                    }
-                                    if (nameEt.text.isNullOrBlank() || nameEt.text.toString() == "config.json") {
-                                        nameEt.setText("script.sh")
-                                    }
-                                    "755"
-                                }
-                            }
-                            if (mCode == 1 && nameEt.text.toString() == "script.sh") {
-                                nameEt.setText("")
-                            }
+                            val targetChmod = if (mCode == 1) "644" else "755"
                             updateModeSelection(mCode, animate = true)
                             updateChmodSelection(targetChmod, animate = true)
                         }
@@ -7343,26 +7465,37 @@ class TermuxActivity : Activity() {
                             return@setOnClickListener
                         }
                         val isFolder = (createMode == 0)
+                        val initTxt = contentEt.text.toString()
                         if (srv == null) {
-                            val target = File(localCurrentDir, n).canonicalFile
-                            if (!target.path.startsWith(localCurrentDir.canonicalPath)) {
-                                Toast.makeText(this@TermuxActivity, tr("Недопустимый путь", "Invalid path"), Toast.LENGTH_SHORT).show()
-                                return@setOnClickListener
-                            }
-                            if (isFolder) {
-                                target.mkdirs()
-                            } else {
-                                target.parentFile?.mkdirs()
-                                target.writeText(contentEt.text.toString())
-                            }
-                            try {
-                                Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", selectedChmod, target.absolutePath)).waitFor()
-                            } catch (_: Throwable) {}
+                            val target = File(localCurrentDir, n)
                             cDlg.dismiss()
-                            refreshSftpListInPlace(false)
+                            if (localCurrentDir.canWrite()) {
+                                try {
+                                    if (isFolder) {
+                                        target.mkdirs()
+                                    } else {
+                                        target.parentFile?.mkdirs()
+                                        target.writeText(initTxt)
+                                    }
+                                    Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", selectedChmod, target.absolutePath)).waitFor()
+                                } catch (_: Throwable) {}
+                                refreshSftpListInPlace(false, null)
+                            } else {
+                                Thread {
+                                    val fullLocal = target.absolutePath
+                                    if (isFolder) {
+                                        nativeExecLocalRootCmd("mkdir -p -- ${shellEscapeSingle(fullLocal)} && chmod $selectedChmod -- ${shellEscapeSingle(fullLocal)}")
+                                    } else if (initTxt.isEmpty()) {
+                                        nativeExecLocalRootCmd("touch -- ${shellEscapeSingle(fullLocal)} && chmod $selectedChmod -- ${shellEscapeSingle(fullLocal)}")
+                                    } else {
+                                        val b64 = android.util.Base64.encodeToString(initTxt.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                                        nativeExecLocalRootCmd("printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(fullLocal)} && chmod $selectedChmod -- ${shellEscapeSingle(fullLocal)}")
+                                    }
+                                    runOnUiThread { refreshSftpListInPlace(false, null) }
+                                }.start()
+                            }
                         } else {
                             val fullRemote = if (remoteCurrentPath == "/") "/$n" else "$remoteCurrentPath/$n"
-                            val initTxt = contentEt.text.toString()
                             cDlg.dismiss()
                             Thread {
                                 if (isFolder) {
@@ -7373,7 +7506,7 @@ class TermuxActivity : Activity() {
                                     val b64 = android.util.Base64.encodeToString(initTxt.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
                                     runRemoteSftpViaCpp23(srv, "printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(fullRemote)} && chmod $selectedChmod -- ${shellEscapeSingle(fullRemote)}")
                                 }
-                                runOnUiThread { refreshSftpListInPlace(true) }
+                                runOnUiThread { refreshSftpListInPlace(true, null) }
                             }.start()
                         }
                     }
@@ -7384,19 +7517,27 @@ class TermuxActivity : Activity() {
                 cDlg.show()
             }
 
-            // ================================================================
-            // Material Design 3 Expressive File Import / Upload Sheet
-            // ================================================================
             fun importBytesToCurrentDestination(fileName: String, bytes: ByteArray) {
                 val srv = activeSftpServer
                 if (srv == null) {
-                    try {
-                        val dst = File(localCurrentDir, fileName)
-                        dst.writeBytes(bytes)
-                        Toast.makeText(this, tr("Импортировано: $fileName", "Imported: $fileName"), Toast.LENGTH_SHORT).show()
-                        refreshSftpListInPlace(false)
-                    } catch (e: Throwable) {
-                        Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    val dst = File(localCurrentDir, fileName)
+                    if (localCurrentDir.canWrite()) {
+                        try {
+                            dst.writeBytes(bytes)
+                            Toast.makeText(this, tr("Импортировано: $fileName", "Imported: $fileName"), Toast.LENGTH_SHORT).show()
+                            refreshSftpListInPlace(false, null)
+                        } catch (e: Throwable) {
+                            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        Thread {
+                            val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                            nativeExecLocalRootCmd("printf '%s' ${shellEscapeSingle(b64)} | base64 -d > ${shellEscapeSingle(dst.absolutePath)}")
+                            runOnUiThread {
+                                Toast.makeText(this, tr("Импортировано: $fileName", "Imported: $fileName"), Toast.LENGTH_SHORT).show()
+                                refreshSftpListInPlace(false, null)
+                            }
+                        }.start()
                     }
                 } else {
                     Toast.makeText(this, tr("Загрузка $fileName на ${srv.label}…", "Uploading $fileName to ${srv.label}…"), Toast.LENGTH_SHORT).show()
@@ -7410,7 +7551,7 @@ class TermuxActivity : Activity() {
                         runOnUiThread {
                             if (ok) {
                                 Toast.makeText(this, tr("Загружено: $fileName", "Uploaded: $fileName"), Toast.LENGTH_SHORT).show()
-                                refreshSftpListInPlace(true)
+                                refreshSftpListInPlace(true, null)
                             } else {
                                 Toast.makeText(this, "Error: ${err.take(120)}", Toast.LENGTH_LONG).show()
                             }
@@ -7487,11 +7628,11 @@ class TermuxActivity : Activity() {
                 }
                 sysPickerCard.addView(
                     FrameLayout(this).apply {
-                        background = tonalBg(uiSurface, dp(12))
+                        background = tonalBg(blendColor(uiAccentContainer, uiAccent, 0.20f), dp(12))
                         layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
                             marginEnd = dp(14)
                         }
-                        addView(MaterialIconView(this@TermuxActivity, M3Icon.FOLDER_OPEN, uiAccent, 21f, 2.1f))
+                        addView(MaterialIconView(this@TermuxActivity, M3Icon.FOLDER_OPEN, uiOnAccentContainer, 21f, 2.1f))
                     }
                 )
                 val spCol = LinearLayout(this).apply {
@@ -7605,10 +7746,6 @@ class TermuxActivity : Activity() {
                 uDlg.show()
             }
 
-            // 4. Living Material Design 3 Expressive Bento Floating Bottom Toolbar in SFTP
-            // Matches mpy2t3cm-00_Bento_Deck_Light_Purple.mp4 & image_97bd27.png..image_97b983.png:
-            // Individual circular/pill buttons that morph width (46dp -> 74dp -> 64dp/46dp)
-            // and corner radius (23dp circle -> 11dp squircle -> 23dp stadium pill) with neighbor compression!
             val bottomBarRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
@@ -7649,7 +7786,12 @@ class TermuxActivity : Activity() {
                 return if (isAct) dp(64) else dp(46)
             }
 
-            fun animateBentoLivingPress(pressedIdx: Int, newActiveState: Boolean, isPrimaryAccent: Boolean = false, onSettled: (() -> Unit)? = null) {
+            fun animateBentoHoldState(
+                pressedIdx: Int,
+                holding: Boolean,
+                newActiveState: Boolean,
+                isPrimaryAccent: Boolean = false
+            ) {
                 val btn = bentoButtons.getOrNull(pressedIdx) ?: return
                 val bg = bentoDrawables.getOrNull(pressedIdx) ?: return
                 val ic = bentoIcons.getOrNull(pressedIdx) ?: return
@@ -7657,22 +7799,19 @@ class TermuxActivity : Activity() {
                 (btn.tag as? ValueAnimator)?.cancel()
                 bentoActiveStates[pressedIdx] = newActiveState
 
-                val startW = btn.layoutParams.width.toFloat().coerceAtLeast(dpF(46f))
-                val peakW = dpF(74f)
-                val endW = if (newActiveState) dpF(64f) else dpF(46f)
-
-                val startRadius = dpF(23f)
-                val minSquircleRadius = dpF(11f)
-                val endRadius = dpF(23f)
+                val curW = btn.layoutParams.width.toFloat().coerceAtLeast(dpF(42f))
+                val targetW = if (holding) dpF(74f) else (if (newActiveState) dpF(64f) else dpF(46f))
+                val startRad = bg.cornerRadius.takeIf { it > 0f } ?: dpF(23f)
+                val targetRad = if (holding) dpF(11f) else dpF(23f)
 
                 val targetFill = when {
                     isPrimaryAccent -> primaryActionBentoColor
-                    newActiveState -> activeBentoColor
+                    holding || newActiveState -> activeBentoColor
                     else -> inactiveBentoColor
                 }
                 val targetTint = when {
                     isPrimaryAccent -> uiSurface
-                    newActiveState -> uiOnAccentContainer
+                    holding || newActiveState -> uiOnAccentContainer
                     else -> COLOR_TEXT_BRIGHT
                 }
                 bg.setColor(targetFill)
@@ -7681,56 +7820,44 @@ class TermuxActivity : Activity() {
 
                 val leftIdx = pressedIdx - 1
                 val rightIdx = pressedIdx + 1
-                val leftBaseW = if (leftIdx >= 0) baseBentoWidthPx(leftIdx).toFloat() else 0f
-                val rightBaseW = if (rightIdx < bentoButtons.size) baseBentoWidthPx(rightIdx).toFloat() else 0f
+                val leftStartW = if (leftIdx >= 0) bentoButtons[leftIdx].layoutParams.width.toFloat() else 0f
+                val rightStartW = if (rightIdx < bentoButtons.size) bentoButtons[rightIdx].layoutParams.width.toFloat() else 0f
+                val leftTargetW = if (leftIdx >= 0) (baseBentoWidthPx(leftIdx) - (if (holding) dp(5) else 0)).toFloat() else 0f
+                val rightTargetW = if (rightIdx < bentoButtons.size) (baseBentoWidthPx(rightIdx) - (if (holding) dp(5) else 0)).toFloat() else 0f
 
                 val anim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 420L
+                    duration = if (holding) 160L else 340L
                     interpolator = LinearInterpolator()
                     addUpdateListener { va ->
                         val t = (va.animatedValue as Float).coerceIn(0f, 1f)
-                        val curW: Float
-                        val curRad: Float
-                        val neighborCompress: Float
-                        if (t < 0.38f) {
-                            // Phase 1 (image_97bce5.png): Rapid expansion into squircle (radius 23dp -> 11dp, width -> 74dp)
-                            val p = t / 0.38f
-                            val easeOut = 1f - (1f - p) * (1f - p)
-                            curW = startW + (peakW - startW) * easeOut
-                            curRad = startRadius + (minSquircleRadius - startRadius) * easeOut
-                            neighborCompress = dpF(4.5f) * easeOut
+                        val prog = if (holding) {
+                            1f - (1f - t) * (1f - t)
                         } else {
-                            // Phase 2 (image_97bcc5.png -> image_97b983.png): Elastic settle back to stadium pill/circle
-                            val p = (t - 0.38f) / 0.62f
-                            val dampedSpring = 1f - kotlin.math.exp(-4.2f * p) * kotlin.math.cos(4.8f * p)
-                            curW = peakW + (endW - peakW) * dampedSpring
-                            val radEase = 1f - (1f - p) * (1f - p)
-                            curRad = minSquircleRadius + (endRadius - minSquircleRadius) * radEase
-                            neighborCompress = dpF(4.5f) * (1f - p).coerceAtLeast(0f)
+                            1f - kotlin.math.exp(-4.2f * t) * kotlin.math.cos(4.8f * t)
                         }
+                        val radProg = 1f - (1f - t) * (1f - t)
 
-                        bg.cornerRadius = curRad
+                        bg.cornerRadius = startRad + (targetRad - startRad) * radProg
                         val lp = btn.layoutParams as LinearLayout.LayoutParams
-                        lp.width = curW.roundToInt()
+                        lp.width = (curW + (targetW - curW) * prog).roundToInt()
                         btn.layoutParams = lp
 
                         if (leftIdx >= 0) {
                             val lBtn = bentoButtons[leftIdx]
                             val lLp = lBtn.layoutParams as LinearLayout.LayoutParams
-                            lLp.width = (leftBaseW - neighborCompress).roundToInt()
+                            lLp.width = (leftStartW + (leftTargetW - leftStartW) * prog).roundToInt()
                             lBtn.layoutParams = lLp
                         }
                         if (rightIdx < bentoButtons.size) {
                             val rBtn = bentoButtons[rightIdx]
                             val rLp = rBtn.layoutParams as LinearLayout.LayoutParams
-                            rLp.width = (rightBaseW - neighborCompress).roundToInt()
+                            rLp.width = (rightStartW + (rightTargetW - rightStartW) * prog).roundToInt()
                             rBtn.layoutParams = rLp
                         }
                     }
                 }
                 btn.tag = anim
                 anim.start()
-                onSettled?.invoke()
             }
 
             fun makeBentoPillBtn(
@@ -7772,8 +7899,27 @@ class TermuxActivity : Activity() {
                         setMargins(dp(3), 0, dp(3), 0)
                     }
                     addView(icView)
+                    setOnTouchListener { _, ev ->
+                        when (ev.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> {
+                                triggerHaptic(0.85f)
+                                animateBentoHoldState(idx, holding = true, newActiveState = bentoActiveStates[idx], isPrimaryAccent = isPrimaryAccent)
+                                false
+                            }
+                            MotionEvent.ACTION_CANCEL -> {
+                                animateBentoHoldState(idx, holding = false, newActiveState = bentoActiveStates[idx], isPrimaryAccent = isPrimaryAccent)
+                                false
+                            }
+                            MotionEvent.ACTION_UP -> {
+                                postDelayed({
+                                    animateBentoHoldState(idx, holding = false, newActiveState = bentoActiveStates[idx], isPrimaryAccent = isPrimaryAccent)
+                                }, 16L)
+                                false
+                            }
+                            else -> false
+                        }
+                    }
                     setOnClickListener {
-                        triggerHaptic(0.85f)
                         onClick(idx)
                     }
                 }
@@ -7783,77 +7929,131 @@ class TermuxActivity : Activity() {
                 return frame
             }
 
-            if (sftpSearchActive) {
-                floatingPill.addView(makeBentoPillBtn(M3Icon.ARROW_BACK, initialActive = false) { idx ->
-                    animateBentoLivingPress(idx, false) {
+            lateinit var populateBottomFloatingPill: (Boolean) -> Unit
+            populateBottomFloatingPill = { animateMorph ->
+                val oldW = floatingPill.width
+                floatingPill.removeAllViews()
+                bentoButtons.clear()
+                bentoDrawables.clear()
+                bentoIcons.clear()
+                bentoActiveStates.clear()
+
+                if (sftpSearchActive) {
+                    floatingPill.addView(makeBentoPillBtn(M3Icon.ARROW_BACK, initialActive = false) { _ ->
                         sftpSearchActive = false
-                        sftpSearchQuery = ""
-                        renderSftpTab()
-                    }
-                })
-                val searchEt = EditText(this).apply {
-                    setText(sftpSearchQuery)
-                    hint = tr("Поиск в папке…", "Search in folder…")
-                    setHintTextColor(COLOR_TEXT_DIM)
-                    setTextColor(COLOR_TEXT_BRIGHT)
-                    typeface = Typeface.MONOSPACE
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                    setSingleLine(true)
-                    background = null
-                    setPadding(dp(8), 0, dp(8), 0)
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                }
-                floatingPill.addView(searchEt)
-                floatingPill.addView(makeBentoPillBtn(M3Icon.SEARCH, initialActive = true) { idx ->
-                    animateBentoLivingPress(idx, true) {
-                        sftpSearchQuery = searchEt.text.toString()
-                        refreshSftpListInPlace(false)
-                    }
-                })
-                if (sftpSearchQuery.isNotEmpty()) {
-                    floatingPill.addView(makeBentoPillBtn(M3Icon.CLOSE, initialActive = false) { idx ->
-                        animateBentoLivingPress(idx, false) {
+                        if (sftpSearchQuery.isNotEmpty()) {
                             sftpSearchQuery = ""
+                            refreshSftpListInPlace(false, null)
+                        }
+                        val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+                        imm?.hideSoftInputFromWindow(floatingPill.windowToken, 0)
+                        populateBottomFloatingPill(true)
+                    })
+                    val searchEt = EditText(this).apply {
+                        setText(sftpSearchQuery)
+                        hint = tr("Поиск в папке…", "Search in folder…")
+                        setHintTextColor(COLOR_TEXT_DIM)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setSingleLine(true)
+                        background = null
+                        setPadding(dp(8), 0, dp(8), 0)
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                        addTextChangedListener(object : android.text.TextWatcher {
+                            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                            override fun afterTextChanged(s: Editable?) {
+                                sftpSearchQuery = s?.toString() ?: ""
+                                refreshSftpListInPlace(false, null)
+                            }
+                        })
+                    }
+                    floatingPill.addView(searchEt)
+                    floatingPill.addView(makeBentoPillBtn(M3Icon.SEARCH, initialActive = true) { idx ->
+                        bentoActiveStates[idx] = true
+                        sftpSearchQuery = searchEt.text.toString()
+                        refreshSftpListInPlace(false, null)
+                    })
+                    floatingPill.addView(makeBentoPillBtn(M3Icon.CLOSE, initialActive = false) { _ ->
+                        if (searchEt.text.isNotEmpty()) {
                             searchEt.setText("")
-                            refreshSftpListInPlace(false)
+                        } else {
+                            sftpSearchActive = false
+                            val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+                            imm?.hideSoftInputFromWindow(floatingPill.windowToken, 0)
+                            populateBottomFloatingPill(true)
                         }
                     })
-                }
-            } else {
-                floatingPill.addView(makeBentoPillBtn(M3Icon.SEARCH, initialActive = false) { idx ->
-                    animateBentoLivingPress(idx, true) {
-                        floatingPill.postDelayed({
-                            sftpSearchActive = true
-                            renderSftpTab()
-                        }, 160L)
+                    searchEt.post {
+                        searchEt.requestFocus()
+                        val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+                        imm?.showSoftInput(searchEt, 0)
                     }
-                })
-                floatingPill.addView(makeBentoPillBtn(M3Icon.TREE, initialActive = sftpTreeMode) { idx ->
-                    sftpTreeMode = !sftpTreeMode
-                    animateBentoLivingPress(idx, sftpTreeMode) {
+                } else {
+                    floatingPill.addView(makeBentoPillBtn(M3Icon.SEARCH, initialActive = false) { _ ->
+                        sftpSearchActive = true
+                        populateBottomFloatingPill(true)
+                    })
+                    floatingPill.addView(makeBentoPillBtn(M3Icon.TREE, initialActive = sftpTreeMode) { idx ->
+                        sftpTreeMode = !sftpTreeMode
+                        bentoActiveStates[idx] = sftpTreeMode
                         sftpTransitionDir = if (sftpTreeMode) 1 else -1
-                        refreshSftpListInPlace(false)
-                    }
-                })
-                floatingPill.addView(makeBentoPillBtn(M3Icon.EYE, initialActive = sftpShowHidden) { idx ->
-                    sftpShowHidden = !sftpShowHidden
-                    animateBentoLivingPress(idx, sftpShowHidden) {
+                        refreshSftpListInPlace(false, null)
+                    })
+                    floatingPill.addView(makeBentoPillBtn(M3Icon.EYE, initialActive = sftpShowHidden) { idx ->
+                        sftpShowHidden = !sftpShowHidden
+                        bentoActiveStates[idx] = sftpShowHidden
                         sftpTransitionDir = if (sftpShowHidden) 1 else -1
-                        refreshSftpListInPlace(false)
-                    }
-                })
-                floatingPill.addView(makeBentoPillBtn(M3Icon.CREATE_FOLDER, initialActive = false) { idx ->
-                    animateBentoLivingPress(idx, false) {
+                        refreshSftpListInPlace(false, null)
+                    })
+                    floatingPill.addView(makeBentoPillBtn(M3Icon.CREATE_FOLDER, initialActive = false) { _ ->
                         openMaterialCreateItemSheet()
-                    }
-                })
-                floatingPill.addView(makeBentoPillBtn(M3Icon.UPLOAD, initialActive = true, isPrimaryAccent = true) { idx ->
-                    animateBentoLivingPress(idx, true, isPrimaryAccent = true) {
+                    })
+                    floatingPill.addView(makeBentoPillBtn(M3Icon.UPLOAD, initialActive = true, isPrimaryAccent = true) { _ ->
                         openMaterialImportSheet()
+                    })
+                }
+
+                if (animateMorph && oldW > 0) {
+                    val targetFullW = (bottomBarRow.width - bottomBarRow.paddingLeft - bottomBarRow.paddingRight)
+                        .coerceAtLeast(dp(300))
+                    val targetCompactW = dp(292)
+                    val endW = if (sftpSearchActive) targetFullW else targetCompactW
+                    floatingPill.alpha = 0.82f
+                    ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 280L
+                        interpolator = aosp17SpatialInterpolator
+                        addUpdateListener { va ->
+                            val f = (va.animatedValue as Float).coerceIn(0f, 1f)
+                            floatingPill.alpha = 0.82f + 0.18f * f
+                            val lp = LinearLayout.LayoutParams(
+                                (oldW + (endW - oldW) * f).roundToInt(),
+                                dp(60)
+                            )
+                            floatingPill.layoutParams = lp
+                        }
+                        addListener(object : android.animation.AnimatorListenerAdapter() {
+                            override fun onAnimationEnd(animation: android.animation.Animator) {
+                                floatingPill.layoutParams = if (sftpSearchActive) {
+                                    LinearLayout.LayoutParams(0, dp(60), 1f)
+                                } else {
+                                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(60))
+                                }
+                            }
+                        })
+                        start()
                     }
-                })
+                } else {
+                    floatingPill.layoutParams = if (sftpSearchActive) {
+                        LinearLayout.LayoutParams(0, dp(60), 1f)
+                    } else {
+                        LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(60))
+                    }
+                }
             }
 
+            populateBottomFloatingPill(false)
             bottomBarRow.addView(floatingPill)
             contentFrame.addView(bottomBarRow)
         }
@@ -8055,8 +8255,14 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            val ptrPackages = BakaSuPullToRefreshLayout(this, pkgScroll) {
-                populatePackagesInPlace()
+            val ptrPackages = BakaSuPullToRefreshLayout(this, pkgScroll) { finishPtr ->
+                Thread {
+                    val installed = parseInstalledDpkgPackagesViaCpp23()
+                    runOnUiThread {
+                        populatePackagesInPlace()
+                        finishPtr()
+                    }
+                }.start()
             }.apply {
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             }
@@ -8110,18 +8316,19 @@ class TermuxActivity : Activity() {
             val tag = btn.tag as? String ?: continue
             val isLocked = (tag == "CTRL" && ctrlLocked) || (tag == "ALT" && altLocked)
             val isActive = (tag == "CTRL" && ctrl) || (tag == "ALT" && alt)
+            val bg = btn.background as? GradientDrawable
             when {
                 isLocked -> {
-                    btn.setTextColor(COLOR_AMOLED_BG)
-                    btn.background = pillBg(uiAccent, uiAccent, dp(5))
+                    btn.setTextColor(uiOnAccent)
+                    bg?.setColor(uiAccent)
                 }
                 isActive -> {
-                    btn.setTextColor(uiAccent)
-                    btn.background = pillBg(uiAccentContainer, uiAccent, dp(5))
+                    btn.setTextColor(uiOnAccentContainer)
+                    bg?.setColor(uiAccentContainer)
                 }
                 else -> {
-                    btn.setTextColor(COLOR_TEXT)
-                    btn.background = pillBg(COLOR_SURFACE, COLOR_BORDER, dp(5))
+                    btn.setTextColor(COLOR_TEXT_BRIGHT)
+                    bg?.setColor(uiSurfaceLow)
                 }
             }
         }
@@ -8175,55 +8382,95 @@ class TermuxActivity : Activity() {
             rebuildTabs()
             terminalSurface.invalidateAllRows()
         }
-        val items = arrayOf(
-            "Вставить из буфера",
-            "История вывода",
-            "Очистить экран (Ctrl+L)",
-            "Закрыть сессию"
+        val (mDlg, mSheet) = createExpressiveDialog(360)
+        mSheet.addView(TextView(this).apply {
+            text = tr("Сессия ${tabIndex + 1}", "Session ${tabIndex + 1}")
+            setTextColor(COLOR_TEXT_BRIGHT)
+            typeface = Typeface.DEFAULT_BOLD
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            setPadding(dp(4), 0, dp(4), dp(12))
+        })
+        val actions = listOf(
+            Triple(M3Icon.COPY, tr("Вставить из буфера", "Paste from clipboard")) { pasteFromClipboard() },
+            Triple(M3Icon.FILE, tr("История вывода", "Transcript history")) { terminalSurface.showTranscriptCopyDialog() },
+            Triple(M3Icon.REFRESH, tr("Очистить экран (Ctrl+L)", "Clear screen (Ctrl+L)")) { dispatchExtraKeyWithHoldSupport("CTRL+L") },
+            Triple(M3Icon.TRASH, tr("Закрыть сессию", "Close session")) { closeCurrentSession() }
         )
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Сессия ${tabIndex + 1}")
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> pasteFromClipboard()
-                    1 -> terminalSurface.showTranscriptCopyDialog()
-                    2 -> dispatchExtraKeyWithHoldSupport("CTRL+L")
-                    3 -> closeCurrentSession()
+        for ((idx, act) in actions.withIndex()) {
+            val isDel = (act.first == M3Icon.TRASH)
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                background = segmentedCardBg(idx, actions.size, uiSurfaceLow, 0, 18f, 4f)
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    bottomMargin = if (idx < actions.lastIndex) dp(2) else 0
+                }
+                attachSmoothPressAnimation(this, 0.98f)
+                setOnClickListener {
+                    triggerHaptic(0.85f)
+                    mDlg.dismiss()
+                    act.third()
                 }
             }
-            .show()
+            row.addView(
+                FrameLayout(this).apply {
+                    background = tonalBg(if (isDel) COLOR_ROOT_CONTAINER else uiAccentContainer, dp(10))
+                    layoutParams = LinearLayout.LayoutParams(dp(34), dp(34)).apply {
+                        marginEnd = dp(12)
+                    }
+                    addView(MaterialIconView(this@TermuxActivity, act.first, if (isDel) COLOR_ROOT else uiAccent, 18.5f, 2.0f))
+                }
+            )
+            row.addView(TextView(this).apply {
+                text = act.second
+                setTextColor(if (isDel) COLOR_ROOT else COLOR_TEXT_BRIGHT)
+                typeface = if (isDel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            })
+            mSheet.addView(row)
+        }
+        mDlg.show()
     }
 
     internal fun rebuildTabs() {
-        tabStrip.removeAllViews()
         val rawCount = nativeGetSessionCount()
         val count = max(1, rawCount)
-        val active = if (rawCount > 0) nativeGetActiveIndex() else 0
+        val active = (if (rawCount > 0) nativeGetActiveIndex() else 0).coerceIn(0, count - 1)
+        val activeIsRoot = if (rawCount > 0) nativeIsSessionRoot(active) else false
+        val pillBaseColor = if (activeIsRoot) COLOR_ROOT_CONTAINER else uiAccentContainer
+        tabSlidingIndicator.background = makeLiquidGlassPillDrawable(pillBaseColor, dp(15))
+
+        val fromIdx = prevActiveSessionIdx.coerceIn(0, count - 1)
+        prevActiveSessionIdx = active
+
+        tabStrip.removeAllViews()
+        val tabViews = ArrayList<TextView>(count)
+
         for (i in 0 until count) {
             val idx = i
             val isRoot = if (rawCount > 0) nativeIsSessionRoot(i) else false
-            val isSelected = i == active
+            val isSelected = (i == active)
 
             val tab = TextView(this).apply {
                 text = (if (isRoot) "# " else "$ ") + (i + 1)
+                gravity = Gravity.CENTER
                 setSingleLine(true)
-                typeface = Typeface.MONOSPACE
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                setPadding(dp(10), dp(4), dp(10), dp(4))
-                val accent = if (isRoot) COLOR_ROOT else uiAccent
-                val activeFill = if (isRoot) COLOR_ROOT_CONTAINER else uiAccentContainer
-                setTextColor(if (isSelected) accent else COLOR_TEXT_DIM)
-                background = pillBg(
-                    if (isSelected) activeFill else COLOR_SURFACE,
-                    if (isSelected) accent else COLOR_BORDER,
-                    dp(7)
-                )
+                typeface = if (isSelected) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                setPadding(dp(13), dp(6), dp(13), dp(6))
+                val activeTextCol = if (isRoot) COLOR_ROOT else uiOnAccentContainer
+                setTextColor(if (isSelected) activeTextCol else COLOR_TEXT_DIM)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    setMargins(0, dp(2), dp(4), dp(2))
+                    setMargins(dp(1), 0, dp(1), 0)
                 }
+                attachSmoothPressAnimation(this, 0.93f)
                 setOnClickListener {
                     if (nativeGetSessionCount() > idx) {
                         triggerHaptic(0.8f)
@@ -8246,14 +8493,72 @@ class TermuxActivity : Activity() {
                     true
                 }
             }
+            tabViews.add(tab)
             tabStrip.addView(tab)
         }
-        (tabStrip.parent as? HorizontalScrollView)?.post {
-            val activeView = tabStrip.getChildAt(active) ?: return@post
-            val scrollView = tabStrip.parent as? HorizontalScrollView ?: return@post
-            val targetScrollX = (activeView.left - (scrollView.width - activeView.width) / 2).coerceAtLeast(0)
-            scrollView.smoothScrollTo(targetScrollX, 0)
-        }
+
+        tabStrip.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                if (tabStrip.viewTreeObserver.isAlive) {
+                    tabStrip.viewTreeObserver.removeOnPreDrawListener(this)
+                }
+                val targetView = tabViews.getOrNull(active) ?: return true
+                val fromView = tabViews.getOrNull(fromIdx) ?: targetView
+                val outerParent = tabStrip.parent as? FrameLayout ?: return true
+                val innerW = (outerParent.width - outerParent.paddingLeft - outerParent.paddingRight)
+                    .toFloat()
+                    .coerceAtLeast((targetView.left + targetView.width).toFloat())
+
+                if (fromIdx != active && fromView.width > 0) {
+                    val startLeft = fromView.left.toFloat().coerceIn(0f, innerW)
+                    val startRight = (startLeft + fromView.width).coerceIn(startLeft + 1f, innerW)
+                    val endLeft = targetView.left.toFloat().coerceIn(0f, innerW)
+                    val endRight = (endLeft + targetView.width).coerceIn(endLeft + 1f, innerW)
+                    val targetW = (endRight - endLeft).coerceAtLeast(1f)
+                    val movingRight = endLeft >= startLeft
+
+                    (tabSlidingIndicator.tag as? ValueAnimator)?.cancel()
+                    val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 300L
+                        interpolator = LinearInterpolator()
+                        addUpdateListener { va ->
+                            val t = (va.animatedValue as Float).coerceIn(0f, 1f)
+                            val inv = 1f - t
+                            val leadT = 1f - inv * inv * inv * inv
+                            val trailT = if (t < 0.28f) {
+                                (t / 0.28f) * (t / 0.28f) * 0.18f
+                            } else {
+                                val p = (t - 0.28f) / 0.72f
+                                val spring = 1f - kotlin.math.exp(-4.6f * p) * kotlin.math.cos(4.8f * p)
+                                (0.18f + 0.82f * spring).coerceIn(0f, 1.04f)
+                            }
+                            val cLeft = if (movingRight) startLeft + (endLeft - startLeft) * trailT else startLeft + (endLeft - startLeft) * leadT
+                            val cRight = if (movingRight) startRight + (endRight - startRight) * leadT else startRight + (endRight - startRight) * trailT
+                            val clLeft = cLeft.coerceIn(0f, innerW)
+                            val clRight = cRight.coerceIn(clLeft + dpF(16f), innerW)
+                            val curW = (clRight - clLeft).coerceAtLeast(1f)
+                            val stretch = (curW / targetW).coerceIn(0.85f, 1.85f)
+                            tabSlidingIndicator.scaleY = (1f / kotlin.math.sqrt(stretch)).coerceIn(0.88f, 1.02f)
+                            tabSlidingIndicator.translationX = clLeft
+                            tabSlidingIndicator.layoutParams = FrameLayout.LayoutParams(curW.roundToInt(), targetView.height)
+                        }
+                    }
+                    tabSlidingIndicator.tag = anim
+                    anim.start()
+                } else {
+                    tabSlidingIndicator.scaleY = 1f
+                    tabSlidingIndicator.translationX = targetView.left.toFloat()
+                    tabSlidingIndicator.layoutParams = FrameLayout.LayoutParams(targetView.width, targetView.height)
+                }
+
+                val scrollView = outerParent.parent as? HorizontalScrollView
+                if (scrollView != null) {
+                    val targetScrollX = (targetView.left - (scrollView.width - targetView.width) / 2).coerceAtLeast(0)
+                    scrollView.smoothScrollTo(targetScrollX, 0)
+                }
+                return true
+            }
+        })
     }
 
     internal fun copyToClipboard(text: String?, showToast: Boolean) {
@@ -8390,6 +8695,7 @@ class TermuxActivity : Activity() {
 
         private var cursorBlinkOn = true
         private var lastInputTimeMs = SystemClock.uptimeMillis()
+        private var lastObservedRootState: Boolean = false
 
         // VS Code Smooth Caret Interpolation State
         private var animCursorX = 0f
@@ -8858,6 +9164,14 @@ class TermuxActivity : Activity() {
             val engineDirty = nativeConsumeFrameDirty()
             if (engineDirty) {
                 lastInputTimeMs = SystemClock.uptimeMillis()
+                val curIdx = nativeGetActiveIndex()
+                if (curIdx >= 0) {
+                    val nowRoot = nativeIsSessionRoot(curIdx)
+                    if (nowRoot != lastObservedRootState) {
+                        lastObservedRootState = nowRoot
+                        post { rebuildTabs() }
+                    }
+                }
             }
             val nodes = rowNodes ?: arrayOfNulls<RenderNode>(rows).also { rowNodes = it }
             val valid = rowNodesValid ?: BooleanArray(rows).also { rowNodesValid = it }
@@ -9858,7 +10172,19 @@ class TermuxActivity : Activity() {
             withAskPass: Boolean
         ): String
         @JvmStatic external fun nativeParseSshCommand(rawCmd: String): String
+        @JvmStatic external fun nativeExecLocalRootCmd(shellCmd: String): String
         @JvmStatic external fun nativeListLocalDir(dirPath: String, showHidden: Boolean, searchQuery: String): String
+        @JvmStatic external fun nativeListRemoteSftpDir(
+            host: String,
+            port: Int,
+            user: String,
+            authType: Int,
+            secret: String,
+            jumpHost: String,
+            remoteDir: String,
+            showHidden: Boolean,
+            searchQuery: String
+        ): String
         @JvmStatic external fun nativeExecRemoteSftp(
             host: String,
             port: Int,

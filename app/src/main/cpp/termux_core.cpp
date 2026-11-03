@@ -1065,6 +1065,69 @@ public:
         return mScrollback[static_cast<size_t>(sbPhysical)];
     }
 
+    [[nodiscard]] bool isCurrentlyRootOrSu() const noexcept {
+        if (mIsRoot) return true;
+        int fd = mPtyFd;
+        int shellPid = mShellPid;
+        if (fd >= 0 && shellPid > 0) {
+            pid_t fgPgrp = tcgetpgrp(fd);
+            if (fgPgrp > 0 && fgPgrp != shellPid) {
+                // Kernel guarantee: kill(pid, 0) returns -1 with EPERM iff process is alive under UID 0 (root)
+                if (kill(fgPgrp, 0) < 0 && errno == EPERM) {
+                    return true;
+                }
+                char pathBuf[64];
+                snprintf(pathBuf, sizeof(pathBuf), "/proc/%d", static_cast<int>(fgPgrp));
+                struct stat st{};
+                if (stat(pathBuf, &st) == 0 && st.st_uid == 0) {
+                    return true;
+                }
+                snprintf(pathBuf, sizeof(pathBuf), "/proc/%d/comm", static_cast<int>(fgPgrp));
+                int cfd = open(pathBuf, O_RDONLY | O_CLOEXEC);
+                if (cfd >= 0) {
+                    char comm[32] = {0};
+                    ssize_t n = read(cfd, comm, sizeof(comm) - 1);
+                    close(cfd);
+                    if (n > 0) {
+                        for (ssize_t i = 0; i < n; ++i) {
+                            if (comm[i] == '\n' || comm[i] == '\r') { comm[i] = '\0'; break; }
+                        }
+                        if (strcmp(comm, "su") == 0 || strcmp(comm, "sudo") == 0 ||
+                            strcmp(comm, "tsu") == 0 || strcmp(comm, "ksud") == 0 ||
+                            strcmp(comm, "magisk") == 0) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        // Also inspect active shell prompt line for root '#' prompt indicator (e.g. "root@... # " or ":/ # ")
+        int modes = mModes.load(std::memory_order_relaxed);
+        if (!(modes & MODE_ALT_SCREEN)) {
+            lock();
+            int cr = std::clamp(mCursorRow, 0, mRows - 1);
+            int cc = std::clamp(mCursorCol, 0, mCols - 1);
+            const Row& row = mPrimaryGrid[static_cast<size_t>(cr)];
+            bool rootPrompt = false;
+            // Scan first 48 columns up to cursor for prompt ending in "# "
+            int limit = std::min(cc, std::min(48, static_cast<int>(row.cells.size()) - 1));
+            for (int c = limit; c >= 1; --c) {
+                uint32_t cp = row.cells[static_cast<size_t>(c)].codepoint;
+                if (cp == '#') {
+                    uint32_t prevCp = row.cells[static_cast<size_t>(c - 1)].codepoint;
+                    uint32_t nextCp = (c + 1 < static_cast<int>(row.cells.size())) ? row.cells[static_cast<size_t>(c + 1)].codepoint : ' ';
+                    if (nextCp == ' ' && (prevCp == ' ' || prevCp == '~' || prevCp == '/' || prevCp == '$' || prevCp == ']' || prevCp == ')' || isalnum(static_cast<unsigned char>(prevCp)))) {
+                        rootPrompt = true;
+                        break;
+                    }
+                }
+            }
+            unlock();
+            if (rootPrompt) return true;
+        }
+        return false;
+    }
+
     bool isLogicalCellSelected(int logicalY, int col) const noexcept {
         if (!mSelActive) return false;
         if (logicalY < mSelY1 || logicalY > mSelY2) return false;
@@ -2788,8 +2851,10 @@ Java_com_termuxx_app_TermuxActivity_nativeGetActiveIndex(JNIEnv* /*env*/, jclass
 JNIEXPORT jboolean JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeIsSessionRoot(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
     pthread_mutex_lock(&gGlobalMutex);
-    bool r = (index >= 0 && index < static_cast<int>(gSessions.size())) && gSessions[static_cast<size_t>(index)]->mIsRoot;
+    std::shared_ptr<NeoTerminalEngine> eng =
+        (index >= 0 && index < static_cast<int>(gSessions.size())) ? gSessions[static_cast<size_t>(index)] : nullptr;
     pthread_mutex_unlock(&gGlobalMutex);
+    bool r = (eng != nullptr) && eng->isCurrentlyRootOrSu();
     return r ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -3799,15 +3864,107 @@ Java_com_termuxx_app_TermuxActivity_nativeParseSshCommand(
     return env->NewStringUTF(out.c_str());
 }
 
+static const char* resolveRootSuBinaryCpp26() noexcept {
+    static const char* const suBins[] = {
+        "/data/adb/ksu/bin/su",
+        "/data/adb/ap/bin/su",
+        "/debug_ramdisk/su",
+        "/sbin/su",
+        "/system/bin/su",
+        "/system/xbin/su",
+        "/data/data/com.termuxx/file/usr/bin/su"
+    };
+    for (const char* p : suBins) {
+        if (access(p, X_OK) == 0) return p;
+    }
+    return "/system/bin/su";
+}
+
+static bool execRootShellCommandCpp26(const std::string& shellCmd, std::string& outStdout, int timeoutMs = 8000) noexcept {
+    const char* suBin = resolveRootSuBinaryCpp26();
+    int outPipe[2];
+    if (pipe2(outPipe, O_CLOEXEC | O_NONBLOCK) != 0) return false;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(outPipe[0]);
+        close(outPipe[1]);
+        return false;
+    }
+    if (pid == 0) {
+        setsid();
+        close(outPipe[0]);
+        int devNull = open("/dev/null", O_RDWR);
+        if (devNull >= 0) {
+            dup2(devNull, STDIN_FILENO);
+            dup2(devNull, STDERR_FILENO);
+            if (devNull > 2) close(devNull);
+        }
+        int fl = fcntl(outPipe[1], F_GETFL, 0);
+        if (fl >= 0) fcntl(outPipe[1], F_SETFL, fl & ~O_NONBLOCK);
+        dup2(outPipe[1], STDOUT_FILENO);
+        close(outPipe[1]);
+
+        unsetenv("LD_PRELOAD");
+        std::string fullCmd = "export PATH=\"" + std::string(BIN_PATH) + ":/system/bin:/system/xbin:/sbin:$PATH\"; " + shellCmd;
+        execl(suBin, "su", "-c", fullCmd.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    close(outPipe[1]);
+
+    outStdout.clear();
+    char buf[16384];
+    struct pollfd pfd{outPipe[0], POLLIN | POLLERR | POLLHUP, 0};
+    int elapsed = 0;
+    while (elapsed < timeoutMs) {
+        int pr = poll(&pfd, 1, 100);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) {
+            elapsed += 100;
+            continue;
+        }
+        if (pfd.revents & (POLLIN | POLLERR | POLLHUP)) {
+            ssize_t n = read(outPipe[0], buf, sizeof(buf));
+            if (n > 0) {
+                outStdout.append(buf, static_cast<size_t>(n));
+                if (outStdout.size() > 2 * 1024 * 1024) break;
+            } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
+                break;
+            }
+        }
+    }
+    close(outPipe[0]);
+    int status = 0;
+    if (elapsed >= timeoutMs) {
+        kill(-pid, SIGKILL);
+        kill(pid, SIGKILL);
+    }
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) break;
+    }
+    return WIFEXITED(status) && (WEXITSTATUS(status) == 0);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeExecLocalRootCmd(
+    JNIEnv* env, jclass /*clazz*/, jstring jShellCmd) {
+    std::string cmd = jstringToStdString(env, jShellCmd);
+    std::string out;
+    bool ok = execRootShellCommandCpp26(cmd, out, 10000);
+    std::string res = (ok ? "OK\n" : "ERR\n") + out;
+    return env->NewStringUTF(res.c_str());
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_termuxx_app_TermuxActivity_nativeListLocalDir(
     JNIEnv* env, jclass /*clazz*/, jstring jDirPath, jboolean showHidden, jstring jSearchQuery) {
     std::string dirPath = jstringToStdString(env, jDirPath);
+    if (dirPath.empty()) dirPath = "/";
     std::string query = trimCpp(jstringToStdString(env, jSearchQuery));
     for (char& c : query) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-
-    DIR* dir = opendir(dirPath.c_str());
-    if (!dir) return env->NewStringUTF("");
 
     struct LocalEntry {
         std::string name;
@@ -3816,47 +3973,109 @@ Java_com_termuxx_app_TermuxActivity_nativeListLocalDir(
         bool isDir;
         long long sizeBytes;
         long long mtimeMs;
-        char perms[11];
+        std::string perms;
     };
     std::vector<LocalEntry> entries;
 
-    struct dirent* de;
-    while ((de = readdir(dir)) != nullptr) {
-        const char* n = de->d_name;
-        if (strcmp(n, ".") == 0 || strcmp(n, "..") == 0) continue;
-        if (!showHidden && n[0] == '.' && query.empty()) continue;
+    DIR* dir = opendir(dirPath.c_str());
+    if (dir != nullptr) {
+        struct dirent* de;
+        while ((de = readdir(dir)) != nullptr) {
+            const char* n = de->d_name;
+            if (strcmp(n, ".") == 0 || strcmp(n, "..") == 0) continue;
+            if (!showHidden && n[0] == '.' && query.empty()) continue;
 
-        std::string nameStr(n);
-        std::string lowerStr = nameStr;
-        for (char& c : lowerStr) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        if (!query.empty() && lowerStr.find(query) == std::string::npos) continue;
+            std::string nameStr(n);
+            std::string lowerStr = nameStr;
+            for (char& c : lowerStr) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            if (!query.empty() && lowerStr.find(query) == std::string::npos) continue;
 
-        std::string full = (dirPath == "/") ? ("/" + nameStr) : (dirPath + "/" + nameStr);
-        struct stat st{};
-        if (stat(full.c_str(), &st) != 0) {
-            if (lstat(full.c_str(), &st) != 0) continue;
+            std::string full = (dirPath == "/") ? ("/" + nameStr) : (dirPath + "/" + nameStr);
+            struct stat st{};
+            if (stat(full.c_str(), &st) != 0) {
+                if (lstat(full.c_str(), &st) != 0) continue;
+            }
+            LocalEntry item{};
+            item.name = std::move(nameStr);
+            item.lowerName = std::move(lowerStr);
+            item.fullPath = std::move(full);
+            item.isDir = S_ISDIR(st.st_mode);
+            item.sizeBytes = item.isDir ? 0LL : static_cast<long long>(st.st_size);
+            item.mtimeMs = static_cast<long long>(st.st_mtime) * 1000LL;
+            char pbuf[11];
+            pbuf[0] = item.isDir ? 'd' : (S_ISLNK(st.st_mode) ? 'l' : '-');
+            pbuf[1] = (st.st_mode & S_IRUSR) ? 'r' : '-';
+            pbuf[2] = (st.st_mode & S_IWUSR) ? 'w' : '-';
+            pbuf[3] = (st.st_mode & S_IXUSR) ? 'x' : '-';
+            pbuf[4] = (st.st_mode & S_IRGRP) ? 'r' : '-';
+            pbuf[5] = (st.st_mode & S_IWGRP) ? 'w' : '-';
+            pbuf[6] = (st.st_mode & S_IXGRP) ? 'x' : '-';
+            pbuf[7] = (st.st_mode & S_IROTH) ? 'r' : '-';
+            pbuf[8] = (st.st_mode & S_IWOTH) ? 'w' : '-';
+            pbuf[9] = (st.st_mode & S_IXOTH) ? 'x' : '-';
+            pbuf[10] = '\0';
+            item.perms = pbuf;
+            entries.push_back(std::move(item));
         }
-        LocalEntry item{};
-        item.name = std::move(nameStr);
-        item.lowerName = std::move(lowerStr);
-        item.fullPath = std::move(full);
-        item.isDir = S_ISDIR(st.st_mode);
-        item.sizeBytes = item.isDir ? 0LL : static_cast<long long>(st.st_size);
-        item.mtimeMs = static_cast<long long>(st.st_mtime) * 1000LL;
-        item.perms[0] = item.isDir ? 'd' : (S_ISLNK(st.st_mode) ? 'l' : '-');
-        item.perms[1] = (st.st_mode & S_IRUSR) ? 'r' : '-';
-        item.perms[2] = (st.st_mode & S_IWUSR) ? 'w' : '-';
-        item.perms[3] = (st.st_mode & S_IXUSR) ? 'x' : '-';
-        item.perms[4] = (st.st_mode & S_IRGRP) ? 'r' : '-';
-        item.perms[5] = (st.st_mode & S_IWGRP) ? 'w' : '-';
-        item.perms[6] = (st.st_mode & S_IXGRP) ? 'x' : '-';
-        item.perms[7] = (st.st_mode & S_IROTH) ? 'r' : '-';
-        item.perms[8] = (st.st_mode & S_IWOTH) ? 'w' : '-';
-        item.perms[9] = (st.st_mode & S_IXOTH) ? 'x' : '-';
-        item.perms[10] = '\0';
-        entries.push_back(std::move(item));
+        closedir(dir);
     }
-    closedir(dir);
+
+    // If directory could not be read by unprivileged app UID (e.g. /, /data, /data/adb, /system),
+    // automatically use root `su -c` fallback so root users can browse all system directories!
+    if (dir == nullptr || (entries.empty() && (dirPath == "/" || dirPath.rfind("/data", 0) == 0 || dirPath.rfind("/system", 0) == 0))) {
+        std::string pattern = showHidden ? "* .[!.]* ..?*" : "*";
+        std::string rootScript = "cd " + shellEscapeSingleCpp(dirPath) + " 2>/dev/null && for f in " + pattern + "; do " +
+            std::string(R"sh([ -e "$f" ] || [ -L "$f" ] || continue; stat -c '@@E@@%F|%s|%Y|%A|%n' -- "$f" 2>/dev/null || (if [ -d "$f" ]; then printf '@@E@@directory|0|0|drwxr-xr-x|%s\n' "$f"; else printf '@@E@@file|0|0|-rw-r--r--|%s\n' "$f"; fi); done)sh");
+        std::string rootOut;
+        if (execRootShellCommandCpp26(rootScript, rootOut, 6000) && !rootOut.empty()) {
+            entries.clear();
+            std::string_view sv(rootOut);
+            size_t pos = 0;
+            while (pos < sv.size()) {
+                size_t nl = sv.find('\n', pos);
+                if (nl == std::string_view::npos) nl = sv.size();
+                std::string_view line = sv.substr(pos, nl - pos);
+                pos = nl + 1;
+                if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+                if (line.rfind("@@E@@", 0) != 0) continue;
+                line.remove_prefix(5);
+
+                size_t p1 = line.find('|');
+                if (p1 == std::string_view::npos) continue;
+                size_t p2 = line.find('|', p1 + 1);
+                if (p2 == std::string_view::npos) continue;
+                size_t p3 = line.find('|', p2 + 1);
+                if (p3 == std::string_view::npos) continue;
+                size_t p4 = line.find('|', p3 + 1);
+                if (p4 == std::string_view::npos) continue;
+
+                std::string fType(line.substr(0, p1));
+                for (char& c : fType) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                long long sz = atoll(std::string(line.substr(p1 + 1, p2 - (p1 + 1))).c_str());
+                long long mtSec = atoll(std::string(line.substr(p2 + 1, p3 - (p2 + 1))).c_str());
+                std::string pm(line.substr(p3 + 1, p4 - (p3 + 1)));
+                std::string nameStr(line.substr(p4 + 1));
+                if (nameStr.rfind("./", 0) == 0) nameStr.erase(0, 2);
+                if (nameStr.empty() || nameStr == "." || nameStr == "..") continue;
+
+                std::string lowerStr = nameStr;
+                for (char& c : lowerStr) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                if (!query.empty() && lowerStr.find(query) == std::string::npos) continue;
+
+                bool isDir = (fType.find("dir") != std::string::npos) || (!pm.empty() && pm[0] == 'd');
+                std::string full = (dirPath == "/") ? ("/" + nameStr) : (dirPath + "/" + nameStr);
+                entries.push_back(LocalEntry{
+                    std::move(nameStr),
+                    std::move(lowerStr),
+                    std::move(full),
+                    isDir,
+                    isDir ? 0LL : sz,
+                    mtSec * 1000LL,
+                    std::move(pm)
+                });
+            }
+        }
+    }
 
     std::sort(entries.begin(), entries.end(), [](const LocalEntry& a, const LocalEntry& b) {
         if (a.isDir != b.isDir) return a.isDir > b.isDir;
@@ -3881,17 +4100,15 @@ Java_com_termuxx_app_TermuxActivity_nativeListLocalDir(
     return env->NewStringUTF(out.c_str());
 }
 
-JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
-    JNIEnv* env,
-    jclass /*clazz*/,
-    jstring jHost,
-    jint port,
-    jstring jUser,
-    jint authType,
-    jstring jSecret,
-    jstring jJumpHost,
-    jstring jRemoteShCmd) {
+static bool runRemoteSftpCommandInternalCpp26(
+    const std::string& host,
+    int port,
+    const std::string& user,
+    int authType,
+    const std::string& secret,
+    const std::string& jumpHost,
+    const std::string& remoteSh,
+    std::string& outResult) noexcept {
 
     std::string sshBin = std::string(BIN_PATH) + "/ssh";
     if (access(sshBin.c_str(), R_OK) != 0 && blob_size > 0) {
@@ -3904,25 +4121,20 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
     }
     chmod(sshBin.c_str(), 0700);
     if (access(sshBin.c_str(), R_OK) != 0) {
-        return env->NewStringUTF("ERR\nБинарный файл ssh ещё не готов. Подождите завершения распаковки окружения или выполните pkg install -y openssh");
+        outResult = "Бинарный файл ssh ещё не готов. Подождите завершения распаковки окружения или выполните pkg install -y openssh";
+        return false;
     }
 
-    std::string host = trimCpp(jstringToStdString(env, jHost));
-    std::string user = trimCpp(jstringToStdString(env, jUser));
-    if (user.empty()) user = "root";
-    int p = (port > 0 && port <= 65535) ? static_cast<int>(port) : 22;
-    std::string secret = jstringToStdString(env, jSecret);
-    std::string jumpHost = trimCpp(jstringToStdString(env, jJumpHost));
-    std::string remoteSh = jstringToStdString(env, jRemoteShCmd);
+    std::string cleanUser = user.empty() ? "root" : user;
+    int p = (port > 0 && port <= 65535) ? port : 22;
 
     mkdirsRecursive(TMP_PATH, 0700);
     std::string sshDir = std::string(HOME_PATH) + "/.ssh";
     mkdirsRecursive(sshDir.c_str(), 0700);
     chmod(sshDir.c_str(), 0700);
 
-    // Stage key with 0600 permissions if key auth is selected OR if a default key exists on device
     std::string stagedKey = stagePrivateKeySecureCpp26(authType == 1 ? secret : "");
-    std::string askPassPrefix = createOneShotAskPassEnvCpp(static_cast<int>(authType), secret);
+    std::string askPassPrefix = createOneShotAskPassEnvCpp(authType, secret);
     std::string muxPath = std::string(TMP_PATH) + "/.m_%C";
 
     std::string sshArgs = "-p " + std::to_string(p) +
@@ -3954,35 +4166,32 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
     if (access(redirectSo.c_str(), R_OK) == 0) {
         fullShellLine += "export LD_PRELOAD=\"" + redirectSo + "\"; ";
     }
-    std::string sshExec;
-    if (access("/system/bin/linker64", X_OK) == 0) {
-        sshExec = "/system/bin/linker64 " + shellEscapeSingleCpp(sshBin);
-    } else {
-        sshExec = shellEscapeSingleCpp(sshBin);
-    }
-    fullShellLine += askPassPrefix + sshExec + " " + sshArgs + " " +
-                     shellEscapeSingleCpp(user + "@" + host) + " " +
+    fullShellLine += askPassPrefix + shellEscapeSingleCpp(sshBin) + " " + sshArgs + " " +
+                     shellEscapeSingleCpp(cleanUser + "@" + host) + " " +
                      shellEscapeSingleCpp(remoteSh);
 
     int outPipe[2];
     int errPipe[2];
     if (pipe2(outPipe, O_CLOEXEC | O_NONBLOCK) != 0) {
-        return env->NewStringUTF("ERR\nНе удалось создать канал pipe()");
+        outResult = "Не удалось создать канал pipe()";
+        return false;
     }
     if (pipe2(errPipe, O_CLOEXEC | O_NONBLOCK) != 0) {
         close(outPipe[0]);
         close(outPipe[1]);
-        return env->NewStringUTF("ERR\nНе удалось создать канал stderr pipe()");
+        outResult = "Не удалось создать канал stderr pipe()";
+        return false;
     }
 
     std::string shBin = std::string(BIN_PATH) + "/sh";
-    if (access(shBin.c_str(), X_OK) != 0) shBin = "/system/bin/sh";
+    if (access(shBin.c_str(), R_OK) != 0) shBin = "/system/bin/sh";
 
     pid_t pid = fork();
     if (pid < 0) {
         close(outPipe[0]); close(outPipe[1]);
         close(errPipe[0]); close(errPipe[1]);
-        return env->NewStringUTF("ERR\nОшибка fork()");
+        outResult = "Ошибка fork()";
+        return false;
     }
     if (pid == 0) {
         setsid();
@@ -4054,7 +4263,7 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
             ssize_t n = read(outPipe[0], buf, sizeof(buf));
             if (n > 0) {
                 stdOutStr.append(buf, static_cast<size_t>(n));
-                if (stdOutStr.size() > 1024 * 1024) outOpen = false;
+                if (stdOutStr.size() > 2 * 1024 * 1024) outOpen = false;
             } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
                 outOpen = false;
             }
@@ -4081,16 +4290,164 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
         if (errno != EINTR) break;
     }
     bool ok = WIFEXITED(status) && (WEXITSTATUS(status) == 0);
-    std::string result;
     if (ok) {
-        result = "OK\n" + stdOutStr;
+        outResult = std::move(stdOutStr);
+        return true;
     } else {
         std::string errMsg = trimCpp(stdErrStr);
         if (errMsg.empty()) errMsg = trimCpp(stdOutStr);
         if (errMsg.empty()) errMsg = "SSH exit code " + std::to_string(WIFEXITED(status) ? WEXITSTATUS(status) : -1);
-        result = "ERR\n" + errMsg;
+        outResult = std::move(errMsg);
+        return false;
     }
-    return env->NewStringUTF(result.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring jHost,
+    jint port,
+    jstring jUser,
+    jint authType,
+    jstring jSecret,
+    jstring jJumpHost,
+    jstring jRemoteShCmd) {
+
+    std::string host = trimCpp(jstringToStdString(env, jHost));
+    std::string user = trimCpp(jstringToStdString(env, jUser));
+    std::string secret = jstringToStdString(env, jSecret);
+    std::string jumpHost = trimCpp(jstringToStdString(env, jJumpHost));
+    std::string remoteSh = jstringToStdString(env, jRemoteShCmd);
+
+    std::string res;
+    bool ok = runRemoteSftpCommandInternalCpp26(
+        host, static_cast<int>(port), user, static_cast<int>(authType), secret, jumpHost, remoteSh, res
+    );
+    std::string finalOut = (ok ? "OK\n" : "ERR\n") + res;
+    return env->NewStringUTF(finalOut.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeListRemoteSftpDir(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring jHost,
+    jint port,
+    jstring jUser,
+    jint authType,
+    jstring jSecret,
+    jstring jJumpHost,
+    jstring jRemoteDir,
+    jboolean showHidden,
+    jstring jSearchQuery) {
+
+    std::string host = trimCpp(jstringToStdString(env, jHost));
+    std::string user = trimCpp(jstringToStdString(env, jUser));
+    std::string secret = jstringToStdString(env, jSecret);
+    std::string jumpHost = trimCpp(jstringToStdString(env, jJumpHost));
+    std::string remoteDir = trimCpp(jstringToStdString(env, jRemoteDir));
+    if (remoteDir.empty()) remoteDir = "/";
+    std::string query = trimCpp(jstringToStdString(env, jSearchQuery));
+    for (char& c : query) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+    // Build POSIX-compliant remote listing loop in C++26 using '|' delimiter (zero tab-escape ambiguity!)
+    std::string pattern = showHidden ? "* .[!.]* ..?*" : "*";
+    std::string remoteScript = "(cd " + shellEscapeSingleCpp(remoteDir) + " 2>/dev/null || cd ~) && printf '@@PWD@@' && pwd && for f in " + pattern + "; do " +
+        std::string(R"sh([ -e "$f" ] || [ -L "$f" ] || continue; stat -c '@@E@@%F|%s|%Y|%A|%n' -- "$f" 2>/dev/null || stat -f '@@E@@%HT|%z|%m|%Sp|%N' -- "$f" 2>/dev/null || (if [ -d "$f" ]; then printf '@@E@@directory|0|0|drwxr-xr-x|%s\n' "$f"; else printf '@@E@@file|0|0|-rw-r--r--|%s\n' "$f"; fi); done)sh");
+
+    std::string rawOut;
+    if (!runRemoteSftpCommandInternalCpp26(
+            host, static_cast<int>(port), user, static_cast<int>(authType), secret, jumpHost, remoteScript, rawOut)) {
+        std::string errOut = "ERR\n" + rawOut;
+        return env->NewStringUTF(errOut.c_str());
+    }
+
+    struct RemoteItem {
+        std::string name;
+        std::string lowerName;
+        std::string fullPath;
+        bool isDir;
+        long long sizeBytes;
+        long long mtimeMs;
+        std::string perms;
+    };
+    std::vector<RemoteItem> items;
+    std::string resolvedPwd = remoteDir;
+
+    std::string_view sv(rawOut);
+    size_t pos = 0;
+    while (pos < sv.size()) {
+        size_t nl = sv.find('\n', pos);
+        if (nl == std::string_view::npos) nl = sv.size();
+        std::string_view line = sv.substr(pos, nl - pos);
+        pos = nl + 1;
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+
+        if (line.rfind("@@PWD@@", 0) == 0) {
+            std::string pwdCand = trimCpp(std::string(line.substr(7)));
+            if (!pwdCand.empty()) resolvedPwd = std::move(pwdCand);
+            continue;
+        }
+        if (line.rfind("@@E@@", 0) != 0) continue;
+        line.remove_prefix(5);
+
+        size_t p1 = line.find('|');
+        if (p1 == std::string_view::npos) continue;
+        size_t p2 = line.find('|', p1 + 1);
+        if (p2 == std::string_view::npos) continue;
+        size_t p3 = line.find('|', p2 + 1);
+        if (p3 == std::string_view::npos) continue;
+        size_t p4 = line.find('|', p3 + 1);
+        if (p4 == std::string_view::npos) continue;
+
+        std::string fType(line.substr(0, p1));
+        for (char& c : fType) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        long long sz = atoll(std::string(line.substr(p1 + 1, p2 - (p1 + 1))).c_str());
+        long long mtSec = atoll(std::string(line.substr(p2 + 1, p3 - (p2 + 1))).c_str());
+        std::string pm(line.substr(p3 + 1, p4 - (p3 + 1)));
+        std::string nameStr(line.substr(p4 + 1));
+        if (nameStr.rfind("./", 0) == 0) nameStr.erase(0, 2);
+        if (nameStr.empty() || nameStr == "." || nameStr == "..") continue;
+
+        std::string lowerStr = nameStr;
+        for (char& c : lowerStr) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        if (!query.empty() && lowerStr.find(query) == std::string::npos) continue;
+
+        bool isDir = (fType.find("dir") != std::string::npos) || (!pm.empty() && pm[0] == 'd');
+        std::string full = (resolvedPwd == "/") ? ("/" + nameStr) : (resolvedPwd + "/" + nameStr);
+        items.push_back(RemoteItem{
+            std::move(nameStr),
+            std::move(lowerStr),
+            std::move(full),
+            isDir,
+            isDir ? 0LL : sz,
+            mtSec * 1000LL,
+            std::move(pm)
+        });
+    }
+
+    std::sort(items.begin(), items.end(), [](const RemoteItem& a, const RemoteItem& b) {
+        if (a.isDir != b.isDir) return a.isDir > b.isDir;
+        return a.lowerName < b.lowerName;
+    });
+
+    std::string out = "OK\n" + resolvedPwd + "\n";
+    out.reserve(out.size() + items.size() * 64);
+    for (const auto& e : items) {
+        out += e.name;
+        out.push_back('\t');
+        out += e.fullPath;
+        out.push_back('\t');
+        out += (e.isDir ? "1\t" : "0\t");
+        out += std::to_string(e.sizeBytes);
+        out.push_back('\t');
+        out += std::to_string(e.mtimeMs);
+        out.push_back('\t');
+        out += e.perms;
+        out.push_back('\n');
+    }
+    return env->NewStringUTF(out.c_str());
 }
 
 JNIEXPORT jstring JNICALL
@@ -4481,23 +4838,25 @@ Java_com_termuxx_app_TermuxActivity_nativeSetMaxScrollback(JNIEnv* /*env*/, jcla
 namespace {
 
 constexpr float kPi26 = 3.14159265358979323846f;
-constexpr int kM3PolygonVertices = 96;
+constexpr int kM3PolygonVertices = 120;
 
 // Exact analytical solution of Material 3 Expressive LoadingIndicator's underdamped morph spring:
 // Spring(dampingRatio = 0.6f, stiffness = 200f) over MORPH_INTERVAL = 650ms (0.65s).
-// omega_n = sqrt(200) = 14.1421356 rad/s, zeta * omega_n = 8.4852814, omega_d = 11.3137085 rad/s.
 [[nodiscard]] inline float m3LoadingMorphSpringCpp26(float uNormalized) noexcept {
     float u = std::clamp(uNormalized, 0.0f, 1.0f);
-    float tSec = u * 0.65f;
+    // Hold shape briefly for first 12% of step so each distinct shape (10-star, 9-cookie, pentagon, etc.) is crisp!
+    if (u < 0.12f) return 0.0f;
+    float tSec = ((u - 0.12f) / 0.88f) * 0.65f;
     float decay = std::exp(-8.4852814f * tSec);
     float angle = 11.3137085f * tSec;
     return 1.0f - decay * (std::cos(angle) + 0.75f * std::sin(angle));
 }
 
 // Per-shape 90-degree step rotation over 194ms using CubicBezier(0.24, 0.0, 0.68, 0.91)
-// so spring settling never reverses rotation, combined with continuous 360deg / 4666ms rotation.
 [[nodiscard]] inline float m3StepRotationProgressCpp26(float uNormalized) noexcept {
-    float tMs = std::clamp(uNormalized, 0.0f, 1.0f) * 650.0f;
+    float u = std::clamp(uNormalized, 0.0f, 1.0f);
+    if (u < 0.12f) return 0.0f;
+    float tMs = ((u - 0.12f) / 0.88f) * 650.0f;
     if (tMs >= 194.0f) return 1.0f;
     float s = tMs / 194.0f;
     float inv = 1.0f - s;
@@ -4524,71 +4883,147 @@ constexpr int kM3PolygonVertices = 96;
     return 1.0f;
 }
 
-// Exact C^infinity rounded regular N-gon radial distance using Lp-norm of half-plane projections
-[[nodiscard]] inline float roundedRegularPolygonRadiusCpp26(
-    float theta,
-    int nSides,
-    float inradius,
-    float cornerSharpnessP
+// Exact C++26 Tangent-Fillet RoundedPolygon radial sampler matching Jetpack Compose MaterialShapes
+static void buildTangentRoundedStarRadiiCpp26(
+    int nPeaks,
+    float rOut,
+    float rIn,
+    float roundOut,
+    float roundIn,
+    float rotOffset,
+    float outRadii[kM3PolygonVertices]
 ) noexcept {
-    float sumPow = 0.0f;
-    float step = (2.0f * kPi26) / static_cast<float>(nSides);
-    for (int k = 0; k < nSides; ++k) {
-        float c = std::cos(theta - static_cast<float>(k) * step);
-        if (c > 0.0f) {
-            sumPow += std::pow(c, cornerSharpnessP);
+    struct Pt { float x, y; };
+    struct ArcSeg { Pt t1, t2, c; float rc, a1, da; };
+
+    Pt verts[24];
+    float radii[24];
+    int m = (rIn < 0.0f) ? nPeaks : (nPeaks * 2);
+    if (rIn < 0.0f) {
+        for (int i = 0; i < nPeaks; ++i) {
+            float ang = rotOffset + static_cast<float>(i) * (2.0f * kPi26 / static_cast<float>(nPeaks));
+            verts[i] = {rOut * std::cos(ang), rOut * std::sin(ang)};
+            radii[i] = roundOut;
+        }
+    } else {
+        for (int i = 0; i < m; ++i) {
+            float ang = rotOffset + static_cast<float>(i) * (kPi26 / static_cast<float>(nPeaks));
+            float r = (i % 2 == 0) ? rOut : rIn;
+            verts[i] = {r * std::cos(ang), r * std::sin(ang)};
+            radii[i] = (i % 2 == 0) ? roundOut : roundIn;
         }
     }
-    if (sumPow <= 1e-6f) return inradius;
-    return std::clamp(inradius / std::pow(sumPow, 1.0f / cornerSharpnessP), 0.52f, 0.99f);
+
+    ArcSeg arcs[24];
+    for (int i = 0; i < m; ++i) {
+        Pt pPrev = verts[(i - 1 + m) % m];
+        Pt pCurr = verts[i];
+        Pt pNext = verts[(i + 1) % m];
+
+        float v1x = pPrev.x - pCurr.x, v1y = pPrev.y - pCurr.y;
+        float v2x = pNext.x - pCurr.x, v2y = pNext.y - pCurr.y;
+        float l1 = std::hypot(v1x, v1y);
+        float l2 = std::hypot(v2x, v2y);
+        float u1x = v1x / l1, u1y = v1y / l1;
+        float u2x = v2x / l2, u2y = v2y / l2;
+
+        float dot = std::clamp(u1x * u2x + u1y * u2y, -0.99999f, 0.99999f);
+        float halfAng = 0.5f * std::acos(dot);
+        float tanHalf = std::tan(halfAng);
+        float sinHalf = std::sin(halfAng);
+
+        float maxD = 0.495f * std::min(l1, l2);
+        float rc = radii[i];
+        float d = (tanHalf > 1e-5f) ? (rc / tanHalf) : 0.0f;
+        if (d > maxD) {
+            d = maxD;
+            rc = d * tanHalf;
+        }
+
+        Pt t1{pCurr.x + u1x * d, pCurr.y + u1y * d};
+        Pt t2{pCurr.x + u2x * d, pCurr.y + u2y * d};
+
+        float bx = u1x + u2x, by = u1y + u2y;
+        float bl = std::hypot(bx, by);
+        bx /= bl; by /= bl;
+        float centerDist = (sinHalf > 1e-5f) ? (rc / sinHalf) : 0.0f;
+        Pt c{pCurr.x + bx * centerDist, pCurr.y + by * centerDist};
+
+        float a1 = std::atan2(t1.y - c.y, t1.x - c.x);
+        float a2 = std::atan2(t2.y - c.y, t2.x - c.x);
+        float da = std::fmod(a2 - a1 + 3.0f * kPi26, 2.0f * kPi26) - kPi26;
+        arcs[i] = {t1, t2, c, rc, a1, da};
+    }
+
+    std::vector<Pt> dense;
+    dense.reserve(static_cast<size_t>(m * 40));
+    for (int i = 0; i < m; ++i) {
+        const auto& a = arcs[i];
+        constexpr int kArcSteps = 24;
+        for (int s = 0; s <= kArcSteps; ++s) {
+            float ang = a.a1 + a.da * (static_cast<float>(s) / static_cast<float>(kArcSteps));
+            dense.push_back({a.c.x + a.rc * std::cos(ang), a.c.y + a.rc * std::sin(ang)});
+        }
+        Pt nextT1 = arcs[(i + 1) % m].t1;
+        constexpr int kLineSteps = 12;
+        for (int s = 1; s < kLineSteps; ++s) {
+            float u = static_cast<float>(s) / static_cast<float>(kLineSteps);
+            dense.push_back({a.t2.x + (nextT1.x - a.t2.x) * u, a.t2.y + (nextT1.y - a.t2.y) * u});
+        }
+    }
+
+    const size_t nd = dense.size();
+    for (int k = 0; k < kM3PolygonVertices; ++k) {
+        float theta = -0.5f * kPi26 + static_cast<float>(k) * (2.0f * kPi26 / static_cast<float>(kM3PolygonVertices));
+        float dx = std::cos(theta), dy = std::sin(theta);
+        float bestR = 0.80f;
+        for (size_t j = 0; j < nd; ++j) {
+            Pt p1 = dense[j];
+            Pt p2 = dense[(j + 1) % nd];
+            float sx = p2.x - p1.x, sy = p2.y - p1.y;
+            float det = -dx * sy + dy * sx;
+            if (std::abs(det) > 1e-7f) {
+                float tRay = (-p1.x * sy + p1.y * sx) / det;
+                float uSeg = (dx * p1.y - dy * p1.x) / det;
+                if (tRay > 0.0f && uSeg >= -1e-4f && uSeg <= 1.0001f) {
+                    bestR = tRay;
+                    break;
+                }
+            }
+        }
+        outRadii[k] = bestR;
+    }
 }
 
-// Exact 7 shapes of LoadingIndicatorDefaults.IndeterminateIndicatorPolygons:
-// -1: MaterialShapes.Circle (rotated 18deg for DeterminateIndicatorPolygons)
-//  0: MaterialShapes.SoftBurst (10-pointed soft rounded starburst)
-//  1: MaterialShapes.Cookie9Sided (9-lobed scalloped cookie flower)
-//  2: MaterialShapes.Pentagon (5-sided rounded regular pentagon)
-//  3: MaterialShapes.Pill (stadium capsule tilted at 45deg)
-//  4: MaterialShapes.Sunny (8-pointed sunny star with rounded tips and deeper valleys)
-//  5: MaterialShapes.Cookie4Sided (4-lobed rounded clover / quatrefoil)
-//  6: MaterialShapes.Oval (smooth ellipse tilted at 45deg)
-[[nodiscard]] inline float evalMaterialShapeRadiusCpp26(int shapeId, float theta) noexcept {
-    switch (shapeId) {
-        case -1: // MaterialShapes.Circle
-            return 0.80f;
-
-        case 0: // MaterialShapes.SoftBurst (10-pointed soft starburst)
-            return 0.80f + 0.145f * std::cos(10.0f * theta) - 0.015f * std::cos(20.0f * theta);
-
-        case 1: // MaterialShapes.Cookie9Sided (9-lobed scalloped cookie)
-            return 0.78f + 0.175f * std::cos(9.0f * theta) - 0.022f * std::cos(18.0f * theta);
-
-        case 2: // MaterialShapes.Pentagon (5-sided rounded regular pentagon)
-            return roundedRegularPolygonRadiusCpp26(theta, 5, 0.76f, 6.4f);
-
-        case 3: { // MaterialShapes.Pill (tilted stadium / capsule shape)
-            float rotTheta = theta - (kPi26 * 0.25f);
-            float ac = std::abs(std::cos(rotTheta)) / 0.93f;
-            float as = std::abs(std::sin(rotTheta)) / 0.62f;
-            float denom = std::pow(std::pow(ac, 2.8f) + std::pow(as, 2.8f), 1.0f / 2.8f);
-            return (denom > 1e-4f) ? std::clamp(1.0f / denom, 0.56f, 0.96f) : 0.76f;
-        }
-
-        case 4: // MaterialShapes.Sunny (8-pointed sunny star with deeper valleys)
-            return 0.76f + 0.195f * std::cos(8.0f * theta) - 0.028f * std::cos(16.0f * theta);
-
-        case 5: // MaterialShapes.Cookie4Sided (4-lobed rounded clover / quatrefoil)
-            return 0.75f + 0.205f * std::cos(4.0f * theta) - 0.028f * std::cos(8.0f * theta);
-
-        case 6: // MaterialShapes.Oval (smooth tilted ellipse)
-        default: {
-            float rotTheta = theta - (kPi26 * 0.25f);
-            float c = std::cos(rotTheta) / 0.92f;
-            float s = std::sin(rotTheta) / 0.68f;
-            float denom = std::sqrt(c * c + s * s);
-            return (denom > 1e-4f) ? std::clamp(1.0f / denom, 0.60f, 0.95f) : 0.78f;
-        }
+static void buildOvalRadiiCpp26(float rx, float ry, float tiltRad, float outRadii[kM3PolygonVertices]) noexcept {
+    float ct = std::cos(tiltRad), st = std::sin(tiltRad);
+    for (int k = 0; k < kM3PolygonVertices; ++k) {
+        float theta = -0.5f * kPi26 + static_cast<float>(k) * (2.0f * kPi26 / static_cast<float>(kM3PolygonVertices));
+        float dx = std::cos(theta), dy = std::sin(theta);
+        float lx = dx * ct + dy * st;
+        float ly = -dx * st + dy * ct;
+        float denom = std::hypot(lx / rx, ly / ry);
+        outRadii[k] = (denom > 1e-5f) ? (1.0f / denom) : rx;
     }
+}
+
+static float gM3ShapeRadiiTable[6][kM3PolygonVertices];
+static pthread_once_t gM3ShapeTableOnce = PTHREAD_ONCE_INIT;
+
+static void initM3ShapeTableCpp26() noexcept {
+    // Exact 6 shapes from video #2 & user screenshots (image_89a9a8.png .. image_89a967.png):
+    // 0: SoftBurst (10-pointed star, image_89a9a8.png)
+    buildTangentRoundedStarRadiiCpp26(10, 0.96f, 0.65f, 0.105f, 0.115f, -0.5f * kPi26, gM3ShapeRadiiTable[0]);
+    // 1: Cookie9Sided (9-lobed wavy cookie, image_89a9a2.png)
+    buildTangentRoundedStarRadiiCpp26(9, 0.90f, 0.76f, 0.16f, 0.16f, -0.5f * kPi26, gM3ShapeRadiiTable[1]);
+    // 2: Pentagon (5-sided flat-edged rounded pentagon, image_89a988.png)
+    buildTangentRoundedStarRadiiCpp26(5, 0.95f, -1.0f, 0.30f, 0.0f, -0.5f * kPi26 - 0.12f, gM3ShapeRadiiTable[2]);
+    // 3: Cookie4Sided (4-lobed clover with concave waist, image_89a984.png)
+    buildTangentRoundedStarRadiiCpp26(4, 1.04f, 0.60f, 0.32f, 0.24f, -0.25f * kPi26 + 0.12f, gM3ShapeRadiiTable[3]);
+    // 4: Pill / Oval (tilted capsule / oval, image_89a981.png)
+    buildOvalRadiiCpp26(0.61f, 0.92f, -0.28f, gM3ShapeRadiiTable[4]);
+    // 5: Sunny / SoftBurst rotated (10-pointed star, image_89a967.png)
+    buildTangentRoundedStarRadiiCpp26(10, 0.96f, 0.65f, 0.105f, 0.115f, -0.5f * kPi26 + 0.18f, gM3ShapeRadiiTable[5]);
 }
 
 } // namespace
@@ -4602,41 +5037,41 @@ Java_com_termuxx_app_TermuxActivity_nativeComputeM3LoadingPolygon(
     jboolean isRefreshing,
     jfloat radiusPx
 ) {
+    pthread_once(&gM3ShapeTableOnce, initM3ShapeTableCpp26);
     jfloat coords[kM3PolygonVertices * 2];
 
-    int shapeA = -1;
+    int shapeA = 0;
     int shapeB = 0;
     float morphT = 0.0f;
     float rotRad = 0.0f;
     float scalePulse = 1.0f;
 
     if (!isRefreshing) {
-        // DeterminateIndicatorPolygons: Circle.rotated(18deg) -> SoftBurst
+        // During pull-to-refresh drag: show the iconic 10-pointed star (SoftBurst, image_89a9a8.png)
+        // rotating and scaling smoothly with pull progress!
         float p = std::clamp(static_cast<float>(pullProgress), 0.0f, 1.25f);
-        shapeA = -1;
+        shapeA = 0;
         shapeB = 0;
-        morphT = std::clamp(p, 0.0f, 1.0f);
-        rotRad = (18.0f + p * 90.0f) * (kPi26 / 180.0f);
-        scalePulse = 0.85f + 0.15f * morphT;
+        morphT = 0.0f;
+        rotRad = (p * 90.0f) * (kPi26 / 180.0f);
+        scalePulse = 0.85f + 0.15f * std::clamp(p, 0.0f, 1.0f);
     } else {
-        // Official IndeterminateIndicatorPolygons 7-shape cycle (650ms per step):
-        // SoftBurst (0) -> Cookie9Sided (1) -> Pentagon (2) -> Pill (3) -> Sunny (4) -> Cookie4Sided (5) -> Oval (6)
+        // Exact 6-shape cycle matching the user's screenshots from video #2:
+        // 0: SoftBurst (10-star) -> 1: Cookie9Sided (9-cookie) -> 2: Pentagon (5-gon)
+        // -> 3: Cookie4Sided (4-clover) -> 4: Oval/Pill -> 5: Sunny (10-star rotated) -> 0
         float cleanPhase = std::max(0.0f, static_cast<float>(phase));
         int stepIdx = static_cast<int>(std::floor(cleanPhase));
         float u = cleanPhase - static_cast<float>(stepIdx);
-        shapeA = stepIdx % 7;
-        shapeB = (stepIdx + 1) % 7;
+        shapeA = stepIdx % 6;
+        shapeB = (stepIdx + 1) % 6;
 
-        // Underdamped spring (zeta = 0.6, stiffness = 200) with real 9.5% overshoot
         morphT = m3LoadingMorphSpringCpp26(u);
 
-        // 90deg step rotation over 194ms + continuous 360deg / 4666ms global rotation
         float totalTimeMs = cleanPhase * 650.0f;
         float globalRotDeg = (totalTimeMs / 4666.0f) * 360.0f;
-        float stepRotDeg = (static_cast<float>(stepIdx) + m3StepRotationProgressCpp26(u)) * 90.0f;
-        rotRad = (18.0f + globalRotDeg + stepRotDeg) * (kPi26 / 180.0f);
+        float stepRotDeg = (static_cast<float>(stepIdx) + m3StepRotationProgressCpp26(u)) * 60.0f;
+        rotRad = (globalRotDeg + stepRotDeg) * (kPi26 / 180.0f);
 
-        // 500ms keyframed scale bounce (1.0 -> 0.985 -> 1.10 -> 0.975 -> 1.0)
         scalePulse = m3ScaleBounceKeyframesCpp26(u);
     }
 
@@ -4644,10 +5079,10 @@ Java_com_termuxx_app_TermuxActivity_nativeComputeM3LoadingPolygon(
     const float angleStep = (2.0f * kPi26) / static_cast<float>(kM3PolygonVertices);
 
     for (int i = 0; i < kM3PolygonVertices; ++i) {
-        float localAngle = static_cast<float>(i) * angleStep;
-        float rA = evalMaterialShapeRadiusCpp26(shapeA, localAngle);
-        float rB = evalMaterialShapeRadiusCpp26(shapeB, localAngle);
-        float r = std::clamp(rA + (rB - rA) * morphT, 0.42f, 1.08f) * effRadius;
+        float localAngle = -0.5f * kPi26 + static_cast<float>(i) * angleStep;
+        float rA = gM3ShapeRadiiTable[shapeA][i];
+        float rB = gM3ShapeRadiiTable[shapeB][i];
+        float r = std::clamp(rA + (rB - rA) * morphT, 0.35f, 1.12f) * effRadius;
         float worldAngle = localAngle + rotRad;
         coords[i * 2] = r * std::cos(worldAngle);
         coords[i * 2 + 1] = r * std::sin(worldAngle);
