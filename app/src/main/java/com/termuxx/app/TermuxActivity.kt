@@ -1,4 +1,4 @@
-@file:Suppress("DEPRECATION", "ClickableViewAccessibility", "SetTextI18n")
+@file:Suppress("DEPRECATION", "ClickableViewAccessibility", "SetTextI18n", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_VALUE", "NAME_SHADOWING", "RedundantOverride")
 
 package com.termuxx.app
 
@@ -3649,6 +3649,359 @@ class TermuxActivity : Activity() {
                 }
             }
             return super.onTouchEvent(ev)
+        }
+    }
+
+    internal inner class MaterialIconView(
+        ctx: Context,
+        var icon: M3Icon,
+        var tintColor: Int = COLOR_TEXT_BRIGHT,
+        val iconSizeDp: Float = 20f,
+        val strokeWidthDp: Float = 2.0f
+    ) : View(ctx) {
+
+        private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+        private val path = Path()
+        private val rect = RectF()
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val defPx = dp(iconSizeDp.toInt().coerceAtLeast(18))
+            val w = resolveSize(defPx, widthMeasureSpec)
+            val h = resolveSize(defPx, heightMeasureSpec)
+            setMeasuredDimension(w, h)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val box = dpF(iconSizeDp)
+            val left = (width - box) * 0.5f
+            val top = (height - box) * 0.5f
+            val s = box / 24f
+
+            fun x(v: Float) = left + v * s
+            fun y(v: Float) = top + v * s
+
+            strokePaint.color = tintColor
+            strokePaint.strokeWidth = dpF(strokeWidthDp)
+            fillPaint.color = tintColor
+            path.reset()
+
+            when (icon) {
+                M3Icon.ADD -> {
+                    canvas.drawLine(x(12f), y(5f), x(12f), y(19f), strokePaint)
+                    canvas.drawLine(x(5f), y(12f), x(19f), y(12f), strokePaint)
+                }
+                M3Icon.ROOT_HASH -> {
+                    canvas.drawLine(x(9.5f), y(4.5f), x(7.5f), y(19.5f), strokePaint)
+                    canvas.drawLine(x(16.5f), y(4.5f), x(14.5f), y(19.5f), strokePaint)
+                    canvas.drawLine(x(4.5f), y(9.5f), x(19.5f), y(9.5f), strokePaint)
+                    canvas.drawLine(x(4.0f), y(14.5f), x(19.0f), y(14.5f), strokePaint)
+                }
+                M3Icon.HUB_GRID -> {
+                    val r = 2.2f * s
+                    rect.set(x(4f), y(4f), x(10.5f), y(10.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    rect.set(x(13.5f), y(4f), x(20f), y(10.5f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    rect.set(x(4f), y(13.5f), x(10.5f), y(20f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    rect.set(x(13.5f), y(13.5f), x(20f), y(20f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                }
+                M3Icon.SETTINGS -> {
+                    canvas.drawCircle(x(12f), y(12f), 3.2f * s, strokePaint)
+                    for (deg in 0 until 360 step 45) {
+                        val rad = Math.toRadians(deg.toDouble())
+                        val r1 = 6.2f * s
+                        val r2 = 8.8f * s
+                        val cx = x(12f)
+                        val cy = y(12f)
+                        canvas.drawLine(
+                            cx + (Math.cos(rad) * r1).toFloat(),
+                            cy + (Math.sin(rad) * r1).toFloat(),
+                            cx + (Math.cos(rad) * r2).toFloat(),
+                            cy + (Math.sin(rad) * r2).toFloat(),
+                            strokePaint
+                        )
+                    }
+                    canvas.drawCircle(x(12f), y(12f), 6.4f * s, strokePaint)
+                }
+                M3Icon.CLOSE -> {
+                    canvas.drawLine(x(6f), y(6f), x(18f), y(18f), strokePaint)
+                    canvas.drawLine(x(18f), y(6f), x(6f), y(18f), strokePaint)
+                }
+                M3Icon.SEARCH -> {
+                    canvas.drawCircle(x(10.5f), y(10.5f), 5.8f * s, strokePaint)
+                    canvas.drawLine(x(15f), y(15f), x(19.5f), y(19.5f), strokePaint)
+                }
+                M3Icon.TREE -> {
+                    canvas.drawLine(x(6f), y(5f), x(6f), y(18f), strokePaint)
+                    canvas.drawLine(x(6f), y(10f), x(13f), y(10f), strokePaint)
+                    canvas.drawLine(x(6f), y(18f), x(13f), y(18f), strokePaint)
+                    rect.set(x(13f), y(7.5f), x(19f), y(12.5f))
+                    canvas.drawRoundRect(rect, 1.5f * s, 1.5f * s, strokePaint)
+                    rect.set(x(13f), y(15.5f), x(19f), y(20.5f))
+                    canvas.drawRoundRect(rect, 1.5f * s, 1.5f * s, strokePaint)
+                }
+                M3Icon.EYE -> {
+                    path.moveTo(x(2.5f), y(12f))
+                    path.quadTo(x(12f), y(4.5f), x(21.5f), y(12f))
+                    path.quadTo(x(12f), y(19.5f), x(2.5f), y(12f))
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawCircle(x(12f), y(12f), 2.5f * s, strokePaint)
+                }
+                M3Icon.CREATE_FOLDER -> {
+                    path.moveTo(x(3.5f), y(7.5f))
+                    path.lineTo(x(9.5f), y(7.5f))
+                    path.lineTo(x(11.5f), y(9.5f))
+                    path.lineTo(x(20.5f), y(9.5f))
+                    path.lineTo(x(20.5f), y(18.5f))
+                    path.lineTo(x(3.5f), y(18.5f))
+                    path.close()
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawLine(x(12f), y(11.8f), x(12f), y(16.2f), strokePaint)
+                    canvas.drawLine(x(9.8f), y(14f), x(14.2f), y(14f), strokePaint)
+                }
+                M3Icon.REFRESH -> {
+                    rect.set(x(5f), y(5f), x(19f), y(19f))
+                    canvas.drawArc(rect, -45f, 285f, false, strokePaint)
+                    path.moveTo(x(15.2f), y(3.8f))
+                    path.lineTo(x(19.2f), y(6.8f))
+                    path.lineTo(x(15.0f), y(8.8f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.UPLOAD -> {
+                    canvas.drawLine(x(12f), y(16f), x(12f), y(5f), strokePaint)
+                    path.moveTo(x(7.5f), y(9.5f))
+                    path.lineTo(x(12f), y(5f))
+                    path.lineTo(x(16.5f), y(9.5f))
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawLine(x(5f), y(19.5f), x(19f), y(19.5f), strokePaint)
+                }
+                M3Icon.DOWNLOAD -> {
+                    canvas.drawLine(x(12f), y(4.5f), x(12f), y(15.5f), strokePaint)
+                    path.moveTo(x(7.5f), y(11f))
+                    path.lineTo(x(12f), y(15.5f))
+                    path.lineTo(x(16.5f), y(11f))
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawLine(x(5f), y(19.5f), x(19f), y(19.5f), strokePaint)
+                }
+                M3Icon.FOLDER -> {
+                    path.moveTo(x(3.5f), y(7f))
+                    path.lineTo(x(9.5f), y(7f))
+                    path.lineTo(x(11.5f), y(9.2f))
+                    path.lineTo(x(20.5f), y(9.2f))
+                    path.lineTo(x(20.5f), y(18.5f))
+                    path.lineTo(x(3.5f), y(18.5f))
+                    path.close()
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.FOLDER_OPEN -> {
+                    path.moveTo(x(3.5f), y(7f))
+                    path.lineTo(x(9.5f), y(7f))
+                    path.lineTo(x(11.5f), y(9.2f))
+                    path.lineTo(x(19.5f), y(9.2f))
+                    path.lineTo(x(19.5f), y(12f))
+                    canvas.drawPath(path, strokePaint)
+                    path.reset()
+                    path.moveTo(x(3.5f), y(18.5f))
+                    path.lineTo(x(6.0f), y(12f))
+                    path.lineTo(x(21.0f), y(12f))
+                    path.lineTo(x(18.5f), y(18.5f))
+                    path.close()
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.FILE -> {
+                    path.moveTo(x(6f), y(4f))
+                    path.lineTo(x(14f), y(4f))
+                    path.lineTo(x(18.5f), y(8.5f))
+                    path.lineTo(x(18.5f), y(20f))
+                    path.lineTo(x(6f), y(20f))
+                    path.close()
+                    canvas.drawPath(path, strokePaint)
+                    path.reset()
+                    path.moveTo(x(13.5f), y(4f))
+                    path.lineTo(x(13.5f), y(8.8f))
+                    path.lineTo(x(18.5f), y(8.8f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.MORE_VERT -> {
+                    val r = 1.65f * s
+                    canvas.drawCircle(x(12f), y(6f), r, fillPaint)
+                    canvas.drawCircle(x(12f), y(12f), r, fillPaint)
+                    canvas.drawCircle(x(12f), y(18f), r, fillPaint)
+                }
+                M3Icon.ARROW_BACK -> {
+                    canvas.drawLine(x(19f), y(12f), x(5f), y(12f), strokePaint)
+                    path.moveTo(x(11.5f), y(5.5f))
+                    path.lineTo(x(5f), y(12f))
+                    path.lineTo(x(11.5f), y(18.5f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.CHEVRON_RIGHT -> {
+                    path.moveTo(x(9.5f), y(6.5f))
+                    path.lineTo(x(15f), y(12f))
+                    path.lineTo(x(9.5f), y(17.5f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.CHEVRON_DOWN -> {
+                    path.moveTo(x(6.5f), y(9.5f))
+                    path.lineTo(x(12f), y(15f))
+                    path.lineTo(x(17.5f), y(9.5f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.TERMINAL -> {
+                    rect.set(x(3.5f), y(5f), x(20.5f), y(19f))
+                    canvas.drawRoundRect(rect, 3f * s, 3f * s, strokePaint)
+                    path.moveTo(x(7.5f), y(9.5f))
+                    path.lineTo(x(10.5f), y(12f))
+                    path.lineTo(x(7.5f), y(14.5f))
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawLine(x(12.2f), y(14.5f), x(16.2f), y(14.5f), strokePaint)
+                }
+                M3Icon.PING -> {
+                    path.moveTo(x(3.5f), y(12f))
+                    path.lineTo(x(7.5f), y(12f))
+                    path.lineTo(x(10f), y(6.5f))
+                    path.lineTo(x(14f), y(17.5f))
+                    path.lineTo(x(16.5f), y(12f))
+                    path.lineTo(x(20.5f), y(12f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.KEY -> {
+                    canvas.drawCircle(x(8.5f), y(12f), 3.8f * s, strokePaint)
+                    canvas.drawLine(x(12.3f), y(12f), x(20.5f), y(12f), strokePaint)
+                    canvas.drawLine(x(17.2f), y(12f), x(17.2f), y(15.5f), strokePaint)
+                    canvas.drawLine(x(20.0f), y(12f), x(20.0f), y(14.8f), strokePaint)
+                }
+                M3Icon.CHECK -> {
+                    path.moveTo(x(5.5f), y(12.5f))
+                    path.lineTo(x(10.0f), y(17.0f))
+                    path.lineTo(x(18.8f), y(7.5f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.TRASH -> {
+                    canvas.drawLine(x(4.5f), y(7f), x(19.5f), y(7f), strokePaint)
+                    path.moveTo(x(9.5f), y(7f))
+                    path.lineTo(x(9.5f), y(4.8f))
+                    path.lineTo(x(14.5f), y(4.8f))
+                    path.lineTo(x(14.5f), y(7f))
+                    canvas.drawPath(path, strokePaint)
+                    rect.set(x(6.5f), y(7f), x(17.5f), y(19.5f))
+                    canvas.drawRoundRect(rect, 2f * s, 2f * s, strokePaint)
+                    canvas.drawLine(x(10.2f), y(10.5f), x(10.2f), y(16f), strokePaint)
+                    canvas.drawLine(x(13.8f), y(10.5f), x(13.8f), y(16f), strokePaint)
+                }
+                M3Icon.ALL_PACKAGES -> {
+                    path.moveTo(x(12f), y(3.5f))
+                    path.lineTo(x(20f), y(8f))
+                    path.lineTo(x(20f), y(16f))
+                    path.lineTo(x(12f), y(20.5f))
+                    path.lineTo(x(4f), y(16f))
+                    path.lineTo(x(4f), y(8f))
+                    path.close()
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawLine(x(4f), y(8f), x(12f), y(12.2f), strokePaint)
+                    canvas.drawLine(x(20f), y(8f), x(12f), y(12.2f), strokePaint)
+                    canvas.drawLine(x(12f), y(12.2f), x(12f), y(20.5f), strokePaint)
+                }
+                M3Icon.STORAGE -> {
+                    rect.set(x(4f), y(5f), x(20f), y(10.8f))
+                    canvas.drawRoundRect(rect, 2.2f * s, 2.2f * s, strokePaint)
+                    rect.set(x(4f), y(13.2f), x(20f), y(19f))
+                    canvas.drawRoundRect(rect, 2.2f * s, 2.2f * s, strokePaint)
+                    canvas.drawCircle(x(8f), y(7.9f), 1.1f * s, fillPaint)
+                    canvas.drawCircle(x(8f), y(16.1f), 1.1f * s, fillPaint)
+                }
+                M3Icon.CURSOR -> {
+                    rect.set(x(8.5f), y(4.5f), x(15.5f), y(19.5f))
+                    canvas.drawRoundRect(rect, 1.8f * s, 1.8f * s, strokePaint)
+                    canvas.drawLine(x(6f), y(4.5f), x(18f), y(4.5f), strokePaint)
+                    canvas.drawLine(x(6f), y(19.5f), x(18f), y(19.5f), strokePaint)
+                }
+                M3Icon.KEYBOARD -> {
+                    rect.set(x(3f), y(6f), x(21f), y(18f))
+                    canvas.drawRoundRect(rect, 2.6f * s, 2.6f * s, strokePaint)
+                    canvas.drawLine(x(6.5f), y(10f), x(8.5f), y(10f), strokePaint)
+                    canvas.drawLine(x(11f), y(10f), x(13f), y(10f), strokePaint)
+                    canvas.drawLine(x(15.5f), y(10f), x(17.5f), y(10f), strokePaint)
+                    canvas.drawLine(x(7.5f), y(14.5f), x(16.5f), y(14.5f), strokePaint)
+                }
+                M3Icon.VIBRATION -> {
+                    rect.set(x(7.5f), y(5.5f), x(16.5f), y(18.5f))
+                    canvas.drawRoundRect(rect, 2.2f * s, 2.2f * s, strokePaint)
+                    canvas.drawLine(x(4.2f), y(8.2f), x(4.2f), y(15.8f), strokePaint)
+                    canvas.drawLine(x(19.8f), y(8.2f), x(19.8f), y(15.8f), strokePaint)
+                }
+                M3Icon.PALETTE -> {
+                    canvas.drawCircle(x(12f), y(12f), 8.2f * s, strokePaint)
+                    canvas.drawCircle(x(9.0f), y(9.2f), 1.3f * s, fillPaint)
+                    canvas.drawCircle(x(14.2f), y(8.8f), 1.3f * s, fillPaint)
+                    canvas.drawCircle(x(15.5f), y(13.2f), 1.3f * s, fillPaint)
+                    canvas.drawCircle(x(9.5f), y(14.5f), 1.3f * s, fillPaint)
+                }
+                M3Icon.CPU -> {
+                    rect.set(x(7f), y(7f), x(17f), y(17f))
+                    canvas.drawRoundRect(rect, 2f * s, 2f * s, strokePaint)
+                    for (pos in listOf(9.5f, 14.5f)) {
+                        canvas.drawLine(x(pos), y(3.8f), x(pos), y(7f), strokePaint)
+                        canvas.drawLine(x(pos), y(17f), x(pos), y(20.2f), strokePaint)
+                        canvas.drawLine(x(3.8f), y(pos), x(7f), y(pos), strokePaint)
+                        canvas.drawLine(x(17f), y(pos), x(20.2f), y(pos), strokePaint)
+                    }
+                }
+                M3Icon.SLIDERS -> {
+                    canvas.drawLine(x(4f), y(7f), x(20f), y(7f), strokePaint)
+                    canvas.drawLine(x(4f), y(12f), x(20f), y(12f), strokePaint)
+                    canvas.drawLine(x(4f), y(17f), x(20f), y(17f), strokePaint)
+                    canvas.drawCircle(x(9f), y(7f), 2.1f * s, fillPaint)
+                    canvas.drawCircle(x(15f), y(12f), 2.1f * s, fillPaint)
+                    canvas.drawCircle(x(11f), y(17f), 2.1f * s, fillPaint)
+                }
+                M3Icon.SERVER -> {
+                    rect.set(x(4f), y(4.8f), x(20f), y(10.5f))
+                    canvas.drawRoundRect(rect, 2.2f * s, 2.2f * s, strokePaint)
+                    rect.set(x(4f), y(13.5f), x(20f), y(19.2f))
+                    canvas.drawRoundRect(rect, 2.2f * s, 2.2f * s, strokePaint)
+                    canvas.drawCircle(x(8f), y(7.65f), 1.15f * s, fillPaint)
+                    canvas.drawCircle(x(8f), y(16.35f), 1.15f * s, fillPaint)
+                    canvas.drawLine(x(12.5f), y(7.65f), x(17f), y(7.65f), strokePaint)
+                    canvas.drawLine(x(12.5f), y(16.35f), x(17f), y(16.35f), strokePaint)
+                }
+                M3Icon.EDIT -> {
+                    path.moveTo(x(14.5f), y(5.2f))
+                    path.lineTo(x(18.8f), y(9.5f))
+                    path.lineTo(x(8.8f), y(19.5f))
+                    path.lineTo(x(4.5f), y(19.5f))
+                    path.lineTo(x(4.5f), y(15.2f))
+                    path.close()
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.COPY -> {
+                    rect.set(x(8.5f), y(8.5f), x(19.5f), y(19.5f))
+                    canvas.drawRoundRect(rect, 2f * s, 2f * s, strokePaint)
+                    path.moveTo(x(15.5f), y(8.5f))
+                    path.lineTo(x(15.5f), y(5.5f))
+                    path.lineTo(x(5.5f), y(5.5f))
+                    path.lineTo(x(5.5f), y(15.5f))
+                    path.lineTo(x(8.5f), y(15.5f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.FONT -> {
+                    path.moveTo(x(5.5f), y(19f))
+                    path.lineTo(x(12f), y(5f))
+                    path.lineTo(x(18.5f), y(19f))
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawLine(x(7.8f), y(14.2f), x(16.2f), y(14.2f), strokePaint)
+                }
+            }
         }
     }
 

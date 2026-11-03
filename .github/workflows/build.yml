@@ -11,15 +11,17 @@ on:
       - master
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     name: Build APK
     runs-on: ubuntu-latest
 
     steps:
+      - name: Configure Git Defaults
+        run: |
+          git config --global init.defaultBranch main
+          git config --global advice.defaultBranchName false
+
       - name: Checkout
         uses: actions/checkout@main
 
@@ -32,7 +34,7 @@ jobs:
         uses: actions/setup-java@main
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '25'
 
       - name: Cache Pre-Patched Bootstrap & Font
         uses: actions/cache@main
@@ -53,13 +55,13 @@ jobs:
             ~/.gradle/wrapper
             ~/.ccache
             app/.cxx
-          key: termuxx-gradle-cxx-v3-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml', 'app/src/main/cpp/CMakeLists.txt') }}
+          key: termuxx-gradle-cxx-v4-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml', 'app/src/main/cpp/CMakeLists.txt') }}
           restore-keys: |
-            termuxx-gradle-cxx-v3-${{ runner.os }}-
+            termuxx-gradle-cxx-v4-${{ runner.os }}-
 
       - name: Accept SDK Licenses
         run: |
-          yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          yes 2>/dev/null | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
 
       - name: Prepare Bootstrap & Pre-Install OpenSSH
         run: |
