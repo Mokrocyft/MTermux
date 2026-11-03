@@ -331,6 +331,8 @@ class TermuxActivity : Activity() {
     private lateinit var rootLayout: LinearLayout
     private lateinit var headerBar: LinearLayout
     private lateinit var tabStrip: LinearLayout
+    private lateinit var tabSlidingIndicator: View
+    private var prevActiveSessionIdx: Int = 0
     private lateinit var extraKeysRoot: LinearLayout
     internal lateinit var terminalSurface: TerminalSurface
     private val modifierButtons = ArrayList<TextView>(4)
@@ -479,6 +481,13 @@ class TermuxActivity : Activity() {
             clipToPadding = true
             setPadding(0, 0, dp(4), 0)
         }
+        val tabContainer = FrameLayout(this).apply {
+            clipChildren = true
+            clipToPadding = true
+        }
+        tabSlidingIndicator = View(this).apply {
+            background = makeLiquidGlassPillDrawable(uiAccentContainer, dp(15))
+        }
         tabStrip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -486,7 +495,9 @@ class TermuxActivity : Activity() {
             clipToPadding = true
             setPadding(0, dp(2), dp(4), dp(2))
         }
-        tabScroll.addView(tabStrip)
+        tabContainer.addView(tabSlidingIndicator, FrameLayout.LayoutParams(0, 0))
+        tabContainer.addView(tabStrip, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        tabScroll.addView(tabContainer, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
         headerBar.addView(
             tabScroll,
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
@@ -498,13 +509,6 @@ class TermuxActivity : Activity() {
             makeHeaderIconButton(
                 icon = M3Icon.ADD,
                 onClick = { createSession(false) },
-                onLongClick = { showWorkspaceHubDialog(initialTab = 0) }
-            )
-        )
-        headerBar.addView(
-            makeHeaderIconButton(
-                icon = M3Icon.ROOT_HASH,
-                onClick = { createSession(true) },
                 onLongClick = { terminalSurface.showTranscriptCopyDialog() }
             )
         )
@@ -8499,6 +8503,7 @@ class TermuxActivity : Activity() {
     }
 
     internal fun rebuildTabs() {
+        if (!::tabSlidingIndicator.isInitialized) return
         val rawCount = nativeGetSessionCount()
         val count = max(1, rawCount)
         val active = (if (rawCount > 0) nativeGetActiveIndex() else 0).coerceIn(0, count - 1)
