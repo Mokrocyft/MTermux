@@ -3880,72 +3880,171 @@ static const char* resolveRootSuBinaryCpp26() noexcept {
     return "/system/bin/su";
 }
 
-static bool execRootShellCommandCpp26(const std::string& shellCmd, std::string& outStdout, int timeoutMs = 8000) noexcept {
+static pthread_mutex_t gRootDaemonMutex = PTHREAD_MUTEX_INITIALIZER;
+static pid_t gRootDaemonPid = -1;
+static int gRootDaemonInFd = -1;
+static int gRootDaemonOutFd = -1;
+static uint32_t gRootDaemonSeq = 1;
+
+static void closeRootDaemonLockedCpp26() noexcept {
+    if (gRootDaemonInFd >= 0) {
+        close(gRootDaemonInFd);
+        gRootDaemonInFd = -1;
+    }
+    if (gRootDaemonOutFd >= 0) {
+        close(gRootDaemonOutFd);
+        gRootDaemonOutFd = -1;
+    }
+    if (gRootDaemonPid > 0) {
+        kill(-gRootDaemonPid, SIGKILL);
+        kill(gRootDaemonPid, SIGKILL);
+        int st = 0;
+        while (waitpid(gRootDaemonPid, &st, WNOHANG) < 0 && errno == EINTR) {}
+        gRootDaemonPid = -1;
+    }
+}
+
+static bool ensureRootDaemonStartedLockedCpp26() noexcept {
+    if (gRootDaemonPid > 0 && gRootDaemonInFd >= 0 && gRootDaemonOutFd >= 0) {
+        int st = 0;
+        pid_t w = waitpid(gRootDaemonPid, &st, WNOHANG);
+        if (w == 0) return true;
+        closeRootDaemonLockedCpp26();
+    }
+
     const char* suBin = resolveRootSuBinaryCpp26();
+    int inPipe[2];
     int outPipe[2];
-    if (pipe2(outPipe, O_CLOEXEC | O_NONBLOCK) != 0) return false;
+    if (pipe2(inPipe, O_CLOEXEC) != 0) return false;
+    if (pipe2(outPipe, O_CLOEXEC | O_NONBLOCK) != 0) {
+        close(inPipe[0]);
+        close(inPipe[1]);
+        return false;
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
+        close(inPipe[0]);
+        close(inPipe[1]);
         close(outPipe[0]);
         close(outPipe[1]);
         return false;
     }
     if (pid == 0) {
         setsid();
+        close(inPipe[1]);
         close(outPipe[0]);
-        int devNull = open("/dev/null", O_RDWR);
-        if (devNull >= 0) {
-            dup2(devNull, STDIN_FILENO);
-            dup2(devNull, STDERR_FILENO);
-            if (devNull > 2) close(devNull);
-        }
+        dup2(inPipe[0], STDIN_FILENO);
+        close(inPipe[0]);
+
         int fl = fcntl(outPipe[1], F_GETFL, 0);
         if (fl >= 0) fcntl(outPipe[1], F_SETFL, fl & ~O_NONBLOCK);
         dup2(outPipe[1], STDOUT_FILENO);
         close(outPipe[1]);
 
+        int devNull = open("/dev/null", O_WRONLY);
+        if (devNull >= 0) {
+            dup2(devNull, STDERR_FILENO);
+            if (devNull > 2) close(devNull);
+        }
         unsetenv("LD_PRELOAD");
-        std::string fullCmd = "export PATH=\"" + std::string(BIN_PATH) + ":/system/bin:/system/xbin:/sbin:$PATH\"; " + shellCmd;
-        execl(suBin, "su", "-c", fullCmd.c_str(), static_cast<char*>(nullptr));
+        execl(suBin, "su", static_cast<char*>(nullptr));
         _exit(127);
     }
-    close(outPipe[1]);
 
+    close(inPipe[0]);
+    close(outPipe[1]);
+    gRootDaemonPid = pid;
+    gRootDaemonInFd = inPipe[1];
+    gRootDaemonOutFd = outPipe[0];
+
+    std::string initCmd = "export PATH=\"" + std::string(BIN_PATH) + ":/system/bin:/system/xbin:/sbin:$PATH\"\n";
+    ssize_t wr = write(gRootDaemonInFd, initCmd.data(), initCmd.size());
+    (void)wr;
+    return true;
+}
+
+static bool execRootShellCommandCpp26(const std::string& shellCmd, std::string& outStdout, int timeoutMs = 6000) noexcept {
     outStdout.clear();
+    pthread_mutex_lock(&gRootDaemonMutex);
+    if (!ensureRootDaemonStartedLockedCpp26()) {
+        pthread_mutex_unlock(&gRootDaemonMutex);
+        return false;
+    }
+
+    uint32_t seq = ++gRootDaemonSeq;
+    std::string startMarker = "__R_BEGIN_" + std::to_string(seq) + "__";
+    std::string endPrefix = "__R_END_" + std::to_string(seq) + "__:";
+
+    std::string payload = "printf '" + startMarker + "\\n'; ( " + shellCmd +
+        " ) 2>/dev/null; printf '\\n" + endPrefix + "%d\\n' $?\n";
+
+    size_t totalWritten = 0;
+    while (totalWritten < payload.size()) {
+        ssize_t w = write(gRootDaemonInFd, payload.data() + totalWritten, payload.size() - totalWritten);
+        if (w <= 0) {
+            if (errno == EINTR) continue;
+            closeRootDaemonLockedCpp26();
+            pthread_mutex_unlock(&gRootDaemonMutex);
+            return false;
+        }
+        totalWritten += static_cast<size_t>(w);
+    }
+
+    std::string rawBuf;
+    rawBuf.reserve(16384);
     char buf[16384];
-    struct pollfd pfd{outPipe[0], POLLIN | POLLERR | POLLHUP, 0};
+    struct pollfd pfd{gRootDaemonOutFd, POLLIN | POLLERR | POLLHUP, 0};
     int elapsed = 0;
+    int exitCode = -1;
+    bool foundEnd = false;
+
     while (elapsed < timeoutMs) {
-        int pr = poll(&pfd, 1, 100);
+        int pr = poll(&pfd, 1, 15);
         if (pr < 0) {
             if (errno == EINTR) continue;
             break;
         }
         if (pr == 0) {
-            elapsed += 100;
+            elapsed += 15;
             continue;
         }
         if (pfd.revents & (POLLIN | POLLERR | POLLHUP)) {
-            ssize_t n = read(outPipe[0], buf, sizeof(buf));
+            ssize_t n = read(gRootDaemonOutFd, buf, sizeof(buf));
             if (n > 0) {
-                outStdout.append(buf, static_cast<size_t>(n));
-                if (outStdout.size() > 2 * 1024 * 1024) break;
+                rawBuf.append(buf, static_cast<size_t>(n));
+                size_t endPos = rawBuf.find(endPrefix);
+                if (endPos != std::string::npos) {
+                    size_t nlPos = rawBuf.find('\n', endPos);
+                    if (nlPos != std::string::npos) {
+                        std::string codeStr = rawBuf.substr(endPos + endPrefix.size(), nlPos - (endPos + endPrefix.size()));
+                        exitCode = atoi(codeStr.c_str());
+                        size_t startPos = rawBuf.find(startMarker + "\n");
+                        size_t contentStart = (startPos != std::string::npos) ? (startPos + startMarker.size() + 1) : 0;
+                        if (endPos > contentStart) {
+                            outStdout.assign(rawBuf, contentStart, endPos - contentStart);
+                            if (!outStdout.empty() && outStdout.back() == '\n') {
+                                outStdout.pop_back();
+                            }
+                        }
+                        foundEnd = true;
+                        break;
+                    }
+                }
+                if (rawBuf.size() > 2 * 1024 * 1024) break;
             } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
                 break;
             }
         }
     }
-    close(outPipe[0]);
-    int status = 0;
-    if (elapsed >= timeoutMs) {
-        kill(-pid, SIGKILL);
-        kill(pid, SIGKILL);
+
+    if (!foundEnd) {
+        closeRootDaemonLockedCpp26();
+        pthread_mutex_unlock(&gRootDaemonMutex);
+        return false;
     }
-    while (waitpid(pid, &status, 0) < 0) {
-        if (errno != EINTR) break;
-    }
-    return WIFEXITED(status) && (WEXITSTATUS(status) == 0);
+    pthread_mutex_unlock(&gRootDaemonMutex);
+    return (exitCode == 0);
 }
 
 JNIEXPORT jstring JNICALL
@@ -4024,11 +4123,11 @@ Java_com_termuxx_app_TermuxActivity_nativeListLocalDir(
     // automatically use root `su -c` fallback so root users can browse all system directories!
     if (dir == nullptr || (entries.empty() && (dirPath == "/" || dirPath.rfind("/data", 0) == 0 || dirPath.rfind("/system", 0) == 0))) {
         std::string pattern = showHidden ? "* .[!.]* ..?*" : "*";
-        std::string rootScript = "cd " + shellEscapeSingleCpp(dirPath) + " 2>/dev/null && for f in " + pattern + "; do " +
-            std::string(R"sh([ -e "$f" ] || [ -L "$f" ] || continue; stat -c '@@E@@%F|%s|%Y|%A|%n' -- "$f" 2>/dev/null || (if [ -d "$f" ]; then printf '@@E@@directory|0|0|drwxr-xr-x|%s\n' "$f"; else printf '@@E@@file|0|0|-rw-r--r--|%s\n' "$f"; fi); done)sh");
+        std::string rootScript = "cd " + shellEscapeSingleCpp(dirPath) + " 2>/dev/null && stat -L -c '@@E@@%F|%s|%Y|%A|%n' -- " + pattern + " 2>/dev/null; true";
         std::string rootOut;
         if (execRootShellCommandCpp26(rootScript, rootOut, 6000) && !rootOut.empty()) {
             entries.clear();
+            std::vector<std::string> seenNames;
             std::string_view sv(rootOut);
             size_t pos = 0;
             while (pos < sv.size()) {
@@ -4056,7 +4155,9 @@ Java_com_termuxx_app_TermuxActivity_nativeListLocalDir(
                 std::string pm(line.substr(p3 + 1, p4 - (p3 + 1)));
                 std::string nameStr(line.substr(p4 + 1));
                 if (nameStr.rfind("./", 0) == 0) nameStr.erase(0, 2);
-                if (nameStr.empty() || nameStr == "." || nameStr == "..") continue;
+                if (nameStr.empty() || nameStr == "." || nameStr == ".." || nameStr == "*") continue;
+                if (std::find(seenNames.begin(), seenNames.end(), nameStr) != seenNames.end()) continue;
+                seenNames.push_back(nameStr);
 
                 std::string lowerStr = nameStr;
                 for (char& c : lowerStr) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
