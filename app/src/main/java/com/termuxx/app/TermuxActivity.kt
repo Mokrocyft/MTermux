@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION", "ClickableViewAccessibility", "SetTextI18n")
+
 package com.termuxx.app
 
 import android.Manifest
@@ -1348,25 +1350,29 @@ class TermuxActivity : Activity() {
     }
 
     private fun createExpressiveDialog(maxWidthDp: Int = 430): Pair<Dialog, LinearLayout> {
+        val targetW = min(resources.displayMetrics.widthPixels - dp(28), dp(maxWidthDp))
         val dlg = Dialog(this)
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            minimumWidth = targetW
+            setPadding(dp(22), dp(20), dp(22), dp(18))
+            background = tonalBg(uiSurfaceHigh, dp(28))
+            layoutParams = ViewGroup.LayoutParams(targetW, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        dlg.setContentView(sheet, ViewGroup.LayoutParams(targetW, ViewGroup.LayoutParams.WRAP_CONTENT))
         dlg.window?.apply {
             setBackgroundDrawable(ColorDrawable(0))
-            setLayout(
-                min(resources.displayMetrics.widthPixels - dp(24), dp(maxWidthDp)),
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
+            setLayout(targetW, ViewGroup.LayoutParams.WRAP_CONTENT)
             attributes = attributes.apply {
+                width = targetW
                 dimAmount = 0.65f
             }
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         }
-        val sheet = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(20), dp(22), dp(18))
-            background = tonalBg(uiSurfaceHigh, dp(28))
+        dlg.setOnShowListener {
+            dlg.window?.setLayout(targetW, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-        dlg.setContentView(sheet)
         animateCenteredDialogAppear(sheet)
         return dlg to sheet
     }
@@ -3420,46 +3426,43 @@ class TermuxActivity : Activity() {
                 field = value
                 invalidate()
             }
+        var pullProgress: Float = 1f
+            set(value) {
+                field = value
+                invalidate()
+            }
+        var isIndeterminateRefreshing: Boolean = true
+            set(value) {
+                field = value
+                invalidate()
+            }
 
         private val shapePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
         }
         private val morphPath = Path()
 
-        // Lobe counts for Material 3 Expressive LoadingIndicator sequence
-        private val lobes = intArrayOf(4, 7, 5, 6, 3)
-        private val amps = floatArrayOf(0.16f, 0.18f, 0.15f, 0.14f, 0.14f)
-
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val cx = width * 0.5f
             val cy = height * 0.5f
-            val baseR = min(cx, cy) * 0.58f
+            val baseR = min(cx, cy) * 0.68f
             if (baseR <= 1f) return
 
-            val totalStages = lobes.size
-            val norm = ((morphPhase % totalStages) + totalStages) % totalStages
-            val idx0 = norm.toInt() % totalStages
-            val idx1 = (idx0 + 1) % totalStages
-            val rawT = norm - norm.toInt()
-            // Smoothstep interpolation between shape keyframes
-            val t = rawT * rawT * (3f - 2f * rawT)
-
-            val k0 = lobes[idx0].toFloat()
-            val k1 = lobes[idx1].toFloat()
-            val a0 = amps[idx0]
-            val a1 = amps[idx1]
-            val rotRad = morphPhase * 1.35f
+            // Compute exact MaterialShapes vertices in C++26 (72 smooth contour points)
+            val coords = nativeComputeM3LoadingPolygon(
+                morphPhase,
+                pullProgress,
+                isIndeterminateRefreshing,
+                baseR
+            )
+            if (coords.size < 4) return
 
             morphPath.reset()
-            val steps = 72
-            for (i in 0..steps) {
-                val theta = (i.toFloat() / steps.toFloat()) * (2f * Math.PI.toFloat())
-                val w0 = 1f + a0 * cos(k0 * theta)
-                val w1 = 1f + a1 * cos(k1 * theta)
-                val r = baseR * (w0 * (1f - t) + w1 * t)
-                val px = cx + r * cos(theta + rotRad)
-                val py = cy + r * sin(theta + rotRad)
+            val n = coords.size / 2
+            for (i in 0 until n) {
+                val px = cx + coords[i * 2]
+                val py = cy + coords[i * 2 + 1]
                 if (i == 0) morphPath.moveTo(px, py) else morphPath.lineTo(px, py)
             }
             morphPath.close()
@@ -3475,8 +3478,8 @@ class TermuxActivity : Activity() {
     ) : FrameLayout(context) {
 
         private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
-        private val triggerDistancePx = dpF(68f)
-        private val maxPullPx = dpF(122f)
+        private val triggerDistancePx = dpF(64f)
+        private val maxPullPx = dpF(118f)
 
         private var downX = 0f
         private var downY = 0f
@@ -3485,6 +3488,7 @@ class TermuxActivity : Activity() {
         private var isRefreshing = false
         private var thresholdCrossed = false
         private var currentPullPx = 0f
+        private var spinAnimator: ValueAnimator? = null
 
         private val indicatorBadge: FrameLayout
         private val morphIndicator: BakaSuMorphingIndicatorView
@@ -3497,21 +3501,25 @@ class TermuxActivity : Activity() {
                 LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             )
 
-            morphIndicator = BakaSuMorphingIndicatorView(context)
+            morphIndicator = BakaSuMorphingIndicatorView(context).apply {
+                isIndeterminateRefreshing = false
+                pullProgress = 0f
+            }
+            // Exact Material 3 Expressive PullToRefreshDefaults.LoadingIndicator (42dp circle container)
             indicatorBadge = FrameLayout(context).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(uiAccentContainer)
                 }
-                elevation = dpF(8f)
-                layoutParams = LayoutParams(dp(46), dp(46), Gravity.TOP or Gravity.CENTER_HORIZONTAL)
-                translationY = -dpF(56f)
-                scaleX = 0.2f
-                scaleY = 0.2f
+                elevation = dpF(6f)
+                layoutParams = LayoutParams(dp(42), dp(42), Gravity.TOP or Gravity.CENTER_HORIZONTAL)
+                translationY = -dpF(48f)
+                scaleX = 0f
+                scaleY = 0f
                 alpha = 0f
                 addView(
                     morphIndicator,
-                    LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER)
+                    LayoutParams(dp(30), dp(30), Gravity.CENTER)
                 )
             }
             addView(indicatorBadge)
@@ -3559,20 +3567,22 @@ class TermuxActivity : Activity() {
                     }
                     val rawDelta = max(0f, ev.y - pullStartY)
                     currentPullPx = (rawDelta * 0.48f).coerceAtMost(maxPullPx)
-                    val progress = (currentPullPx / triggerDistancePx).coerceIn(0f, 1.35f)
+                    val progress = (currentPullPx / triggerDistancePx).coerceIn(0f, 1.25f)
 
-                    indicatorBadge.translationY = -dpF(48f) + currentPullPx
-                    val sc = (0.25f + progress * 0.75f).coerceIn(0.25f, 1.05f)
-                    indicatorBadge.scaleX = sc
-                    indicatorBadge.scaleY = sc
-                    indicatorBadge.alpha = (progress * 1.25f).coerceIn(0f, 1f)
-                    morphIndicator.morphPhase = progress * 2.2f
-                    scrollView.translationY = currentPullPx * 0.34f
+                    // BakaSU PullToRefreshBox: only the circular LoadingIndicator descends over the list
+                    indicatorBadge.translationY = -dpF(46f) + min(currentPullPx * 0.85f, dpF(68f))
+                    val easedScale = (1f - (1f - progress.coerceIn(0f, 1f)) * (1f - progress.coerceIn(0f, 1f))).coerceIn(0f, 1f)
+                    indicatorBadge.scaleX = easedScale
+                    indicatorBadge.scaleY = easedScale
+                    indicatorBadge.alpha = (progress * 1.8f).coerceIn(0f, 1f)
+
+                    morphIndicator.isIndeterminateRefreshing = false
+                    morphIndicator.pullProgress = progress
 
                     if (progress >= 1.0f && !thresholdCrossed) {
                         thresholdCrossed = true
-                        triggerHaptic(1.1f)
-                    } else if (progress < 0.94f && thresholdCrossed) {
+                        triggerHaptic(1.05f)
+                    } else if (progress < 0.92f && thresholdCrossed) {
                         thresholdCrossed = false
                     }
                     return true
@@ -3584,57 +3594,53 @@ class TermuxActivity : Activity() {
                         currentPullPx = 0f
                         if (triggered) {
                             isRefreshing = true
+                            morphIndicator.isIndeterminateRefreshing = true
+                            morphIndicator.morphPhase = 0f
+
                             indicatorBadge.animate()
-                                .translationY(dpF(14f))
+                                .translationY(dpF(16f))
                                 .scaleX(1.0f)
                                 .scaleY(1.0f)
                                 .alpha(1.0f)
-                                .setDuration(180L)
+                                .setDuration(200L)
                                 .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
-                            scrollView.animate()
-                                .translationY(dpF(26f))
-                                .setDuration(180L)
-                                .setInterpolator(aosp17SpatialInterpolator)
-                                .start()
-                            val startPhase = morphIndicator.morphPhase
-                            ValueAnimator.ofFloat(startPhase, startPhase + 3.6f).apply {
-                                duration = 560L
-                                interpolator = DecelerateInterpolator()
+
+                            spinAnimator?.cancel()
+                            spinAnimator = ValueAnimator.ofFloat(0f, 7f).apply {
+                                duration = 3850L // 550ms per MaterialShape step (7 shapes)
+                                repeatCount = ValueAnimator.INFINITE
+                                interpolator = LinearInterpolator()
                                 addUpdateListener { anim ->
                                     morphIndicator.morphPhase = anim.animatedValue as Float
                                 }
                                 start()
                             }
+
+                            // Refresh data immediately while keeping the morphing indicator visible for 1.5 shape morphs
+                            onRefreshTriggered()
+
                             postDelayed({
-                                onRefreshTriggered()
                                 isRefreshing = false
                                 indicatorBadge.animate()
-                                    .translationY(-dpF(56f))
-                                    .scaleX(0.2f)
-                                    .scaleY(0.2f)
+                                    .translationY(-dpF(46f))
+                                    .scaleX(0f)
+                                    .scaleY(0f)
                                     .alpha(0f)
-                                    .setDuration(230L)
-                                    .setInterpolator(aosp17SpatialInterpolator)
+                                    .setDuration(220L)
+                                    .setInterpolator(predictiveCommitInterpolator)
+                                    .withEndAction {
+                                        spinAnimator?.cancel()
+                                    }
                                     .start()
-                                scrollView.animate()
-                                    .translationY(0f)
-                                    .setDuration(230L)
-                                    .setInterpolator(aosp17SpatialInterpolator)
-                                    .start()
-                            }, 520L)
+                            }, 850L)
                         } else {
                             indicatorBadge.animate()
-                                .translationY(-dpF(56f))
-                                .scaleX(0.2f)
-                                .scaleY(0.2f)
+                                .translationY(-dpF(46f))
+                                .scaleX(0f)
+                                .scaleY(0f)
                                 .alpha(0f)
-                                .setDuration(220L)
-                                .setInterpolator(aosp17SpatialInterpolator)
-                                .start()
-                            scrollView.animate()
-                                .translationY(0f)
-                                .setDuration(220L)
+                                .setDuration(200L)
                                 .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
                         }
@@ -3643,419 +3649,6 @@ class TermuxActivity : Activity() {
                 }
             }
             return super.onTouchEvent(ev)
-        }
-    }
-
-    internal inner class MaterialIconView(
-        context: Context,
-        var icon: M3Icon,
-        var tintColor: Int,
-        private val iconSizeDp: Float = 22f,
-        private val strokeWidthDp: Float = 2.15f
-    ) : View(context) {
-        private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
-        }
-        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-        }
-        private val path = Path()
-        private val rect = RectF()
-
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            val sizePx = min(width.toFloat(), height.toFloat()).coerceAtMost(dpF(iconSizeDp))
-            if (sizePx <= 0f) return
-            val ox = (width - sizePx) * 0.5f
-            val oy = (height - sizePx) * 0.5f
-            val u = sizePx / 24f
-
-            strokePaint.color = tintColor
-            strokePaint.strokeWidth = max(1.6f, dpF(strokeWidthDp))
-            fillPaint.color = tintColor
-            path.reset()
-
-            fun x(v: Float) = ox + v * u
-            fun y(v: Float) = oy + v * u
-
-            when (icon) {
-                M3Icon.ADD -> {
-                    canvas.drawLine(x(12f), y(5f), x(12f), y(19f), strokePaint)
-                    canvas.drawLine(x(5f), y(12f), x(19f), y(12f), strokePaint)
-                }
-                M3Icon.ROOT_HASH -> {
-                    canvas.drawLine(x(9.5f), y(4.5f), x(7.5f), y(19.5f), strokePaint)
-                    canvas.drawLine(x(16.5f), y(4.5f), x(14.5f), y(19.5f), strokePaint)
-                    canvas.drawLine(x(4.5f), y(9.5f), x(19.5f), y(9.5f), strokePaint)
-                    canvas.drawLine(x(4.5f), y(14.5f), x(19.5f), y(14.5f), strokePaint)
-                }
-                M3Icon.HUB_GRID -> {
-                    val r = 2.2f * u
-                    rect.set(x(3.5f), y(3.5f), x(10.2f), y(10.2f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(13.8f), y(3.5f), x(20.5f), y(10.2f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(3.5f), y(13.8f), x(10.2f), y(20.5f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(13.8f), y(13.8f), x(20.5f), y(20.5f))
-                    fillPaint.alpha = 70
-                    canvas.drawRoundRect(rect, r, r, fillPaint)
-                    fillPaint.alpha = 255
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                }
-                M3Icon.SETTINGS -> {
-                    canvas.drawLine(x(4f), y(7f), x(20f), y(7f), strokePaint)
-                    canvas.drawLine(x(4f), y(17f), x(20f), y(17f), strokePaint)
-                    fillPaint.color = COLOR_SURFACE
-                    canvas.drawCircle(x(9f), y(7f), 2.8f * u, fillPaint)
-                    canvas.drawCircle(x(15f), y(17f), 2.8f * u, fillPaint)
-                    canvas.drawCircle(x(9f), y(7f), 2.8f * u, strokePaint)
-                    canvas.drawCircle(x(15f), y(17f), 2.8f * u, strokePaint)
-                }
-                M3Icon.CLOSE -> {
-                    canvas.drawLine(x(6f), y(6f), x(18f), y(18f), strokePaint)
-                    canvas.drawLine(x(18f), y(6f), x(6f), y(18f), strokePaint)
-                }
-                M3Icon.SEARCH -> {
-                    canvas.drawCircle(x(10.8f), y(10.8f), 6.2f * u, strokePaint)
-                    canvas.drawLine(x(15.4f), y(15.4f), x(20.2f), y(20.2f), strokePaint)
-                }
-                M3Icon.TREE -> {
-                    val r = 1.8f * u
-                    rect.set(x(3.5f), y(3.5f), x(9.5f), y(8.5f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(14.5f), y(8.5f), x(20.5f), y(13.5f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(14.5f), y(15.5f), x(20.5f), y(20.5f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    path.moveTo(x(6.5f), y(8.5f))
-                    path.lineTo(x(6.5f), y(18f))
-                    path.lineTo(x(14.5f), y(18f))
-                    path.moveTo(x(6.5f), y(11f))
-                    path.lineTo(x(14.5f), y(11f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.EYE -> {
-                    rect.set(x(2.5f), y(6.5f), x(21.5f), y(17.5f))
-                    canvas.drawOval(rect, strokePaint)
-                    canvas.drawCircle(x(12f), y(12f), 2.4f * u, fillPaint)
-                }
-                M3Icon.CREATE_FOLDER -> {
-                    path.moveTo(x(3f), y(7f))
-                    path.lineTo(x(3f), y(18.5f))
-                    path.quadTo(x(3f), y(20f), x(4.5f), y(20f))
-                    path.lineTo(x(19.5f), y(20f))
-                    path.quadTo(x(21f), y(20f), x(21f), y(18.5f))
-                    path.lineTo(x(21f), y(9f))
-                    path.quadTo(x(21f), y(7.5f), x(19.5f), y(7.5f))
-                    path.lineTo(x(12f), y(7.5f))
-                    path.lineTo(x(9.8f), y(5f))
-                    path.lineTo(x(4.5f), y(5f))
-                    path.quadTo(x(3f), y(5f), x(3f), y(7f))
-                    path.close()
-                    canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(14.5f), y(11.2f), x(14.5f), y(16.2f), strokePaint)
-                    canvas.drawLine(x(12f), y(13.7f), x(17f), y(13.7f), strokePaint)
-                }
-                M3Icon.REFRESH -> {
-                    rect.set(x(5.0f), y(5.0f), x(19.0f), y(19.0f))
-                    canvas.drawArc(rect, 42f, 276f, false, strokePaint)
-                    path.moveTo(x(17.6f), y(3.6f))
-                    path.lineTo(x(17.6f), y(8.2f))
-                    path.lineTo(x(13.0f), y(8.2f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.UPLOAD -> {
-                    canvas.drawLine(x(12f), y(15.5f), x(12f), y(4.5f), strokePaint)
-                    path.moveTo(x(7.2f), y(9.2f))
-                    path.lineTo(x(12f), y(4.4f))
-                    path.lineTo(x(16.8f), y(9.2f))
-                    canvas.drawPath(path, strokePaint)
-                    path.moveTo(x(4.5f), y(15.5f))
-                    path.lineTo(x(4.5f), y(18.5f))
-                    path.quadTo(x(4.5f), y(20f), x(6f), y(20f))
-                    path.lineTo(x(18f), y(20f))
-                    path.quadTo(x(19.5f), y(20f), x(19.5f), y(18.5f))
-                    path.lineTo(x(19.5f), y(15.5f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.DOWNLOAD -> {
-                    canvas.drawLine(x(12f), y(4.5f), x(12f), y(15.5f), strokePaint)
-                    path.moveTo(x(7.2f), y(10.8f))
-                    path.lineTo(x(12f), y(15.6f))
-                    path.lineTo(x(16.8f), y(10.8f))
-                    canvas.drawPath(path, strokePaint)
-                    path.moveTo(x(4.5f), y(15.5f))
-                    path.lineTo(x(4.5f), y(18.5f))
-                    path.quadTo(x(4.5f), y(20f), x(6f), y(20f))
-                    path.lineTo(x(18f), y(20f))
-                    path.quadTo(x(19.5f), y(20f), x(19.5f), y(18.5f))
-                    path.lineTo(x(19.5f), y(15.5f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.FOLDER, M3Icon.FOLDER_OPEN -> {
-                    path.moveTo(x(3f), y(6.8f))
-                    path.quadTo(x(3f), y(5f), x(4.8f), y(5f))
-                    path.lineTo(x(9.4f), y(5f))
-                    path.lineTo(x(11.6f), y(7.4f))
-                    path.lineTo(x(19.2f), y(7.4f))
-                    path.quadTo(x(21f), y(7.4f), x(21f), y(9.2f))
-                    path.lineTo(x(21f), y(17.7f))
-                    path.quadTo(x(21f), y(19.5f), x(19.2f), y(19.5f))
-                    path.lineTo(x(4.8f), y(19.5f))
-                    path.quadTo(x(3f), y(19.5f), x(3f), y(17.7f))
-                    path.close()
-                    fillPaint.color = (0x36 shl 24) or (tintColor and 0x00FFFFFF)
-                    canvas.drawPath(path, fillPaint)
-                    canvas.drawPath(path, strokePaint)
-                    if (icon == M3Icon.FOLDER_OPEN) {
-                        canvas.drawLine(x(3.5f), y(11.2f), x(20.5f), y(11.2f), strokePaint)
-                    }
-                }
-                M3Icon.FILE -> {
-                    path.moveTo(x(5.5f), y(3.5f))
-                    path.lineTo(x(14f), y(3.5f))
-                    path.lineTo(x(18.5f), y(8f))
-                    path.lineTo(x(18.5f), y(19f))
-                    path.quadTo(x(18.5f), y(20.5f), x(17f), y(20.5f))
-                    path.lineTo(x(5.5f), y(20.5f))
-                    path.quadTo(x(4f), y(20.5f), x(4f), y(19f))
-                    path.lineTo(x(4f), y(5f))
-                    path.quadTo(x(4f), y(3.5f), x(5.5f), y(3.5f))
-                    path.close()
-                    fillPaint.color = (0x1E shl 24) or (tintColor and 0x00FFFFFF)
-                    canvas.drawPath(path, fillPaint)
-                    canvas.drawPath(path, strokePaint)
-                    path.reset()
-                    path.moveTo(x(13.8f), y(3.8f))
-                    path.lineTo(x(13.8f), y(8.2f))
-                    path.lineTo(x(18.2f), y(8.2f))
-                    canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(7.5f), y(12.5f), x(15f), y(12.5f), strokePaint)
-                    canvas.drawLine(x(7.5f), y(16f), x(12.5f), y(16f), strokePaint)
-                }
-                M3Icon.MORE_VERT -> {
-                    fillPaint.color = tintColor
-                    val r = 1.85f * u
-                    canvas.drawCircle(x(12f), y(5.5f), r, fillPaint)
-                    canvas.drawCircle(x(12f), y(12f), r, fillPaint)
-                    canvas.drawCircle(x(12f), y(18.5f), r, fillPaint)
-                }
-                M3Icon.ARROW_BACK -> {
-                    canvas.drawLine(x(19.5f), y(12f), x(5f), y(12f), strokePaint)
-                    path.moveTo(x(11f), y(6f))
-                    path.lineTo(x(4.8f), y(12f))
-                    path.lineTo(x(11f), y(18f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.CHEVRON_RIGHT -> {
-                    path.moveTo(x(9f), y(6f))
-                    path.lineTo(x(15f), y(12f))
-                    path.lineTo(x(9f), y(18f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.CHEVRON_DOWN -> {
-                    path.moveTo(x(6f), y(9f))
-                    path.lineTo(x(12f), y(15f))
-                    path.lineTo(x(18f), y(9f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.TERMINAL -> {
-                    rect.set(x(3f), y(4.5f), x(21f), y(19.5f))
-                    canvas.drawRoundRect(rect, 3f * u, 3f * u, strokePaint)
-                    path.moveTo(x(7f), y(9f))
-                    path.lineTo(x(10.5f), y(12f))
-                    path.lineTo(x(7f), y(15f))
-                    canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(12.5f), y(15f), x(17f), y(15f), strokePaint)
-                }
-                M3Icon.PING -> {
-                    path.moveTo(x(3f), y(12f))
-                    path.lineTo(x(7f), y(12f))
-                    path.lineTo(x(9.5f), y(6f))
-                    path.lineTo(x(14.5f), y(18f))
-                    path.lineTo(x(17f), y(12f))
-                    path.lineTo(x(21f), y(12f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.KEY -> {
-                    canvas.drawCircle(x(7.5f), y(12f), 4.2f * u, strokePaint)
-                    canvas.drawLine(x(11.7f), y(12f), x(21f), y(12f), strokePaint)
-                    canvas.drawLine(x(17f), y(12f), x(17f), y(15.5f), strokePaint)
-                    canvas.drawLine(x(20f), y(12f), x(20f), y(16f), strokePaint)
-                }
-                M3Icon.CHECK -> {
-                    fillPaint.color = (0x2E shl 24) or (tintColor and 0x00FFFFFF)
-                    canvas.drawCircle(x(12f), y(12f), 9f * u, fillPaint)
-                    canvas.drawCircle(x(12f), y(12f), 9f * u, strokePaint)
-                    path.moveTo(x(8f), y(12.3f))
-                    path.lineTo(x(10.8f), y(15.2f))
-                    path.lineTo(x(16.2f), y(9.2f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.TRASH -> {
-                    canvas.drawLine(x(4.5f), y(6.5f), x(19.5f), y(6.5f), strokePaint)
-                    path.moveTo(x(9.2f), y(6.5f))
-                    path.lineTo(x(9.2f), y(4.6f))
-                    path.quadTo(x(9.2f), y(3.8f), x(10.2f), y(3.8f))
-                    path.lineTo(x(13.8f), y(3.8f))
-                    path.quadTo(x(14.8f), y(3.8f), x(14.8f), y(4.6f))
-                    path.lineTo(x(14.8f), y(6.5f))
-                    canvas.drawPath(path, strokePaint)
-                    path.reset()
-                    path.moveTo(x(6.5f), y(6.5f))
-                    path.lineTo(x(7.3f), y(18.2f))
-                    path.quadTo(x(7.4f), y(20.0f), x(9.2f), y(20.0f))
-                    path.lineTo(x(14.8f), y(20.0f))
-                    path.quadTo(x(16.6f), y(20.0f), x(16.7f), y(18.2f))
-                    path.lineTo(x(17.5f), y(6.5f))
-                    canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(10.2f), y(10.2f), x(10.2f), y(16.2f), strokePaint)
-                    canvas.drawLine(x(13.8f), y(10.2f), x(13.8f), y(16.2f), strokePaint)
-                }
-                M3Icon.ALL_PACKAGES -> {
-                    val r = 1.8f * u
-                    rect.set(x(3.5f), y(3.5f), x(10.2f), y(10.2f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(3.5f), y(13.8f), x(10.2f), y(20.5f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(13.8f), y(13.8f), x(20.5f), y(20.5f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    path.moveTo(x(17.1f), y(2.6f))
-                    path.lineTo(x(21.4f), y(6.9f))
-                    path.lineTo(x(17.1f), y(11.2f))
-                    path.lineTo(x(12.8f), y(6.9f))
-                    path.close()
-                    fillPaint.color = (0x3A shl 24) or (tintColor and 0x00FFFFFF)
-                    canvas.drawPath(path, fillPaint)
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.STORAGE -> {
-                    rect.set(x(4.5f), y(4f), x(19.5f), y(9f))
-                    canvas.drawOval(rect, strokePaint)
-                    path.moveTo(x(4.5f), y(6.5f))
-                    path.lineTo(x(4.5f), y(17.5f))
-                    path.quadTo(x(12f), y(21f), x(19.5f), y(17.5f))
-                    path.lineTo(x(19.5f), y(6.5f))
-                    canvas.drawPath(path, strokePaint)
-                    path.reset()
-                    path.moveTo(x(4.5f), y(12f))
-                    path.quadTo(x(12f), y(15.2f), x(19.5f), y(12f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.CURSOR -> {
-                    val r = 2.2f * u
-                    rect.set(x(4f), y(5f), x(12.5f), y(19f))
-                    fillPaint.color = (0x38 shl 24) or (tintColor and 0x00FFFFFF)
-                    canvas.drawRoundRect(rect, r, r, fillPaint)
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    canvas.drawLine(x(17.5f), y(5f), x(17.5f), y(19f), strokePaint)
-                    canvas.drawLine(x(15f), y(5f), x(20f), y(5f), strokePaint)
-                    canvas.drawLine(x(15f), y(19f), x(20f), y(19f), strokePaint)
-                }
-                M3Icon.KEYBOARD -> {
-                    val r = 2.6f * u
-                    rect.set(x(2.5f), y(5.5f), x(21.5f), y(18.5f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    fillPaint.color = tintColor
-                    val dotR = 1.05f * u
-                    for (cx in floatArrayOf(6.5f, 10.2f, 13.8f, 17.5f)) {
-                        canvas.drawCircle(x(cx), y(9.5f), dotR, fillPaint)
-                        canvas.drawCircle(x(cx), y(12.5f), dotR, fillPaint)
-                    }
-                    canvas.drawLine(x(8f), y(15.6f), x(16f), y(15.6f), strokePaint)
-                }
-                M3Icon.VIBRATION -> {
-                    val r = 2.2f * u
-                    rect.set(x(7.5f), y(4.5f), x(16.5f), y(19.5f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    canvas.drawLine(x(4.5f), y(8f), x(4.5f), y(16f), strokePaint)
-                    canvas.drawLine(x(2f), y(10f), x(2f), y(14f), strokePaint)
-                    canvas.drawLine(x(19.5f), y(8f), x(19.5f), y(16f), strokePaint)
-                    canvas.drawLine(x(22f), y(10f), x(22f), y(14f), strokePaint)
-                }
-                M3Icon.PALETTE -> {
-                    canvas.drawCircle(x(12f), y(12f), 8.5f * u, strokePaint)
-                    fillPaint.color = tintColor
-                    canvas.drawCircle(x(8.2f), y(10.2f), 1.4f * u, fillPaint)
-                    canvas.drawCircle(x(11.2f), y(7.6f), 1.4f * u, fillPaint)
-                    canvas.drawCircle(x(15.0f), y(8.8f), 1.4f * u, fillPaint)
-                    canvas.drawCircle(x(14.5f), y(14.2f), 2.1f * u, strokePaint)
-                }
-                M3Icon.CPU -> {
-                    val r = 2.0f * u
-                    rect.set(x(6f), y(6f), x(18f), y(18f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(9.2f), y(9.2f), x(14.8f), y(14.8f))
-                    fillPaint.color = (0x38 shl 24) or (tintColor and 0x00FFFFFF)
-                    canvas.drawRoundRect(rect, 1.0f * u, 1.0f * u, fillPaint)
-                    canvas.drawRoundRect(rect, 1.0f * u, 1.0f * u, strokePaint)
-                    for (p in floatArrayOf(9f, 12f, 15f)) {
-                        canvas.drawLine(x(p), y(3f), x(p), y(6f), strokePaint)
-                        canvas.drawLine(x(p), y(18f), x(p), y(21f), strokePaint)
-                        canvas.drawLine(x(3f), y(p), x(6f), y(p), strokePaint)
-                        canvas.drawLine(x(18f), y(p), x(21f), y(p), strokePaint)
-                    }
-                }
-                M3Icon.SLIDERS -> {
-                    canvas.drawLine(x(4f), y(6.5f), x(20f), y(6.5f), strokePaint)
-                    canvas.drawLine(x(4f), y(12f), x(20f), y(12f), strokePaint)
-                    canvas.drawLine(x(4f), y(17.5f), x(20f), y(17.5f), strokePaint)
-                    fillPaint.color = uiSurfaceLow
-                    canvas.drawCircle(x(9f), y(6.5f), 2.3f * u, fillPaint)
-                    canvas.drawCircle(x(15.5f), y(12f), 2.3f * u, fillPaint)
-                    canvas.drawCircle(x(11f), y(17.5f), 2.3f * u, fillPaint)
-                    canvas.drawCircle(x(9f), y(6.5f), 2.3f * u, strokePaint)
-                    canvas.drawCircle(x(15.5f), y(12f), 2.3f * u, strokePaint)
-                    canvas.drawCircle(x(11f), y(17.5f), 2.3f * u, strokePaint)
-                }
-                M3Icon.SERVER -> {
-                    val r = 2.0f * u
-                    rect.set(x(3.5f), y(4.5f), x(20.5f), y(10.5f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(3.5f), y(13.5f), x(20.5f), y(19.5f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    fillPaint.color = tintColor
-                    canvas.drawCircle(x(7.2f), y(7.5f), 1.2f * u, fillPaint)
-                    canvas.drawCircle(x(7.2f), y(16.5f), 1.2f * u, fillPaint)
-                    canvas.drawLine(x(11.5f), y(7.5f), x(17.2f), y(7.5f), strokePaint)
-                    canvas.drawLine(x(11.5f), y(16.5f), x(17.2f), y(16.5f), strokePaint)
-                }
-                M3Icon.EDIT -> {
-                    path.moveTo(x(4.5f), y(19.5f))
-                    path.lineTo(x(8.5f), y(18.5f))
-                    path.lineTo(x(18.8f), y(8.2f))
-                    path.lineTo(x(15.8f), y(5.2f))
-                    path.lineTo(x(5.5f), y(15.5f))
-                    path.close()
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.COPY -> {
-                    val r = 2.0f * u
-                    rect.set(x(8.5f), y(8.5f), x(19.5f), y(20f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    path.moveTo(x(15.5f), y(8.5f))
-                    path.lineTo(x(15.5f), y(5.8f))
-                    path.quadTo(x(15.5f), y(4f), x(13.7f), y(4f))
-                    path.lineTo(x(6.3f), y(4f))
-                    path.quadTo(x(4.5f), y(4f), x(4.5f), y(5.8f))
-                    path.lineTo(x(4.5f), y(14.2f))
-                    path.quadTo(x(4.5f), y(16f), x(6.3f), y(16f))
-                    path.lineTo(x(8.5f), y(16f))
-                    canvas.drawPath(path, strokePaint)
-                }
-                M3Icon.FONT -> {
-                    path.moveTo(x(3.8f), y(18.5f))
-                    path.lineTo(x(8.8f), y(5.5f))
-                    path.lineTo(x(13.8f), y(18.5f))
-                    canvas.drawPath(path, strokePaint)
-                    canvas.drawLine(x(5.5f), y(14.2f), x(12.1f), y(14.2f), strokePaint)
-                    canvas.drawCircle(x(17.8f), y(15.2f), 2.8f * u, strokePaint)
-                    canvas.drawLine(x(20.6f), y(12.2f), x(20.6f), y(18.5f), strokePaint)
-                }
-            }
         }
     }
 
@@ -5078,6 +4671,52 @@ class TermuxActivity : Activity() {
                 form.addView(customFlagsCard)
                 form.addView(startupCard)
 
+                importCard.addView(makeExpressiveChip(tr("Файл / Ключ", "File / Key"), false) {
+                    launchSystemFilePickerForImport { uri ->
+                        Thread {
+                            try {
+                                val fileName = queryUriDisplayName(uri)
+                                val text = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                                if (fileName.endsWith(".xml", ignoreCase = true) || text.contains("<FileZilla", ignoreCase = true) || text.contains("<Server>", ignoreCase = true)) {
+                                    val parsedLines = nativeStageKeyOrParseFileZillaXml(text, true).lines().filter { it.isNotBlank() }
+                                    val first = parsedLines.firstOrNull()?.split("\t")
+                                    if (first != null && first.size >= 6) {
+                                        runOnUiThread {
+                                            labelEt.setText(first[0])
+                                            hostEt.setText(first[1])
+                                            portEt.setText(first[2])
+                                            userEt.setText(first[3])
+                                            selectedAuth = first[4].toIntOrNull() ?: 0
+                                            secretEt.setText(first[5])
+                                            rebuildAuthCard()
+                                            updateLivePreview()
+                                            Toast.makeText(this@TermuxActivity, tr("Импортирован профиль из $fileName", "Imported profile from $fileName"), Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                } else {
+                                    val stagedPath = nativeStageKeyOrParseFileZillaXml(text, false)
+                                    if (stagedPath.isNotEmpty()) {
+                                        runOnUiThread {
+                                            selectedAuth = 1
+                                            secretEt.setText(stagedPath)
+                                            rebuildAuthCard()
+                                            updateLivePreview()
+                                            Toast.makeText(this@TermuxActivity, tr("Ключ сохранён (chmod 600): $stagedPath", "Key staged (chmod 600): $stagedPath"), Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        runOnUiThread {
+                                            Toast.makeText(this@TermuxActivity, tr("Не удалось распознать приватный ключ", "Unrecognized private key format"), Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
+                            } catch (e: Throwable) {
+                                runOnUiThread {
+                                    Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }.start()
+                    }
+                })
                 importCard.addView(makeExpressiveChip(tr("Разобрать", "Parse"), true) {
                     val rawCmd = rawCmdEt.text.toString().trim()
                     if (rawCmd.isNotEmpty()) {
@@ -5624,25 +5263,25 @@ class TermuxActivity : Activity() {
         // Ultra-fast single-pass remote stat via persistent ControlMaster SSH multiplexer
         fun listRemoteSftpEntriesViaCpp23(server: SshServerProfile, remoteDir: String): Pair<String?, List<SftpItemEntry>> {
             val pattern = if (sftpShowHidden) "* .[!.]* ..?*" else "*"
-            val remoteScript = "cd ${shellEscapeSingle(remoteDir)} 2>/dev/null && pwd && " +
-                "stat -c '%F\t%s\t%Y\t%A\t%n' $pattern 2>/dev/null || true"
+            val remoteScript = "(cd ${shellEscapeSingle(remoteDir)} 2>/dev/null || cd ~) && pwd && " +
+                "(stat -c '%F\t%s\t%Y\t%A\t%n' $pattern 2>/dev/null || true)"
             val (ok, output) = runRemoteSftpViaCpp23(server, remoteScript)
             if (!ok) return output.ifBlank { tr("Не удалось подключиться по SFTP/SSH", "Failed to connect via SFTP/SSH") } to emptyList()
             val lines = output.lines().filter { it.isNotBlank() }
-            val resolvedPwd = lines.firstOrNull()?.trim()?.takeIf { it.startsWith("/") } ?: remoteDir
+            val resolvedPwd = lines.firstOrNull { it.trim().startsWith("/") }?.trim() ?: remoteDir
             remoteCurrentPath = resolvedPwd
             val items = ArrayList<SftpItemEntry>()
             val q = sftpSearchQuery.trim()
-            for (i in 1 until lines.size) {
-                val cols = lines[i].split("\t")
+            for (line in lines) {
+                val cols = line.split("\t")
                 if (cols.size >= 5) {
                     val fType = cols[0].lowercase()
                     val isDir = fType.contains("directory") || fType == "d"
                     val sz = cols[1].trim().toLongOrNull() ?: 0L
                     val mtSec = cols[2].trim().toLongOrNull() ?: 0L
                     val pm = cols[3].trim()
-                    val name = cols[4].trim()
-                    if (name == "." || name == "..") continue
+                    val name = cols[4].trim().removePrefix("./")
+                    if (name.isEmpty() || name == "." || name == "..") continue
                     if (q.isNotEmpty() && !name.contains(q, ignoreCase = true)) continue
                     val fullP = if (resolvedPwd == "/") "/$name" else "$resolvedPwd/$name"
                     items.add(
@@ -5715,9 +5354,9 @@ class TermuxActivity : Activity() {
 
             val segViews = ArrayList<TextView>()
             val localGroups = listOf(
-                Triple(tr("Дом (~)", "Home (~)"), homeDir, false),
-                Triple(tr("Система", "Usr"), usrDir, false),
-                Triple(tr("Память", "SDCard"), sdDir, true)
+                Triple("Home", homeDir, false),
+                Triple("Usr", usrDir, false),
+                Triple("Storage", sdDir, true)
             )
             for ((gIdx, grp) in localGroups.withIndex()) {
                 val (lbl, dir, requiresPerm) = grp
@@ -5976,8 +5615,9 @@ class TermuxActivity : Activity() {
             }
             listScroll.addView(rowsCol)
 
+            lateinit var refreshSftpListInPlace: () -> Unit
             val ptrSftp = BakaSuPullToRefreshLayout(this, listScroll) {
-                renderSftpTab(forceRemoteRefresh = true)
+                refreshSftpListInPlace()
             }.apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -6491,6 +6131,25 @@ class TermuxActivity : Activity() {
                         )
                         rowsCol.addView(row)
                     }
+                }
+            }
+
+            refreshSftpListInPlace = {
+                if (srv == null) {
+                    populateEntriesIntoRowsCol(null, listLocalEntriesViaCpp23(localCurrentDir, 0))
+                } else {
+                    val cacheKey = "${srv.id}:${remoteCurrentPath}:${sftpShowHidden}:${sftpSearchQuery}"
+                    Thread {
+                        val (err, remoteEntries) = listRemoteSftpEntriesViaCpp23(srv, remoteCurrentPath)
+                        if (err == null) {
+                            sftpRemoteDirCache[cacheKey] = remoteEntries
+                        }
+                        runOnUiThread {
+                            if (activeTab == 1 && activeSftpServer?.id == srv.id) {
+                                populateEntriesIntoRowsCol(err, remoteEntries)
+                            }
+                        }
+                    }.start()
                 }
             }
 
@@ -9230,7 +8889,22 @@ class TermuxActivity : Activity() {
         @JvmStatic external fun nativeSetMaxScrollback(maxLines: Int)
         @JvmStatic external fun nativeGetSelectedText(): String
         @JvmStatic external fun nativeGenerateColorSpec2026Palette(seedArgb: Int, styleIndex: Int): IntArray
-        @JvmStatic external fun nativeDiscoverCustomFonts(): String
+        @JvmStatic
+        external fun nativeDiscoverCustomFonts(): String
+
+        @JvmStatic
+        external fun nativeComputeM3LoadingPolygon(
+            phase: Float,
+            pullProgress: Float,
+            isRefreshing: Boolean,
+            radiusPx: Float
+        ): FloatArray
+
+        @JvmStatic
+        external fun nativeStageKeyOrParseFileZillaXml(
+            input: String,
+            isFileZillaXml: Boolean
+        ): String
     }
 }
 

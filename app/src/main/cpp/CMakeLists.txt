@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(termuxx-core LANGUAGES C CXX ASM)
 
-# Automatically use ccache when available to cache C++23 object compilation across builds
+# Automatically use ccache when available to cache C++26 object compilation across builds
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
     set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
@@ -11,20 +11,20 @@ endif()
 include(CheckCXXCompilerFlag)
 
 check_cxx_compiler_flag("-std=c++26" HAS_CXX26)
-check_cxx_compiler_flag("-std=c++23" HAS_CXX23)
+check_cxx_compiler_flag("-std=c++2c" HAS_CXX2C)
 if(HAS_CXX26)
     set(CXX_STD_FLAG "-std=c++26")
-elseif(HAS_CXX23)
-    set(CXX_STD_FLAG "-std=c++23")
+elseif(HAS_CXX2C)
+    set(CXX_STD_FLAG "-std=c++2c")
 else()
-    set(CXX_STD_FLAG "-std=c++2b")
+    set(CXX_STD_FLAG "-std=c++23")
 endif()
 
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(COMMON_CXX_FLAGS
     ${CXX_STD_FLAG}
-    -Wall -Wextra -Wno-unused-command-line-argument -O3
+    -Wall -Wextra -Werror -Wno-unused-command-line-argument -O3
     -fno-math-errno -fomit-frame-pointer -fno-exceptions -fno-rtti
     -fvisibility=hidden -fdata-sections -ffunction-sections
 )

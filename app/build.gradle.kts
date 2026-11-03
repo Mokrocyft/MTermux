@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage", "DEPRECATION")
+
 import java.io.BufferedOutputStream
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -190,7 +192,7 @@ val downloadJetBrainsMono = tasks.register<DownloadFontTask>("downloadJetBrainsM
 }
 
 tasks.named<Delete>("clean") {
-    delete(fileTree("src/main/cpp") { include("bootstrap-*.zip", ".bootstrap_patched.stamp") })
+    delete(fileTree("src/main/cpp") { include("bootstrap-*.zip", ".bootstrap_patched*.stamp") })
     delete(fileTree("src/main/assets/fonts") { include("*.ttf") })
 }
 

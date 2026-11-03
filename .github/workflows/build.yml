@@ -11,6 +11,9 @@ on:
       - master
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     name: Build APK
@@ -18,51 +21,56 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@main
+        with:
+          node-version: 'latest'
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@main
         with:
           distribution: 'temurin'
           java-version: '21'
 
       - name: Cache Pre-Patched Bootstrap & Font
-        uses: actions/cache@v4
+        uses: actions/cache@main
         with:
           path: |
             app/src/main/cpp/bootstrap-aarch64.zip
-            app/src/main/cpp/.bootstrap_patched.stamp
+            app/src/main/cpp/.bootstrap_patched_v3.stamp
             app/src/main/assets/fonts/JetBrainsMono.ttf
-          key: termuxx-bootstrap-v2-${{ hashFiles('scripts/update_bootstrap.py') }}
+          key: termuxx-bootstrap-v3-${{ hashFiles('scripts/update_bootstrap.py') }}
           restore-keys: |
-            termuxx-bootstrap-v2-
+            termuxx-bootstrap-v3-
 
       - name: Cache Gradle, CMake & CCache
-        uses: actions/cache@v4
+        uses: actions/cache@main
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.ccache
             app/.cxx
-          key: termuxx-gradle-cxx-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml', 'app/src/main/cpp/CMakeLists.txt') }}
+          key: termuxx-gradle-cxx-v3-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml', 'app/src/main/cpp/CMakeLists.txt') }}
           restore-keys: |
-            termuxx-gradle-cxx-${{ runner.os }}-
+            termuxx-gradle-cxx-v3-${{ runner.os }}-
 
       - name: Accept SDK Licenses
         run: |
           yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
 
-      - name: Prepare Bootstrap
+      - name: Prepare Bootstrap & Pre-Install OpenSSH
         run: |
           chmod +x ./gradlew scripts/update_bootstrap.py
           python3 scripts/update_bootstrap.py
 
-      - name: Build Release APK
+      - name: Build Release APK (Strict Mode)
         env:
           TERMUX_PACKAGE_VARIANT: apt-android-7
         run: |
-          ./gradlew assembleRelease --build-cache --parallel --warning-mode none --no-problems-report --stacktrace
+          ./gradlew assembleRelease --build-cache --parallel --warning-mode all --stacktrace
           mkdir -p dist
           RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           cp -f "$RELEASE_APK" dist/termux-release.apk
@@ -73,7 +81,7 @@ jobs:
           ls -lh dist/termux-release.apk
 
       - name: Upload Release APK
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@main
         with:
           name: termux-release
           path: dist/termux-release.apk

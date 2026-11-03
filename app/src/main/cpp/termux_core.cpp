@@ -376,7 +376,7 @@ static inline int packRect16(int x0, int y0, int x1, int y1) noexcept {
     return ((x0 & 0xFF) << 24) | ((y0 & 0xFF) << 16) | ((x1 & 0xFF) << 8) | (y1 & 0xFF);
 }
 
-static bool emitProceduralBoxOrBlockInCpp23(
+static bool emitProceduralBoxOrBlockInCpp26(
     uint32_t cp,
     int col,
     uint32_t fg,
@@ -389,7 +389,7 @@ static bool emitProceduralBoxOrBlockInCpp23(
     auto pushRect = [&](int x0, int y0, int x1, int y1) {
         if (glCount >= maxGlyphs) return;
         int base = glCount * 4;
-        glPtr[base]     = -1; // Procedural rect marker
+        glPtr[base]     = -1;
         glPtr[base + 1] = col;
         glPtr[base + 2] = static_cast<jint>(fg);
         glPtr[base + 3] = packRect16(x0, y0, x1, y1);
@@ -1856,7 +1856,7 @@ public:
         }
 
         if (mCsiPrefix == '>' && finalByte == 'q') {
-            reply += "\x1bP>|Termuxx-C++23(4.0)\x1b\\";
+            reply += "\x1bP>|Termuxx-C++26(4.0)\x1b\\";
             return;
         }
 
@@ -2357,7 +2357,7 @@ static bool startSessionProcess(
     std::vector<std::string> envStrings;
     envStrings.emplace_back("TERM=xterm-256color");
     envStrings.emplace_back("COLORTERM=truecolor");
-    envStrings.emplace_back("TERM_PROGRAM=Termuxx-C++23");
+    envStrings.emplace_back("TERM_PROGRAM=Termuxx-C++26");
     envStrings.emplace_back("HOME=" + std::string(HOME_PATH));
     envStrings.emplace_back("PREFIX=" + std::string(PREFIX_PATH));
     envStrings.emplace_back("TMPDIR=" + std::string(TMP_PATH));
@@ -3303,7 +3303,7 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
                     ? PREDELETE_FG
                     : resolveFgColor(cell.fg, cell.bg, cell.flags));
 
-            if (!emitProceduralBoxOrBlockInCpp23(cell.codepoint, c, fg, glPtr, glCount, maxGlyphs)) {
+            if (!emitProceduralBoxOrBlockInCpp26(cell.codepoint, c, fg, glPtr, glCount, maxGlyphs)) {
                 if (glCount < maxGlyphs) {
                     int base = glCount * 4;
                     glPtr[base]     = static_cast<jint>(cell.codepoint);
@@ -3444,23 +3444,111 @@ static void appendForwardFlagsCpp(std::string& out, const char* flag, const std:
     }
 }
 
+// C++26 Secure SSH Key Stager: copies any key from /sdcard or custom path into ~/.ssh/ with strict 0600 permissions
+[[nodiscard]] static std::string stagePrivateKeySecureCpp26(const std::string& rawInput) {
+    std::string trimmed = trimCpp(rawInput);
+    std::string sshDir = std::string(HOME_PATH) + "/.ssh";
+    mkdirsRecursive(sshDir.c_str(), 0700);
+    chmod(sshDir.c_str(), 0700);
+
+    auto readFileBytes = [](const std::string& path, std::string& out) -> bool {
+        int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return false;
+        struct stat st{};
+        if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 32 || st.st_size > 128 * 1024) {
+            close(fd);
+            return false;
+        }
+        out.resize(static_cast<size_t>(st.st_size));
+        size_t total = 0;
+        while (total < out.size()) {
+            ssize_t r = read(fd, out.data() + total, out.size() - total);
+            if (r <= 0) break;
+            total += static_cast<size_t>(r);
+        }
+        close(fd);
+        out.resize(total);
+        return out.find("PRIVATE KEY") != std::string::npos;
+    };
+
+    std::string keyContent;
+    std::string tag = "default";
+
+    if (trimmed.find("-----BEGIN ") != std::string::npos && trimmed.find("PRIVATE KEY") != std::string::npos) {
+        keyContent = trimmed;
+        tag = "inline";
+    } else {
+        std::vector<std::string> candidates;
+        if (!trimmed.empty()) {
+            candidates.push_back(trimmed);
+            size_t slash = trimmed.find_last_of("/\\");
+            std::string base = (slash != std::string::npos) ? trimmed.substr(slash + 1) : trimmed;
+            if (!base.empty()) {
+                candidates.push_back(sshDir + "/" + base);
+                candidates.push_back("/sdcard/Download/" + base);
+                candidates.push_back("/sdcard/" + base);
+                candidates.push_back("/storage/emulated/0/Download/" + base);
+            }
+        }
+        candidates.push_back(sshDir + "/id_ed25519");
+        candidates.push_back(sshDir + "/id_rsa");
+        candidates.push_back("/sdcard/Download/id_ed25519");
+        candidates.push_back("/sdcard/id_ed25519");
+
+        for (const auto& cand : candidates) {
+            if (readFileBytes(cand, keyContent)) {
+                size_t slash = cand.find_last_of('/');
+                tag = (slash != std::string::npos) ? cand.substr(slash + 1) : "id_ed25519";
+                break;
+            }
+        }
+    }
+
+    if (keyContent.empty()) return "";
+
+    // Normalize CRLF -> LF and ensure trailing newline required by OpenSSH libcrypto parser
+    std::string normalized;
+    normalized.reserve(keyContent.size() + 2);
+    for (char c : keyContent) {
+        if (c != '\r') normalized.push_back(c);
+    }
+    if (normalized.empty() || normalized.back() != '\n') {
+        normalized.push_back('\n');
+    }
+
+    std::string safeTag;
+    for (char c : tag) {
+        if (isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') safeTag.push_back(c);
+    }
+    if (safeTag.empty()) safeTag = "id_ed25519";
+
+    std::string stagedPath = sshDir + "/.staged_" + safeTag;
+    int fd = open(stagedPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return "";
+    writeAllFd(fd, normalized.data(), normalized.size());
+    close(fd);
+    chmod(stagedPath.c_str(), 0600);
+    return stagedPath;
+}
+
 static std::string createOneShotAskPassEnvCpp(int authType, const std::string& secret) {
     if (authType != 0 || secret.empty()) return "";
+    // If secret is actually a private key path or inline key, do not treat it as a password
+    if (secret.find("PRIVATE KEY") != std::string::npos || secret.find("/id_") != std::string::npos) {
+        return "";
+    }
     mkdirsRecursive(TMP_PATH, 0700);
-    struct timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    char pathBuf[256];
-    snprintf(pathBuf, sizeof(pathBuf), "%s/.askpass_%lld_%ld.sh",
-             TMP_PATH, static_cast<long long>(ts.tv_sec), static_cast<long>(ts.tv_nsec));
-    int fd = open(pathBuf, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
+    std::string askPath = std::string(TMP_PATH) + "/.ssh_askpass_helper.sh";
+    int fd = open(askPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
     if (fd < 0) return "";
-    std::string script = "#!/data/data/com.termuxx/file/usr/bin/sh\n"
-                         "rm -f \"$0\" 2>/dev/null || true\n"
+    std::string shBin = std::string(BIN_PATH) + "/sh";
+    if (access(shBin.c_str(), X_OK) != 0) shBin = "/system/bin/sh";
+    std::string script = "#!" + shBin + "\n"
                          "printf '%s\\n' " + shellEscapeSingleCpp(secret) + "\n";
     writeAllFd(fd, script.data(), script.size());
     close(fd);
-    chmod(pathBuf, 0700);
-    return "DISPLAY=:0 SSH_ASKPASS=" + shellEscapeSingleCpp(pathBuf) + " SSH_ASKPASS_REQUIRE=force ";
+    chmod(askPath.c_str(), 0700);
+    return "DISPLAY=:0 SSH_ASKPASS=" + shellEscapeSingleCpp(askPath) + " SSH_ASKPASS_REQUIRE=force ";
 }
 
 JNIEXPORT jint JNICALL
@@ -3599,7 +3687,13 @@ Java_com_termuxx_app_TermuxActivity_nativeBuildSshCommand(
         cmd += " -J " + shellEscapeSingleCpp(jumpHost);
     }
     if (authType == 1 && !secret.empty()) {
-        cmd += " -i " + shellEscapeSingleCpp(trimCpp(secret));
+        std::string trimmedKey = trimCpp(secret);
+        std::string keyToUse = trimmedKey;
+        if (withAskPass || trimmedKey.rfind("/sdcard", 0) == 0 || trimmedKey.rfind("/storage", 0) == 0 || access(trimmedKey.c_str(), R_OK) != 0) {
+            std::string staged = stagePrivateKeySecureCpp26(trimmedKey);
+            if (!staged.empty()) keyToUse = staged;
+        }
+        cmd += " -i " + shellEscapeSingleCpp(keyToUse);
     }
     if (keepAliveSec > 0) {
         cmd += " -o ServerAliveInterval=" + std::to_string(static_cast<int>(keepAliveSec));
@@ -3801,7 +3895,7 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
 
     std::string sshBin = std::string(BIN_PATH) + "/ssh";
     if (access(sshBin.c_str(), X_OK) != 0) {
-        return env->NewStringUTF("ERR\nПакет openssh не установлен. Установите его во вкладке Пакеты (+ openssh) или командой: pkg install -y openssh");
+        return env->NewStringUTF("ERR\nБинарный файл ssh ещё не готов. Подождите завершения распаковки окружения или выполните pkg install -y openssh");
     }
 
     std::string host = trimCpp(jstringToStdString(env, jHost));
@@ -3813,18 +3907,30 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
     std::string remoteSh = jstringToStdString(env, jRemoteShCmd);
 
     mkdirsRecursive(TMP_PATH, 0700);
+    std::string sshDir = std::string(HOME_PATH) + "/.ssh";
+    mkdirsRecursive(sshDir.c_str(), 0700);
+    chmod(sshDir.c_str(), 0700);
+
+    // Stage key with 0600 permissions if key auth is selected OR if a default key exists on device
+    std::string stagedKey = stagePrivateKeySecureCpp26(authType == 1 ? secret : "");
     std::string askPassPrefix = createOneShotAskPassEnvCpp(static_cast<int>(authType), secret);
-    std::string muxPath = std::string(TMP_PATH) + "/.ssh_mux_%C";
+    std::string muxPath = std::string(TMP_PATH) + "/.m_%C";
 
     std::string sshArgs = "-p " + std::to_string(p) +
-        " -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6"
-        " -o ControlMaster=auto -o ControlPath=" + shellEscapeSingleCpp(muxPath) +
+        " -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+        " -o ConnectTimeout=8 -o ControlMaster=auto -o ControlPath=" + shellEscapeSingleCpp(muxPath) +
         " -o ControlPersist=900 -o IPQoS=lowdelay -o TCPKeepAlive=yes"
-        " -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
-        " -o Ciphers=chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-gcm@openssh.com,aes128-ctr";
-    if (authType != 0) sshArgs += " -o BatchMode=yes";
+        " -o ServerAliveInterval=15 -o ServerAliveCountMax=3";
+
+    if (authType != 0 || askPassPrefix.empty()) {
+        sshArgs += " -o BatchMode=yes";
+    } else {
+        sshArgs += " -o NumberOfPasswordPrompts=1";
+    }
     if (authType == 2) sshArgs += " -A";
-    if (authType == 1 && !secret.empty()) {
+    if (!stagedKey.empty()) {
+        sshArgs += " -i " + shellEscapeSingleCpp(stagedKey);
+    } else if (authType == 1 && !secret.empty()) {
         sshArgs += " -i " + shellEscapeSingleCpp(trimCpp(secret));
     }
     if (!jumpHost.empty()) {
@@ -3841,11 +3947,17 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
     }
     fullShellLine += askPassPrefix + shellEscapeSingleCpp(sshBin) + " " + sshArgs + " " +
                      shellEscapeSingleCpp(user + "@" + host) + " " +
-                     shellEscapeSingleCpp(remoteSh) + " 2>&1";
+                     shellEscapeSingleCpp(remoteSh);
 
-    int pipefd[2];
-    if (pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) != 0) {
+    int outPipe[2];
+    int errPipe[2];
+    if (pipe2(outPipe, O_CLOEXEC | O_NONBLOCK) != 0) {
         return env->NewStringUTF("ERR\nНе удалось создать канал pipe()");
+    }
+    if (pipe2(errPipe, O_CLOEXEC | O_NONBLOCK) != 0) {
+        close(outPipe[0]);
+        close(outPipe[1]);
+        return env->NewStringUTF("ERR\nНе удалось создать канал stderr pipe()");
     }
 
     std::string shBin = std::string(BIN_PATH) + "/sh";
@@ -3853,50 +3965,81 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
 
     pid_t pid = fork();
     if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
+        close(outPipe[0]); close(outPipe[1]);
+        close(errPipe[0]); close(errPipe[1]);
         return env->NewStringUTF("ERR\nОшибка fork()");
     }
     if (pid == 0) {
         setsid();
-        close(pipefd[0]);
-        int flags = fcntl(pipefd[1], F_GETFL, 0);
-        if (flags >= 0) fcntl(pipefd[1], F_SETFL, flags & ~O_NONBLOCK);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
+        close(outPipe[0]);
+        close(errPipe[0]);
+        int devNull = open("/dev/null", O_RDONLY);
+        if (devNull >= 0) {
+            dup2(devNull, STDIN_FILENO);
+            if (devNull > 2) close(devNull);
+        }
+        int fOut = fcntl(outPipe[1], F_GETFL, 0);
+        if (fOut >= 0) fcntl(outPipe[1], F_SETFL, fOut & ~O_NONBLOCK);
+        int fErr = fcntl(errPipe[1], F_GETFL, 0);
+        if (fErr >= 0) fcntl(errPipe[1], F_SETFL, fErr & ~O_NONBLOCK);
+        dup2(outPipe[1], STDOUT_FILENO);
+        dup2(errPipe[1], STDERR_FILENO);
+        close(outPipe[1]);
+        close(errPipe[1]);
         execl(shBin.c_str(), "sh", "-c", fullShellLine.c_str(), static_cast<char*>(nullptr));
         _exit(127);
     }
 
-    close(pipefd[1]);
-    std::string output;
-    output.reserve(16384);
+    close(outPipe[1]);
+    close(errPipe[1]);
+
+    std::string stdOutStr;
+    std::string stdErrStr;
+    stdOutStr.reserve(16384);
     char buf[16384];
-    struct pollfd pfd{pipefd[0], POLLIN | POLLERR | POLLHUP, 0};
+
+    struct pollfd pfds[2] = {
+        {outPipe[0], POLLIN | POLLERR | POLLHUP, 0},
+        {errPipe[0], POLLIN | POLLERR | POLLHUP, 0}
+    };
+    bool outOpen = true;
+    bool errOpen = true;
     int elapsedMs = 0;
-    constexpr int kMaxWaitMs = 12000;
-    while (elapsedMs < kMaxWaitMs) {
-        int pr = poll(&pfd, 1, 250);
+    constexpr int kMaxWaitMs = 14000;
+
+    while ((outOpen || errOpen) && elapsedMs < kMaxWaitMs) {
+        pfds[0].fd = outOpen ? outPipe[0] : -1;
+        pfds[1].fd = errOpen ? errPipe[0] : -1;
+        int pr = poll(pfds, 2, 200);
         if (pr < 0) {
             if (errno == EINTR) continue;
             break;
         }
         if (pr == 0) {
-            elapsedMs += 250;
+            elapsedMs += 200;
             continue;
         }
-        ssize_t n = read(pipefd[0], buf, sizeof(buf));
-        if (n > 0) {
-            output.append(buf, static_cast<size_t>(n));
-            if (output.size() > 1024 * 1024) break;
-        } else if (n == 0) {
-            break;
-        } else if (errno != EAGAIN && errno != EINTR) {
-            break;
+        if (outOpen && (pfds[0].revents & (POLLIN | POLLERR | POLLHUP))) {
+            ssize_t n = read(outPipe[0], buf, sizeof(buf));
+            if (n > 0) {
+                stdOutStr.append(buf, static_cast<size_t>(n));
+                if (stdOutStr.size() > 1024 * 1024) outOpen = false;
+            } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
+                outOpen = false;
+            }
+        }
+        if (errOpen && (pfds[1].revents & (POLLIN | POLLERR | POLLHUP))) {
+            ssize_t n = read(errPipe[0], buf, sizeof(buf));
+            if (n > 0) {
+                stdErrStr.append(buf, static_cast<size_t>(n));
+                if (stdErrStr.size() > 65536) errOpen = false;
+            } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
+                errOpen = false;
+            }
         }
     }
-    close(pipefd[0]);
+    close(outPipe[0]);
+    close(errPipe[0]);
 
     int status = 0;
     if (elapsedMs >= kMaxWaitMs) {
@@ -3907,7 +4050,15 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
         if (errno != EINTR) break;
     }
     bool ok = WIFEXITED(status) && (WEXITSTATUS(status) == 0);
-    std::string result = (ok ? "OK\n" : "ERR\n") + output;
+    std::string result;
+    if (ok) {
+        result = "OK\n" + stdOutStr;
+    } else {
+        std::string errMsg = trimCpp(stdErrStr);
+        if (errMsg.empty()) errMsg = trimCpp(stdOutStr);
+        if (errMsg.empty()) errMsg = "SSH exit code " + std::to_string(WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        result = "ERR\n" + errMsg;
+    }
     return env->NewStringUTF(result.c_str());
 }
 
@@ -4287,6 +4438,198 @@ Java_com_termuxx_app_TermuxActivity_nativeSetMaxScrollback(JNIEnv* /*env*/, jcla
         }
     }
     pthread_mutex_unlock(&gGlobalMutex);
+}
+
+
+// ============================================================================
+// C++26 Material 3 Expressive LoadingIndicator Polygon Morphing Engine
+// Implements exact Jetpack Compose Material 3 `LoadingIndicatorDefaults`:
+// - Determinate pull (0..1): Circle (rotated 18 deg) -> SoftBurst (10-pointed)
+// - Indeterminate cycle: SoftBurst -> Cookie9Sided -> Pentagon -> Pill -> Sunny -> Cookie4Sided -> Oval
+// ============================================================================
+namespace {
+
+constexpr float kPi26 = 3.14159265358979323846f;
+constexpr int kM3PolygonVertices = 72;
+
+// Expressive Material 3 spring-like morph curve: fast transition in first 68% with subtle overshoot, settling smoothly
+[[nodiscard]] inline float expressiveMorphCurveCpp26(float u) noexcept {
+    u = std::clamp(u, 0.0f, 1.0f);
+    if (u >= 0.72f) {
+        float tail = (u - 0.72f) / 0.28f;
+        return 1.0f + 0.032f * std::sin(kPi26 * tail) * (1.0f - tail);
+    }
+    float t = u / 0.72f;
+    // Cubic bezier approximation of M3 Expressive FastOutExtraSlowIn with subtle spring
+    float inv = 1.0f - t;
+    return 3.0f * inv * inv * t * 0.18f + 3.0f * inv * t * t * 1.04f + t * t * t;
+}
+
+// Evaluates radial distance r(theta) in [0..1] for each of the 7 MaterialShapes in IndeterminateIndicatorPolygons
+// plus shapeId = -1 for Circle
+[[nodiscard]] inline float evalMaterialShapeRadiusCpp26(int shapeId, float theta) noexcept {
+    switch (shapeId) {
+        case -1: // MaterialShapes.Circle
+            return 0.84f;
+
+        case 0: // MaterialShapes.SoftBurst (10-pointed soft rounded starburst)
+            return 0.84f + 0.145f * std::cos(10.0f * theta);
+
+        case 1: // MaterialShapes.Cookie9Sided (9-lobed scalloped cookie flower)
+            return 0.82f + 0.165f * std::cos(9.0f * theta) + 0.015f * std::cos(18.0f * theta);
+
+        case 2: { // MaterialShapes.Pentagon (5-sided rounded regular polygon)
+            float sector = (2.0f * kPi26) / 5.0f;
+            float a = std::fmod(theta + 2.0f * kPi26, sector) - (sector * 0.5f);
+            float polyR = std::cos(sector * 0.5f) / std::max(0.35f, std::cos(a));
+            // Blend polygon edge with smooth rounded corners
+            float rounded = 0.74f + 0.22f * polyR + 0.045f * std::cos(5.0f * theta);
+            return std::clamp(rounded, 0.65f, 0.98f);
+        }
+
+        case 3: { // MaterialShapes.Pill (tilted stadium / capsule shape)
+            float c = std::cos(theta);
+            float s = std::sin(theta);
+            float rx = 0.96f;
+            float ry = 0.64f;
+            float denom = std::sqrt((c * c) / (rx * rx) + (s * s) / (ry * ry));
+            float baseR = (denom > 1e-4f) ? (1.0f / denom) : 0.80f;
+            return std::clamp(baseR + 0.03f * std::cos(2.0f * theta), 0.60f, 0.98f);
+        }
+
+        case 4: // MaterialShapes.Sunny (8-pointed sunny star with rounded tips and deeper valleys)
+            return 0.79f + 0.185f * std::cos(8.0f * theta) - 0.025f * std::cos(16.0f * theta);
+
+        case 5: // MaterialShapes.Cookie4Sided (4-lobed rounded clover / quatrefoil)
+            return 0.79f + 0.195f * std::cos(4.0f * theta) - 0.020f * std::cos(8.0f * theta);
+
+        case 6: // MaterialShapes.Oval (smooth tilted ellipse)
+        default: {
+            float c = std::cos(theta);
+            float s = std::sin(theta);
+            float rx = 0.94f;
+            float ry = 0.70f;
+            float denom = std::sqrt((c * c) / (rx * rx) + (s * s) / (ry * ry));
+            return (denom > 1e-4f) ? (1.0f / denom) : 0.82f;
+        }
+    }
+}
+
+} // namespace
+
+JNIEXPORT jfloatArray JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeComputeM3LoadingPolygon(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jfloat phase,
+    jfloat pullProgress,
+    jboolean isRefreshing,
+    jfloat radiusPx
+) {
+    jfloat coords[kM3PolygonVertices * 2];
+
+    int shapeA = -1;
+    int shapeB = 0;
+    float morphT = 0.0f;
+    float rotRad = 0.0f;
+    float scalePulse = 1.0f;
+
+    if (!isRefreshing) {
+        // Determinate pull-to-refresh preview: Circle -> SoftBurst
+        float p = std::clamp(static_cast<float>(pullProgress), 0.0f, 1.25f);
+        shapeA = -1;
+        shapeB = 0;
+        morphT = std::clamp(p, 0.0f, 1.0f);
+        rotRad = (18.0f + p * 90.0f) * (kPi26 / 180.0f);
+        scalePulse = 0.85f + 0.15f * morphT;
+    } else {
+        // Indeterminate 7-polygon cycle: SoftBurst -> Cookie9Sided -> Pentagon -> Pill -> Sunny -> Cookie4Sided -> Oval
+        float cleanPhase = std::max(0.0f, static_cast<float>(phase));
+        int stepIdx = static_cast<int>(std::floor(cleanPhase));
+        float u = cleanPhase - static_cast<float>(stepIdx);
+        shapeA = stepIdx % 7;
+        shapeB = (stepIdx + 1) % 7;
+        morphT = expressiveMorphCurveCpp26(u);
+        float rotDeg = static_cast<float>(stepIdx) * 90.0f + morphT * 65.0f + u * 25.0f;
+        rotRad = rotDeg * (kPi26 / 180.0f);
+        scalePulse = 1.0f - 0.065f * std::sin(kPi26 * std::clamp(u / 0.72f, 0.0f, 1.0f));
+    }
+
+    float effRadius = static_cast<float>(radiusPx) * scalePulse;
+
+    for (int i = 0; i < kM3PolygonVertices; ++i) {
+        float localAngle = (2.0f * kPi26 * static_cast<float>(i)) / static_cast<float>(kM3PolygonVertices);
+        float rA = evalMaterialShapeRadiusCpp26(shapeA, localAngle);
+        float rB = evalMaterialShapeRadiusCpp26(shapeB, localAngle);
+        float r = (rA + (rB - rA) * morphT) * effRadius;
+        float worldAngle = localAngle + rotRad;
+        coords[i * 2]     = r * std::cos(worldAngle);
+        coords[i * 2 + 1] = r * std::sin(worldAngle);
+    }
+
+    jfloatArray out = env->NewFloatArray(kM3PolygonVertices * 2);
+    if (out) {
+        env->SetFloatArrayRegion(out, 0, kM3PolygonVertices * 2, coords);
+    }
+    return out;
+}
+
+// Stages an SSH private key into ~/.ssh/ with strict 0600 permissions or parses FileZilla sites.xml in C++26
+JNIEXPORT jstring JNICALL
+Java_com_termuxx_app_TermuxActivity_nativeStageKeyOrParseFileZillaXml(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring jInput,
+    jboolean isFileZillaXml
+) {
+    std::string input = jstringToStdString(env, jInput);
+    if (!isFileZillaXml) {
+        std::string staged = stagePrivateKeySecureCpp26(input);
+        return env->NewStringUTF(staged.c_str());
+    }
+
+    // Parse FileZilla <Server>...</Server> blocks in C++26
+    auto extractTag = [](std::string_view block, std::string_view tag) -> std::string {
+        std::string openTag = "<" + std::string(tag);
+        std::string closeTag = "</" + std::string(tag) + ">";
+        size_t p1 = block.find(openTag);
+        if (p1 == std::string_view::npos) return "";
+        size_t gt = block.find('>', p1);
+        if (gt == std::string_view::npos) return "";
+        size_t p2 = block.find(closeTag, gt + 1);
+        if (p2 == std::string_view::npos) return "";
+        return trimCpp(std::string(block.substr(gt + 1, p2 - (gt + 1))));
+    };
+
+    std::string out;
+    std::string_view sv(input);
+    size_t pos = 0;
+    while (true) {
+        size_t s1 = sv.find("<Server>", pos);
+        if (s1 == std::string_view::npos) break;
+        size_t s2 = sv.find("</Server>", s1);
+        if (s2 == std::string_view::npos) break;
+        std::string_view srvBlock = sv.substr(s1 + 8, s2 - (s1 + 8));
+
+        std::string host = extractTag(srvBlock, "Host");
+        std::string port = extractTag(srvBlock, "Port");
+        std::string user = extractTag(srvBlock, "User");
+        std::string keyfile = extractTag(srvBlock, "Keyfile");
+        std::string pass = extractTag(srvBlock, "Pass");
+        std::string name = extractTag(srvBlock, "Name");
+
+        if (!host.empty()) {
+            if (port.empty()) port = "22";
+            if (user.empty()) user = "root";
+            if (name.empty()) name = user + "@" + host;
+            std::string stagedKey = !keyfile.empty() ? stagePrivateKeySecureCpp26(keyfile) : "";
+            std::string authType = (!stagedKey.empty() || !keyfile.empty()) ? "1" : "0";
+            std::string secret = !stagedKey.empty() ? stagedKey : (!keyfile.empty() ? keyfile : pass);
+            out += name + "\t" + host + "\t" + port + "\t" + user + "\t" + authType + "\t" + secret + "\n";
+        }
+        pos = s2 + 9;
+    }
+    return env->NewStringUTF(out.c_str());
 }
 
 } // extern "C"

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Build-Time Bootstrap Downloader, Cache-Aware Updater, APT Lists Pre-Populator & Binary Relocator
-for Termuxx (com.termuxx).
+Build-Time Bootstrap Downloader, Cache-Aware Updater, OpenSSH Pre-Installer,
+APT Lists Pre-Populator & Binary Relocator for Termuxx (com.termuxx).
 Runs during APK build to:
-1. Download JetBrainsMono.ttf and bootstrap-aarch64.zip directly if not already present (eliminating
-   the extra cold Gradle invocation in CI).
-2. If `.bootstrap_patched.stamp` is already present (restored from CI cache), skip redundant network
-   downloads and .deb slipstreaming for instant cached builds.
+1. Download JetBrainsMono.ttf and bootstrap-aarch64.zip directly if not already present.
+2. If `.bootstrap_patched_v3.stamp` is already present (restored from CI cache), skip redundant
+   network downloads and .deb slipstreaming for instant cached builds.
 3. Otherwise fetch the live Termux aarch64 package index & InRelease, pre-populate var/lib/apt/lists/,
-   slipstream updated .deb packages, pre-select default mirror (`etc/termux/chosen_mirrors`), and
-   pre-patch 16-byte tokens ("com.termux/files" -> "com.termuxx/file", "com.termux/cache" -> "com.termuxx/cach").
+   slipstream updated core .deb packages AND pre-install `openssh` (with all transitive dependencies)
+   so `ssh`, `sftp`, `scp`, and `ssh-keygen` work 100% out of the box immediately on first launch!
+4. Pre-select default mirror (`etc/termux/chosen_mirrors`) and pre-patch 16-byte tokens
+   ("com.termux/files" -> "com.termuxx/file", "com.termux/cache" -> "com.termuxx/cach").
 """
 
 import os
@@ -24,7 +25,7 @@ INRELEASE_URL = f"{REPO_BASE}/dists/stable/InRelease"
 PACKAGES_URL = f"{REPO_BASE}/dists/stable/main/binary-aarch64/Packages"
 
 BOOTSTRAP_ZIP = "app/src/main/cpp/bootstrap-aarch64.zip"
-STAMP_FILE = "app/src/main/cpp/.bootstrap_patched.stamp"
+STAMP_FILE = "app/src/main/cpp/.bootstrap_patched_v3.stamp"
 FONT_FILE = "app/src/main/assets/fonts/JetBrainsMono.ttf"
 
 BOOTSTRAP_URLS = [
@@ -32,6 +33,9 @@ BOOTSTRAP_URLS = [
     "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.02.12-r1%2Bapt.android-7/bootstrap-aarch64.zip",
 ]
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf"
+
+# Packages to pre-install (along with all their transitive Depends) into bootstrap-aarch64.zip
+EXTRA_PREINSTALLED_PKGS = ["openssh"]
 
 PREFIX_IN_DEB = "data/data/com.termux/files/usr/"
 OLD_FILES_16 = b"com.termux/files"
@@ -87,6 +91,34 @@ def parse_stanzas(text):
         if fields:
             stanzas.append((raw, fields))
     return stanzas
+
+
+def parse_dep_names(dep_str):
+    if not dep_str:
+        return []
+    names = []
+    for clause in dep_str.split(","):
+        first_alt = clause.split("|")[0].strip()
+        pkg = first_alt.split("(")[0].strip()
+        if pkg:
+            names.append(pkg)
+    return names
+
+
+def format_status_stanza(pkg_name, repo_info):
+    lines = [
+        f"Package: {pkg_name}",
+        "Status: install ok installed",
+    ]
+    for k in (
+        "Priority", "Section", "Installed-Size", "Maintainer", "Architecture",
+        "Multi-Arch", "Version", "Depends", "Pre-Depends", "Recommends",
+        "Suggests", "Breaks", "Conflicts", "Replaces", "Provides",
+        "Homepage", "Description"
+    ):
+        if k in repo_info:
+            lines.append(f"{k}: {repo_info[k]}")
+    return "\n".join(lines)
 
 
 def main():
@@ -163,6 +195,7 @@ def main():
                     status_text = f.read()
 
                 status_stanzas = parse_stanzas(status_text)
+                installed_pkgs = {fields.get("Package") for _, fields in status_stanzas if fields.get("Package")}
                 updated_status_blocks = []
                 upgraded_count = 0
 
@@ -177,24 +210,44 @@ def main():
                             print(f"[update_bootstrap] Upgrading {pkg_name}: {inst_ver} -> {new_ver}")
                             if slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, f"{REPO_BASE}/{deb_rel}"):
                                 upgraded_count += 1
-                                new_block_lines = [
-                                    f"Package: {pkg_name}",
-                                    "Status: install ok installed",
-                                ]
-                                for k in ("Priority", "Section", "Installed-Size", "Maintainer", "Architecture",
-                                          "Multi-Arch", "Version", "Depends", "Pre-Depends", "Recommends",
-                                          "Suggests", "Breaks", "Conflicts", "Replaces", "Provides",
-                                          "Homepage", "Description"):
-                                    if k in repo_info:
-                                        new_block_lines.append(f"{k}: {repo_info[k]}")
-                                updated_status_blocks.append("\n".join(new_block_lines))
+                                updated_status_blocks.append(format_status_stanza(pkg_name, repo_info))
                                 continue
                     updated_status_blocks.append(raw)
 
-                if upgraded_count > 0:
+                # Resolve and pre-install EXTRA_PREINSTALLED_PKGS (openssh + transitive dependencies)
+                install_order = []
+                visited = set(installed_pkgs)
+
+                def resolve_deps_dfs(pkg):
+                    if pkg in visited or pkg not in repo_pkgs:
+                        return
+                    visited.add(pkg)
+                    info = repo_pkgs[pkg]
+                    deps = parse_dep_names(info.get("Pre-Depends", "")) + parse_dep_names(info.get("Depends", ""))
+                    for d in deps:
+                        resolve_deps_dfs(d)
+                    install_order.append(pkg)
+
+                for extra_pkg in EXTRA_PREINSTALLED_PKGS:
+                    resolve_deps_dfs(extra_pkg)
+
+                installed_extra_count = 0
+                for pkg_name in install_order:
+                    repo_info = repo_pkgs.get(pkg_name)
+                    deb_rel = repo_info.get("Filename") if repo_info else None
+                    if deb_rel:
+                        print(f"[update_bootstrap] Pre-installing {pkg_name} ({repo_info.get('Version')}) ...")
+                        if slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, f"{REPO_BASE}/{deb_rel}"):
+                            installed_extra_count += 1
+                            updated_status_blocks.append(format_status_stanza(pkg_name, repo_info))
+
+                if upgraded_count > 0 or installed_extra_count > 0:
                     with open(status_path, "w", encoding="utf-8") as f:
                         f.write("\n\n".join(updated_status_blocks) + "\n\n")
-                print(f"[update_bootstrap] Slipstreamed {upgraded_count} updated package(s) into bootstrap.")
+                print(
+                    f"[update_bootstrap] Slipstreamed {upgraded_count} updated package(s) and "
+                    f"pre-installed {installed_extra_count} extra package(s) (openssh stack)."
+                )
             except Exception as e:
                 print(f"[update_bootstrap] Live repo sync warning (continuing with base bootstrap): {e}")
 
@@ -252,7 +305,7 @@ def main():
 
         os.replace(tmp_zip, BOOTSTRAP_ZIP)
         with open(STAMP_FILE, "w", encoding="utf-8") as sf:
-            sf.write("patched\n")
+            sf.write("patched_v3_with_openssh\n")
         print(f"[update_bootstrap] Repacked {BOOTSTRAP_ZIP} ({os.path.getsize(BOOTSTRAP_ZIP):,} bytes).")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

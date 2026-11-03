@@ -1,11 +1,11 @@
 [versions]
-agp = "9.5.0"
+agp = "9.6.0-alpha02"
 ndk = "30.0.16248370"
 compileSdk = "37"
 minSdk = "37"
 targetSdk = "37"
-appVersionCode = "500"
-appVersionName = "5.0.0"
+appVersionCode = "600"
+appVersionName = "6.0.0"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
