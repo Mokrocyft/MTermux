@@ -3434,10 +3434,10 @@ class TermuxActivity : Activity() {
     }
 
     /**
-     * Exact Material 3 Expressive `PullToRefreshDefaults.LoadingIndicator` morphing shape view
-     * used in BakaSU (`DynamicManagerScreen.kt`, `ModulePage.kt`).
-     * Smoothly morphs between 4-lobed clover, 7-pointed starburst cookie, 5-lobed flower,
-     * 6-lobed seal, and rounded triangle while rotating inside a borderless primaryContainer circle.
+     * Exact Material 3 Expressive LoadingIndicator morphing shape view
+     * matching video #2 & user screenshots (image_89a9a8.png .. image_89a967.png).
+     * Morphs between 10-star SoftBurst, 9-wavy Cookie9Sided, flat-edged Pentagon,
+     * 4-lobed Cookie4Sided, tilted Oval/Pill, and rotated Sunny star!
      */
     internal inner class BakaSuMorphingIndicatorView(context: Context) : View(context) {
         var morphPhase: Float = 0f
@@ -3466,13 +3466,13 @@ class TermuxActivity : Activity() {
             super.onDraw(canvas)
             val cx = width * 0.5f
             val cy = height * 0.5f
-            // Official M3 ContainedLoadingIndicator spec: 38dp active indicator inside 48dp circular container
-            val baseR = min(cx, cy) * 0.79f
+            val baseR = min(cx, cy) * 0.94f
             if (baseR <= 1f) return
 
-            // Compute official M3 Expressive IndeterminateIndicatorPolygons in C++23:
-            // SoftBurst -> Cookie9Sided -> Pentagon -> Pill -> Sunny -> Cookie4Sided -> Oval
-            // with Spring(dampingRatio = 0.6f, stiffness = 200f), 90° step rotation + 360° global rotation + scale bounce
+            // Compute exact C++26 Tangent-Fillet RoundedPolygon vertices matching video #2 (120 vertices):
+            // 0: SoftBurst (10-star, image_89a9a8.png) -> 1: Cookie9Sided (9-cookie, image_89a9a2.png)
+            // -> 2: Pentagon (5-gon, image_89a988.png) -> 3: Cookie4Sided (4-clover, image_89a984.png)
+            // -> 4: Oval/Pill (image_89a981.png) -> 5: Sunny (10-star rotated, image_89a967.png)
             val coords = nativeComputeM3LoadingPolygon(
                 morphPhase,
                 pullProgress,
@@ -3483,21 +3483,11 @@ class TermuxActivity : Activity() {
             if (n < 3) return
 
             morphPath.reset()
-            val firstX = cx + coords[0]
-            val firstY = cy + coords[1]
-            val lastX = cx + coords[(n - 1) * 2]
-            val lastY = cy + coords[(n - 1) * 2 + 1]
-            morphPath.moveTo((lastX + firstX) * 0.5f, (lastY + firstY) * 0.5f)
-            for (i in 0 until n) {
-                val currX = cx + coords[i * 2]
-                val currY = cy + coords[i * 2 + 1]
-                val nextIdx = (i + 1) % n
-                val nextX = cx + coords[nextIdx * 2]
-                val nextY = cy + coords[nextIdx * 2 + 1]
-                morphPath.quadTo(currX, currY, (currX + nextX) * 0.5f, (currY + nextY) * 0.5f)
+            morphPath.moveTo(cx + coords[0], cy + coords[1])
+            for (i in 1 until n) {
+                morphPath.lineTo(cx + coords[i * 2], cy + coords[i * 2 + 1])
             }
             morphPath.close()
-            // M3 ContainedLoadingIndicator spec: active indicator uses onPrimaryContainer (uiOnAccentContainer)
             shapePaint.color = uiOnAccentContainer
             canvas.drawPath(morphPath, shapePaint)
         }
@@ -3506,8 +3496,15 @@ class TermuxActivity : Activity() {
     internal inner class BakaSuPullToRefreshLayout(
         context: Context,
         val scrollView: ScrollView,
-        private val onRefreshTriggered: () -> Unit
+        private val onRefreshTriggered: (() -> Unit) -> Unit
     ) : FrameLayout(context) {
+
+        // Secondary constructor for zero-arg callback callers
+        constructor(context: Context, scrollView: ScrollView, simpleRefresh: () -> Unit) :
+            this(context, scrollView, { finishPtr ->
+                simpleRefresh()
+                finishPtr()
+            })
 
         private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
         private val triggerDistancePx = dpF(64f)
@@ -3520,6 +3517,7 @@ class TermuxActivity : Activity() {
         private var isRefreshing = false
         private var thresholdCrossed = false
         private var currentPullPx = 0f
+        private var refreshStartUptimeMs = 0L
         private var spinAnimator: ValueAnimator? = null
 
         private val indicatorBadge: FrameLayout
@@ -3537,9 +3535,6 @@ class TermuxActivity : Activity() {
                 isIndeterminateRefreshing = false
                 pullProgress = 0f
             }
-            // Official Material 3 Expressive ContainedLoadingIndicator:
-            // 48dp × 48dp Full circle container in primaryContainer (uiAccentContainer)
-            // with 38dp × 38dp morphing active polygon in onPrimaryContainer (uiOnAccentContainer)
             indicatorBadge = FrameLayout(context).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
@@ -3557,6 +3552,27 @@ class TermuxActivity : Activity() {
                 )
             }
             addView(indicatorBadge)
+        }
+
+        fun finishRefresh() {
+            if (!isRefreshing) return
+            val elapsed = SystemClock.uptimeMillis() - refreshStartUptimeMs
+            val remainingMin = (420L - elapsed).coerceAtLeast(0L)
+            postDelayed({
+                if (!isRefreshing) return@postDelayed
+                isRefreshing = false
+                indicatorBadge.animate()
+                    .translationY(-dpF(54f))
+                    .scaleX(0f)
+                    .scaleY(0f)
+                    .alpha(0f)
+                    .setDuration(220L)
+                    .setInterpolator(predictiveCommitInterpolator)
+                    .withEndAction {
+                        spinAnimator?.cancel()
+                    }
+                    .start()
+            }, remainingMin)
         }
 
         private fun isScrolledToTop(): Boolean {
@@ -3634,6 +3650,7 @@ class TermuxActivity : Activity() {
                         currentPullPx = 0f
                         if (triggered) {
                             isRefreshing = true
+                            refreshStartUptimeMs = SystemClock.uptimeMillis()
                             morphIndicator.isIndeterminateRefreshing = true
                             morphIndicator.morphPhase = 0f
 
@@ -3642,15 +3659,13 @@ class TermuxActivity : Activity() {
                                 .scaleX(1.0f)
                                 .scaleY(1.0f)
                                 .alpha(1.0f)
-                                .setDuration(220L)
+                                .setDuration(200L)
                                 .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
 
                             spinAnimator?.cancel()
-                            // Official Compose Material 3 LoadingIndicator timing:
-                            // 650ms per shape morph * 7 IndeterminateIndicatorPolygons = 4550ms full cycle
-                            spinAnimator = ValueAnimator.ofFloat(0f, 7f).apply {
-                                duration = 4550L
+                            spinAnimator = ValueAnimator.ofFloat(0f, 6f).apply {
+                                duration = 3900L
                                 repeatCount = ValueAnimator.INFINITE
                                 interpolator = LinearInterpolator()
                                 addUpdateListener { anim ->
@@ -3659,23 +3674,7 @@ class TermuxActivity : Activity() {
                                 start()
                             }
 
-                            onRefreshTriggered()
-
-                            // Display ContainedLoadingIndicator for 2600ms (4 full M3 Expressive shape morphs)
-                            postDelayed({
-                                isRefreshing = false
-                                indicatorBadge.animate()
-                                    .translationY(-dpF(54f))
-                                    .scaleX(0f)
-                                    .scaleY(0f)
-                                    .alpha(0f)
-                                    .setDuration(250L)
-                                    .setInterpolator(predictiveCommitInterpolator)
-                                    .withEndAction {
-                                        spinAnimator?.cancel()
-                                    }
-                                    .start()
-                            }, 2600L)
+                            onRefreshTriggered { finishRefresh() }
                         } else {
                             indicatorBadge.animate()
                                 .translationY(-dpF(54f))
