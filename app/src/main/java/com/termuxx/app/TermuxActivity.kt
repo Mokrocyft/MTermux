@@ -1186,6 +1186,37 @@ class TermuxActivity : Activity() {
         }
     }
 
+    /**
+     * Liquid Glass Capsule Drawable with translucent top specular highlight and subtle glass edge sheen.
+     */
+    private fun makeLiquidGlassPillDrawable(baseColor: Int, radiusPx: Int): GradientDrawable {
+        val topHighlight = blendColor(baseColor, 0xFFFFFFFF.toInt(), 0.17f)
+        val bottomShade = blendColor(baseColor, 0xFF000000.toInt(), 0.05f)
+        val rimHighlight = withAlpha(blendColor(baseColor, 0xFFFFFFFF.toInt(), 0.34f), 115)
+        return GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(topHighlight, baseColor, bottomShade)
+        ).apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radiusPx.toFloat()
+            setStroke(max(1, dp(1)), rimHighlight)
+        }
+    }
+
+    private fun triggerFolderShakeAnimation(target: View, direction: Int = 1) {
+        target.animate().cancel()
+        target.scaleX = 0.72f
+        target.scaleY = 0.72f
+        target.rotation = (if (direction >= 0) -14f else 14f)
+        target.animate()
+            .scaleX(1.0f)
+            .scaleY(1.0f)
+            .rotation(0f)
+            .setDuration(280L)
+            .setInterpolator(OvershootInterpolator(1.85f))
+            .start()
+    }
+
     // Android 17 AOSP Emphasized Spatial Curve: cubic-bezier(0.2, 0.0, 0.0, 1.0)
     private val aosp17SpatialInterpolator by lazy {
         PathInterpolator(0.2f, 0.0f, 0.0f, 1.0f)
@@ -2004,7 +2035,7 @@ class TermuxActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(18), dp(15), dp(18), dp(15))
-            background = if (isMasterSwitch) {
+            val cardBgDrawable = if (isMasterSwitch) {
                 tonalBg(
                     if (checked) uiAccentContainer else uiSurfaceLow,
                     dp(28)
@@ -2012,6 +2043,7 @@ class TermuxActivity : Activity() {
             } else {
                 segmentedCardBg(index, total, uiSurfaceLow, 0, 22f, 5f)
             }
+            background = cardBgDrawable
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -2019,26 +2051,25 @@ class TermuxActivity : Activity() {
                 bottomMargin = if (isMasterSwitch) dp(12) else if (index < total - 1) dp(2) else dp(8)
             }
 
-            addView(
-                FrameLayout(this@TermuxActivity).apply {
-                    background = tonalBg(
-                        if (isMasterSwitch && checked) uiAccent else uiAccentContainer,
-                        dp(12)
-                    )
-                    layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
-                        marginEnd = dp(14)
-                    }
-                    addView(
-                        MaterialIconView(
-                            this@TermuxActivity,
-                            icon,
-                            if (isMasterSwitch && checked) uiOnAccent else uiAccent,
-                            20.5f,
-                            2.05f
-                        )
-                    )
-                }
+            val iconBoxBg = tonalBg(
+                if (isMasterSwitch && checked) uiAccent else uiAccentContainer,
+                dp(12)
             )
+            val iconView = MaterialIconView(
+                this@TermuxActivity,
+                icon,
+                if (isMasterSwitch && checked) uiOnAccent else uiAccent,
+                20.5f,
+                2.05f
+            )
+            val iconBox = FrameLayout(this@TermuxActivity).apply {
+                background = iconBoxBg
+                layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                    marginEnd = dp(14)
+                }
+                addView(iconView)
+            }
+            addView(iconBox)
 
             val col = LinearLayout(this@TermuxActivity).apply {
                 orientation = LinearLayout.VERTICAL
@@ -2046,21 +2077,45 @@ class TermuxActivity : Activity() {
                     marginEnd = dp(12)
                 }
             }
-            col.addView(TextView(this@TermuxActivity).apply {
+            val titleTv = TextView(this@TermuxActivity).apply {
                 text = title
                 setTextColor(if (isMasterSwitch && checked) uiOnAccentContainer else COLOR_TEXT_BRIGHT)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
-            })
-            col.addView(TextView(this@TermuxActivity).apply {
+            }
+            val subTv = TextView(this@TermuxActivity).apply {
                 text = subtitle
                 setTextColor(if (isMasterSwitch && checked) withAlpha(uiOnAccentContainer, 200) else COLOR_TEXT_DIM)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setPadding(0, dp(2), 0, 0)
-            })
+            }
+            col.addView(titleTv)
+            col.addView(subTv)
             addView(col)
 
+            fun animateMasterCardColors(toChecked: Boolean) {
+                if (!isMasterSwitch) return
+                triggerFolderShakeAnimation(iconBox, if (toChecked) 1 else -1)
+                val fromP = if (toChecked) 0f else 1f
+                val toP = if (toChecked) 1f else 0f
+                ValueAnimator.ofFloat(fromP, toP).apply {
+                    duration = 250L
+                    interpolator = aosp17SpatialInterpolator
+                    addUpdateListener { va ->
+                        val p = va.animatedValue as Float
+                        cardBgDrawable.setColor(blendColor(uiSurfaceLow, uiAccentContainer, p))
+                        iconBoxBg.setColor(blendColor(uiAccentContainer, uiAccent, p))
+                        iconView.tintColor = blendColor(uiAccent, uiOnAccent, p)
+                        iconView.invalidate()
+                        titleTv.setTextColor(blendColor(COLOR_TEXT_BRIGHT, uiOnAccentContainer, p))
+                        subTv.setTextColor(blendColor(COLOR_TEXT_DIM, withAlpha(uiOnAccentContainer, 200), p))
+                    }
+                    start()
+                }
+            }
+
             val sw = M3ExpressiveSwitchView(this@TermuxActivity, checked) { newVal ->
+                animateMasterCardColors(newVal)
                 onToggle(newVal)
             }.apply {
                 layoutParams = LinearLayout.LayoutParams(dp(52), dp(32))
@@ -2426,7 +2481,7 @@ class TermuxActivity : Activity() {
                         useSystemDynamicColor = enabled
                         prefs.edit().putBoolean(KEY_USE_SYSTEM_COLOR, enabled).apply()
                         applyNewColorThemeEverywhere()
-                        populateColorsPage()
+                        detailContainer.postDelayed({ populateColorsPage() }, 240L)
                     }
                 )
 
@@ -3102,6 +3157,14 @@ class TermuxActivity : Activity() {
                     persistRows()
                     populateKeyboardPage()
                 })
+                actActionsRow.addView(makeExpressiveChip(tr("Сброс по умолчанию", "Reset default"), false) {
+                    loadPreset(DEFAULT_EXTRA_KEYS_SPEC)
+                    Toast.makeText(
+                        this@TermuxActivity,
+                        tr("Клавиши сброшены по умолчанию", "Extra keys reset to default"),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                })
                 activeKeysCard.addView(actActionsRow)
                 detailContainer.addView(activeKeysCard)
 
@@ -3158,7 +3221,7 @@ class TermuxActivity : Activity() {
                         hapticEnabled = next
                         prefs.edit().putBoolean(KEY_HAPTIC_ENABLED, next).apply()
                         if (next) triggerHaptic(1.0f)
-                        populateHapticsPage()
+                        detailContainer.postDelayed({ populateHapticsPage() }, 240L)
                     }
                 )
 
