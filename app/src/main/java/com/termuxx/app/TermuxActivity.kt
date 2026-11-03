@@ -7020,10 +7020,7 @@ class TermuxActivity : Activity() {
                                 1 -> "644"
                                 else -> {
                                     if (contentEt.text.isNullOrBlank()) {
-                                        contentEt.setText("#!/usr/bin/env bash
-set -euo pipefail
-
-")
+                                        contentEt.setText("#!/usr/bin/env bash\nset -euo pipefail\n\n")
                                     }
                                     if (nameEt.text.isNullOrBlank() || nameEt.text.toString() == "config.json") {
                                         nameEt.setText("script.sh")
@@ -7579,8 +7576,7 @@ set -euo pipefail
                 setOnClickListener {
                     triggerHaptic(0.9f)
                     dlg.dismiss()
-                    nativeSendText("pkg upgrade -y
-", false)
+                    nativeSendText("pkg upgrade -y\n", false)
                 }
             }
             summaryCard.addView(upgradeBtn)
@@ -7644,8 +7640,7 @@ set -euo pipefail
                                 setOnClickListener {
                                     triggerHaptic(0.9f)
                                     dlg.dismiss()
-                                    nativeSendText("apt remove -y ${pkg.name}
-", false)
+                                    nativeSendText("apt remove -y ${pkg.name}\n", false)
                                 }
                             }
                         )
