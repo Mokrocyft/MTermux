@@ -4122,8 +4122,8 @@ Java_com_termuxx_app_TermuxActivity_nativeListLocalDir(
     // If directory could not be read by unprivileged app UID (e.g. /, /data, /data/adb, /system),
     // automatically use root `su -c` fallback so root users can browse all system directories!
     if (dir == nullptr || (entries.empty() && (dirPath == "/" || dirPath.rfind("/data", 0) == 0 || dirPath.rfind("/system", 0) == 0))) {
-        std::string pattern = showHidden ? "* .[!.]* ..?*" : "*";
-        std::string rootScript = "cd " + shellEscapeSingleCpp(dirPath) + " 2>/dev/null && stat -L -c '@@E@@%F|%s|%Y|%A|%n' -- " + pattern + " 2>/dev/null; true";
+        std::string pattern = showHidden ? "* .*" : "*";
+        std::string rootScript = "cd " + shellEscapeSingleCpp(dirPath) + " 2>/dev/null && for f in " + pattern + "; do [ -e \"$f\" ] || [ -L \"$f\" ] || continue; [ \"$f\" = \".\" ] || [ \"$f\" = \"..\" ] && continue; stat -L -c '@@E@@%F|%s|%Y|%A|%n' -- \"$f\" 2>/dev/null || stat -c '@@E@@%F|%s|%Y|%A|%n' -- \"$f\" 2>/dev/null || (if [ -d \"$f\" ]; then printf '@@E@@directory|0|0|drwxr-xr-x|%s\\n' \"$f\"; else printf '@@E@@file|0|0|-rw-r--r--|%s\\n' \"$f\"; fi); done; true";
         std::string rootOut;
         if (execRootShellCommandCpp26(rootScript, rootOut, 6000) && !rootOut.empty()) {
             entries.clear();
@@ -4452,10 +4452,11 @@ Java_com_termuxx_app_TermuxActivity_nativeListRemoteSftpDir(
     std::string query = trimCpp(jstringToStdString(env, jSearchQuery));
     for (char& c : query) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
 
-    // Build POSIX-compliant remote listing loop in C++26 using '|' delimiter (zero tab-escape ambiguity!)
-    std::string pattern = showHidden ? "* .[!.]* ..?*" : "*";
-    std::string remoteScript = "(cd " + shellEscapeSingleCpp(remoteDir) + " 2>/dev/null || cd ~) && printf '@@PWD@@' && pwd && for f in " + pattern + "; do " +
-        std::string(R"sh([ -e "$f" ] || [ -L "$f" ] || continue; stat -c '@@E@@%F|%s|%Y|%A|%n' -- "$f" 2>/dev/null || stat -f '@@E@@%HT|%z|%m|%Sp|%N' -- "$f" 2>/dev/null || (if [ -d "$f" ]; then printf '@@E@@directory|0|0|drwxr-xr-x|%s\n' "$f"; else printf '@@E@@file|0|0|-rw-r--r--|%s\n' "$f"; fi); done)sh");
+    // Build POSIX-compliant remote listing wrapped in /bin/sh -c so zsh/fish login shells never fail on globs!
+    std::string pattern = showHidden ? "* .*" : "*";
+    std::string innerPosixScript = "(cd " + shellEscapeSingleCpp(remoteDir) + " 2>/dev/null || cd ~) && printf '@@PWD@@%s\\n' \"$(pwd)\" && for f in " + pattern + "; do " +
+        std::string(R"sh([ "$f" = "." ] || [ "$f" = ".." ] || [ "$f" = "*" ] || [ "$f" = ".*" ] && continue; [ -e "$f" ] || [ -L "$f" ] || continue; stat -L -c '@@E@@%F|%s|%Y|%A|%n' -- "$f" 2>/dev/null || stat -c '@@E@@%F|%s|%Y|%A|%n' -- "$f" 2>/dev/null || stat -L -f '@@E@@%HT|%z|%m|%Sp|%N' -- "$f" 2>/dev/null || stat -f '@@E@@%HT|%z|%m|%Sp|%N' -- "$f" 2>/dev/null || (if [ -d "$f" ]; then printf '@@E@@directory|0|0|drwxr-xr-x|%s\n' "$f"; else printf '@@E@@file|0|0|-rw-r--r--|%s\n' "$f"; fi); done; true)sh");
+    std::string remoteScript = "sh -c " + shellEscapeSingleCpp(innerPosixScript);
 
     std::string rawOut;
     if (!runRemoteSftpCommandInternalCpp26(
@@ -4509,7 +4510,12 @@ Java_com_termuxx_app_TermuxActivity_nativeListRemoteSftpDir(
         std::string pm(line.substr(p3 + 1, p4 - (p3 + 1)));
         std::string nameStr(line.substr(p4 + 1));
         if (nameStr.rfind("./", 0) == 0) nameStr.erase(0, 2);
-        if (nameStr.empty() || nameStr == "." || nameStr == "..") continue;
+        if (nameStr.empty() || nameStr == "." || nameStr == ".." || nameStr == "*" || nameStr == ".*") continue;
+        bool alreadyAdded = false;
+        for (const auto& existing : items) {
+            if (existing.name == nameStr) { alreadyAdded = true; break; }
+        }
+        if (alreadyAdded) continue;
 
         std::string lowerStr = nameStr;
         for (char& c : lowerStr) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));

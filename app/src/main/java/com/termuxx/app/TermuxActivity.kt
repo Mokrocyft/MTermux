@@ -66,6 +66,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowInsets
+import android.view.WindowInsetsAnimation
+import android.text.TextUtils
 import android.view.WindowManager
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.CorrectionInfo
@@ -3776,42 +3778,169 @@ class TermuxActivity : Activity() {
         val initRight = (initSys?.right ?: 0) + dp(extraRightDp)
         targetView.setPadding(initLeft, initTop, initRight, initBot)
 
-        targetView.setOnApplyWindowInsetsListener { v, insets ->
-            val sysBars = insets.getInsets(
-                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
-            )
-            val ime = insets.getInsets(WindowInsets.Type.ime())
-            val safeTop = max(sysBars.top, fallbackStatusBarPx) + dp(extraTopDp)
-            val safeBottom = max(sysBars.bottom, ime.bottom) + dp(extraBottomDp)
-            v.setPadding(
-                sysBars.left + dp(extraLeftDp),
-                safeTop,
-                sysBars.right + dp(extraRightDp),
-                safeBottom
-            )
-            if (v === rootLayout) {
-                val nowOpen = ime.bottom > dp(80)
-                if (nowOpen != isImeCurrentlyOpen) {
-                    isImeCurrentlyOpen = nowOpen
-                    imeTransitionAnimator?.cancel()
-                    val startF = imeOpenFraction
-                    val endF = if (nowOpen) 1f else 0f
-                    imeTransitionAnimator = ValueAnimator.ofFloat(startF, endF).apply {
-                        duration = 260L
-                        interpolator = aosp17SpatialInterpolator
-                        addUpdateListener { va ->
-                            imeOpenFraction = safeClamp(va.animatedValue as Float, 0f, 1f)
-                            val botPad = (dpF(14f) * (1f - imeOpenFraction) + dpF(3f) * imeOpenFraction).roundToInt()
-                            extraKeysRoot.setPadding(0, dp(3), 0, botPad)
-                            for (updater in extraKeyRowUpdaters) {
-                                updater()
-                            }
-                        }
-                        start()
-                    }
+        if (targetView === rootLayout) {
+            var isImeAnimating = false
+            var maxObservedImePx = dp(280)
+            var lastAnimatedBottomPx = initBot
+            var inertiaAnimator: ValueAnimator? = null
+
+            fun updateExtraKeysForImeFraction(frac: Float, inertiaOffsetY: Float = 0f) {
+                imeOpenFraction = safeClamp(frac, 0f, 1f)
+                val botPad = (dpF(14f) * (1f - imeOpenFraction) + dpF(3f) * imeOpenFraction).roundToInt()
+                extraKeysRoot.setPadding(0, dp(3), 0, botPad)
+                extraKeysRoot.translationY = inertiaOffsetY
+                for (updater in extraKeyRowUpdaters) {
+                    updater()
                 }
             }
-            insets
+
+            targetView.setWindowInsetsAnimationCallback(
+                object : WindowInsetsAnimation.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                    override fun onPrepare(animation: WindowInsetsAnimation) {
+                        if ((animation.typeMask and WindowInsets.Type.ime()) != 0) {
+                            isImeAnimating = true
+                            imeTransitionAnimator?.cancel()
+                            inertiaAnimator?.cancel()
+                        }
+                    }
+
+                    override fun onProgress(
+                        insets: WindowInsets,
+                        runningAnimations: MutableList<WindowInsetsAnimation>
+                    ): WindowInsets {
+                        val sysBars = insets.getInsets(
+                            WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                        )
+                        val ime = insets.getInsets(WindowInsets.Type.ime())
+                        if (ime.bottom > maxObservedImePx) {
+                            maxObservedImePx = ime.bottom
+                        }
+                        val safeTop = max(sysBars.top, fallbackStatusBarPx) + dp(extraTopDp)
+                        val curBottom = max(sysBars.bottom, ime.bottom) + dp(extraBottomDp)
+                        val velocityPx = (curBottom - lastAnimatedBottomPx).toFloat()
+                        lastAnimatedBottomPx = curBottom
+
+                        targetView.setPadding(
+                            sysBars.left + dp(extraLeftDp),
+                            safeTop,
+                            sysBars.right + dp(extraRightDp),
+                            curBottom
+                        )
+
+                        val span = max(dp(160), maxObservedImePx - sysBars.bottom).toFloat()
+                        val rawFrac = safeClamp((ime.bottom - sysBars.bottom).toFloat() / span, 0f, 1f)
+                        // Subtle physical inertia lag while following the moving keyboard
+                        val inertiaLagY = safeClamp(velocityPx * 0.28f, -dpF(14f), dpF(14f))
+                        updateExtraKeysForImeFraction(rawFrac, inertiaLagY)
+                        return insets
+                    }
+
+                    override fun onEnd(animation: WindowInsetsAnimation) {
+                        if ((animation.typeMask and WindowInsets.Type.ime()) != 0) {
+                            isImeAnimating = false
+                            val curInsets = targetView.rootWindowInsets
+                            val sysB = curInsets?.getInsets(
+                                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                            )?.bottom ?: 0
+                            val imeB = curInsets?.getInsets(WindowInsets.Type.ime())?.bottom ?: 0
+                            val nowOpen = imeB > dp(80)
+                            isImeCurrentlyOpen = nowOpen
+                            val startF = imeOpenFraction
+                            val endF = if (nowOpen) 1f else 0f
+                            val startY = if (abs(extraKeysRoot.translationY) > 1f) {
+                                extraKeysRoot.translationY
+                            } else {
+                                if (nowOpen) dpF(10f) else -dpF(8f)
+                            }
+
+                            inertiaAnimator?.cancel()
+                            inertiaAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                                duration = 340L
+                                interpolator = LinearInterpolator()
+                                addUpdateListener { va ->
+                                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                                    // Underdamped spring settle for inertial rebound after keyboard stops!
+                                    val spring = 1f - kotlin.math.exp(-3.8f * t) * kotlin.math.cos(5.8f * t)
+                                    val curF = startF + (endF - startF) * spring
+                                    val curY = startY * kotlin.math.exp(-4.2f * t) * kotlin.math.cos(6.2f * t)
+                                    updateExtraKeysForImeFraction(curF, curY)
+                                }
+                                start()
+                            }
+                        }
+                    }
+                }
+            )
+
+            targetView.setOnApplyWindowInsetsListener { v, insets ->
+                val sysBars = insets.getInsets(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                )
+                val ime = insets.getInsets(WindowInsets.Type.ime())
+                if (ime.bottom > maxObservedImePx) {
+                    maxObservedImePx = ime.bottom
+                }
+                val safeTop = max(sysBars.top, fallbackStatusBarPx) + dp(extraTopDp)
+                val targetBottom = max(sysBars.bottom, ime.bottom) + dp(extraBottomDp)
+                val nowOpen = ime.bottom > dp(80)
+
+                if (!isImeAnimating) {
+                    if (nowOpen != isImeCurrentlyOpen) {
+                        val startBottom = lastAnimatedBottomPx
+                        lastAnimatedBottomPx = targetBottom
+                        isImeCurrentlyOpen = nowOpen
+                        val startF = imeOpenFraction
+                        val endF = if (nowOpen) 1f else 0f
+                        val dirSign = if (nowOpen) 1f else -1f
+
+                        imeTransitionAnimator?.cancel()
+                        imeTransitionAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                            duration = 340L
+                            interpolator = LinearInterpolator()
+                            addUpdateListener { va ->
+                                val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                                val padEase = 1f - (1f - t) * (1f - t) * (1f - t)
+                                val spring = 1f - kotlin.math.exp(-3.6f * t) * kotlin.math.cos(5.6f * t)
+                                val curBot = (startBottom + (targetBottom - startBottom) * padEase).roundToInt()
+                                v.setPadding(
+                                    sysBars.left + dp(extraLeftDp),
+                                    safeTop,
+                                    sysBars.right + dp(extraRightDp),
+                                    curBot
+                                )
+                                val inertiaY = dirSign * dpF(9f) * kotlin.math.sin(t * Math.PI.toFloat()) * (1f - t * 0.5f)
+                                updateExtraKeysForImeFraction(startF + (endF - startF) * spring, inertiaY)
+                            }
+                            start()
+                        }
+                    } else {
+                        lastAnimatedBottomPx = targetBottom
+                        v.setPadding(
+                            sysBars.left + dp(extraLeftDp),
+                            safeTop,
+                            sysBars.right + dp(extraRightDp),
+                            targetBottom
+                        )
+                    }
+                }
+                insets
+            }
+        } else {
+            targetView.setOnApplyWindowInsetsListener { v, insets ->
+                val sysBars = insets.getInsets(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                )
+                val ime = insets.getInsets(WindowInsets.Type.ime())
+                val safeTop = max(sysBars.top, fallbackStatusBarPx) + dp(extraTopDp)
+                val safeBottom = max(sysBars.bottom, ime.bottom) + dp(extraBottomDp)
+                v.setPadding(
+                    sysBars.left + dp(extraLeftDp),
+                    safeTop,
+                    sysBars.right + dp(extraRightDp),
+                    safeBottom
+                )
+                insets
+            }
         }
         targetView.post { targetView.requestApplyInsets() }
     }
@@ -6028,12 +6157,19 @@ class TermuxActivity : Activity() {
                         setPadding(0, dp(2), 0, dp(4))
                     })
 
+                    val badgeScroll = HorizontalScrollView(this).apply {
+                        isHorizontalScrollBarEnabled = false
+                        overScrollMode = View.OVER_SCROLL_NEVER
+                    }
                     val badgeRow = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                     }
                     fun makeMiniBadge(txt: String) = TextView(this).apply {
                         text = txt
+                        setSingleLine(true)
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
                         setTextColor(uiAccent)
                         typeface = Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
@@ -6052,27 +6188,30 @@ class TermuxActivity : Activity() {
                         else -> "Agent"
                     }))
                     if (srv.localForwards.isNotBlank()) {
-                        badgeRow.addView(makeMiniBadge("-L ${srv.localForwards.take(18)}"))
+                        badgeRow.addView(makeMiniBadge("-L ${srv.localForwards.take(20)}"))
                     }
                     if (srv.remoteForwards.isNotBlank()) {
-                        badgeRow.addView(makeMiniBadge("-R ${srv.remoteForwards.take(14)}"))
+                        badgeRow.addView(makeMiniBadge("-R ${srv.remoteForwards.take(16)}"))
                     }
                     if (srv.dynamicSocksPort.isNotBlank()) {
                         badgeRow.addView(makeMiniBadge("-D ${srv.dynamicSocksPort}"))
                     }
-                    infoCol.addView(badgeRow)
+                    badgeScroll.addView(badgeRow)
+                    infoCol.addView(badgeScroll)
                     card.addView(infoCol)
 
                     val cachedPing = serverPingCacheMs[srv.id]
                     val pingPill = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
+                        gravity = Gravity.CENTER
+                        minimumWidth = dp(74)
                         background = tonalBg(uiSurfaceContainer, dp(10))
-                        setPadding(dp(8), dp(5), dp(9), dp(5))
+                        setPadding(dp(8), dp(6), dp(9), dp(6))
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.WRAP_CONTENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
                         ).apply {
+                            marginStart = dp(6)
                             marginEnd = dp(6)
                         }
                         attachSmoothPressAnimation(this, 0.92f)
@@ -6085,6 +6224,8 @@ class TermuxActivity : Activity() {
                         }
                     )
                     val pingTv = TextView(this).apply {
+                        setSingleLine(true)
+                        maxLines = 1
                         typeface = Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
                         if (cachedPing == null) {
@@ -6106,13 +6247,22 @@ class TermuxActivity : Activity() {
                     }
                     card.addView(pingPill)
 
-                    card.addView(makeExpressiveChip("SFTP", false) {
-                        activeSftpServer = srv
-                        remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
-                        previousTab = activeTab
-                        activeTab = 1
-                        renderActiveTab()
-                    })
+                    card.addView(
+                        makeExpressiveChip(
+                            title = "SFTP",
+                            selected = false,
+                            accentColor = COLOR_TEXT_BRIGHT,
+                            containerColor = uiSurfaceContainer
+                        ) {
+                            activeSftpServer = srv
+                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                            previousTab = activeTab
+                            activeTab = 1
+                            renderActiveTab()
+                        }.apply {
+                            background = tonalBg(uiSurfaceContainer, dp(10))
+                        }
+                    )
 
                     card.addView(
                         FrameLayout(this).apply {
@@ -6285,7 +6435,12 @@ class TermuxActivity : Activity() {
         }
 
         // Ultra-fast single-pass remote SFTP directory listing powered by C++26 nativeListRemoteSftpDir
-        fun listRemoteSftpEntriesViaCpp23(server: SshServerProfile, remoteDir: String): Pair<String?, List<SftpItemEntry>> {
+        fun listRemoteSftpEntriesViaCpp23(
+            server: SshServerProfile,
+            remoteDir: String,
+            showHiddenFlag: Boolean,
+            searchQueryStr: String
+        ): Triple<String?, String, List<SftpItemEntry>> {
             val raw = nativeListRemoteSftpDir(
                 server.host,
                 server.port,
@@ -6294,17 +6449,19 @@ class TermuxActivity : Activity() {
                 server.secretOrKeyPath,
                 server.jumpHost,
                 remoteDir,
-                sftpShowHidden,
-                sftpSearchQuery
+                showHiddenFlag,
+                searchQueryStr
             )
             if (!raw.startsWith("OK\n")) {
                 val errTxt = raw.removePrefix("ERR\n").trim()
-                return errTxt.ifEmpty { tr("Не удалось подключиться по SFTP/SSH", "Failed to connect via SFTP/SSH") } to emptyList()
+                return Triple(
+                    errTxt.ifEmpty { tr("Не удалось подключиться по SFTP/SSH", "Failed to connect via SFTP/SSH") },
+                    remoteDir,
+                    emptyList()
+                )
             }
             val lines = raw.removePrefix("OK\n").split("\n")
-            if (lines.isNotEmpty() && lines[0].isNotBlank()) {
-                remoteCurrentPath = lines[0].trim()
-            }
+            val resolvedDir = if (lines.isNotEmpty() && lines[0].isNotBlank()) lines[0].trim() else remoteDir
             val items = ArrayList<SftpItemEntry>()
             for (i in 1 until lines.size) {
                 val line = lines[i]
@@ -6323,7 +6480,7 @@ class TermuxActivity : Activity() {
                     )
                 }
             }
-            return null to items
+            return Triple(null, resolvedDir, items)
         }
 
         // Liquid Glass Capsule Animator:
@@ -7549,26 +7706,38 @@ class TermuxActivity : Activity() {
                 }
             }
 
+            var sftpRequestGeneration = 0
+
             refreshSftpListInPlace = { bypassCache, onDone ->
+                val reqGen = ++sftpRequestGeneration
                 val srv = activeSftpServer
                 if (srv == null) {
-                    val pathStr = localCurrentDir.absolutePath
-                    val isRootSystemPath = pathStr == "/" || pathStr.startsWith("/data") && !pathStr.startsWith("/data/data/com.termuxx") || pathStr.startsWith("/system")
-                    val directRead = !isRootSystemPath && localCurrentDir.exists() && localCurrentDir.canRead()
+                    val targetDir = localCurrentDir
+                    val pathStr = targetDir.absolutePath
+                    val isRootSystemPath = pathStr == "/" ||
+                        (pathStr.startsWith("/data") && !pathStr.startsWith("/data/data/com.termuxx")) ||
+                        pathStr.startsWith("/system") ||
+                        pathStr.startsWith("/vendor") ||
+                        pathStr.startsWith("/product") ||
+                        pathStr.startsWith("/apex")
+                    val directRead = !isRootSystemPath && targetDir.exists() && targetDir.canRead()
                     if (directRead) {
-                        populateEntriesIntoRowsCol(null, listLocalEntriesViaCpp23(localCurrentDir, 0))
+                        val list = listLocalEntriesViaCpp23(targetDir, 0)
+                        populateEntriesIntoRowsCol(null, list)
                         onDone?.invoke()
                     } else {
                         val rootCacheKey = "local_root:$pathStr:$sftpShowHidden:$sftpSearchQuery:$sftpTreeMode"
-                        val cachedRoot = if (!bypassCache) sftpRemoteDirCache[rootCacheKey] else null
+                        val cachedRoot = if (!bypassCache) sftpRemoteDirCache[rootCacheKey]?.takeIf { it.isNotEmpty() } else null
                         if (cachedRoot != null) {
                             populateEntriesIntoRowsCol(null, cachedRoot)
                         }
                         Thread {
-                            val entries = listLocalEntriesViaCpp23(localCurrentDir, 0)
-                            sftpRemoteDirCache[rootCacheKey] = entries
+                            val entries = listLocalEntriesViaCpp23(targetDir, 0)
+                            if (entries.isNotEmpty()) {
+                                sftpRemoteDirCache[rootCacheKey] = entries
+                            }
                             runOnUiThread {
-                                if (activeTab == 1 && activeSftpServer == null && localCurrentDir.absolutePath == pathStr) {
+                                if (reqGen == sftpRequestGeneration && activeTab == 1 && activeSftpServer == null && localCurrentDir.absolutePath == pathStr) {
                                     if (cachedRoot == null || cachedRoot != entries) {
                                         populateEntriesIntoRowsCol(null, entries)
                                     }
@@ -7578,8 +7747,11 @@ class TermuxActivity : Activity() {
                         }.start()
                     }
                 } else {
-                    val cacheKey = "${srv.id}:${remoteCurrentPath}:${sftpShowHidden}:${sftpSearchQuery}"
-                    val cached = if (!bypassCache) sftpRemoteDirCache[cacheKey] else null
+                    val requestedPath = remoteCurrentPath.ifBlank { "/" }
+                    val showHiddenSnap = sftpShowHidden
+                    val searchSnap = sftpSearchQuery
+                    val cacheKey = "${srv.id}:$requestedPath:$showHiddenSnap:$searchSnap"
+                    val cached = if (!bypassCache) sftpRemoteDirCache[cacheKey]?.takeIf { it.isNotEmpty() } else null
                     if (cached != null) {
                         populateEntriesIntoRowsCol(null, cached)
                         onDone?.invoke()
@@ -7621,15 +7793,22 @@ class TermuxActivity : Activity() {
                         }
 
                         Thread {
-                            val prevPath = remoteCurrentPath
-                            val (err, remoteEntries) = listRemoteSftpEntriesViaCpp23(srv, remoteCurrentPath)
-                            if (err == null) {
+                            val (err, resolvedPath, remoteEntries) = listRemoteSftpEntriesViaCpp23(
+                                srv,
+                                requestedPath,
+                                showHiddenSnap,
+                                searchSnap
+                            )
+                            if (err == null && remoteEntries.isNotEmpty()) {
                                 sftpRemoteDirCache[cacheKey] = remoteEntries
+                                val resolvedKey = "${srv.id}:$resolvedPath:$showHiddenSnap:$searchSnap"
+                                sftpRemoteDirCache[resolvedKey] = remoteEntries
                             }
                             runOnUiThread {
                                 loadingAnim?.cancel()
-                                if (activeTab == 1 && activeSftpServer?.id == srv.id) {
-                                    if (remoteCurrentPath != prevPath) {
+                                if (reqGen == sftpRequestGeneration && activeTab == 1 && activeSftpServer?.id == srv.id) {
+                                    if (resolvedPath.isNotBlank() && resolvedPath != remoteCurrentPath) {
+                                        remoteCurrentPath = resolvedPath
                                         rebuildBreadcrumbs(true)
                                     }
                                     populateEntriesIntoRowsCol(err, remoteEntries)
@@ -9019,6 +9198,8 @@ class TermuxActivity : Activity() {
         }
     }
 
+    private var prevSessionCountForTabs: Int = 1
+
     internal fun closeCurrentSession() {
         val active = nativeGetActiveIndex()
         if (active < 0) {
@@ -9033,42 +9214,20 @@ class TermuxActivity : Activity() {
             return
         }
 
-        val closingTabView = if (active in 0 until tabStrip.childCount) tabStrip.getChildAt(active) else null
-        if (closingTabView != null && closingTabView.width > 0) {
-            val startW = closingTabView.width.toFloat()
-            val tabH = closingTabView.height.takeIf { it > 0 } ?: dp(31)
-            ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 160L
-                interpolator = aosp17SpatialInterpolator
-                addUpdateListener { va ->
-                    val f = safeClamp(va.animatedValue as Float, 0f, 1f)
-                    closingTabView.alpha = 1f - f
-                    val lp = closingTabView.layoutParams as LinearLayout.LayoutParams
-                    lp.width = (startW * (1f - f)).roundToInt().coerceAtLeast(0)
-                    lp.height = tabH
-                    closingTabView.layoutParams = lp
-                }
-                addListener(object : android.animation.AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(animation: android.animation.Animator) {
-                        val rem = nativeCloseSession(active)
-                        if (rem <= 0) {
-                            finish()
-                        } else {
-                            rebuildTabs()
-                            terminalSurface.invalidateAllRows()
-                        }
-                    }
-                })
-                start()
-            }
+        val closedIdx = active
+        val closedWasRoot = nativeIsSessionRoot(closedIdx)
+        val closedLabel = (if (closedWasRoot) "# " else "$ ") + (closedIdx + 1)
+
+        val rem = nativeCloseSession(active)
+        if (rem <= 0) {
+            finish()
         } else {
-            val rem = nativeCloseSession(active)
-            if (rem <= 0) {
-                finish()
-            } else {
-                rebuildTabs()
-                terminalSurface.invalidateAllRows()
-            }
+            rebuildTabs(
+                closedTabIndex = closedIdx,
+                closedTabWasRoot = closedWasRoot,
+                closedTabText = closedLabel
+            )
+            terminalSurface.invalidateAllRows()
         }
     }
 
@@ -9133,17 +9292,23 @@ class TermuxActivity : Activity() {
         mDlg.show()
     }
 
-    internal fun rebuildTabs() {
+    internal fun rebuildTabs(
+        closedTabIndex: Int = -1,
+        closedTabWasRoot: Boolean = false,
+        closedTabText: String = ""
+    ) {
         if (!::tabSlidingIndicator.isInitialized) return
-        // Hide old sliding capsule: session tabs now use direct SFTP Bento button expansion & neighbor length compression!
+        (tabStrip.tag as? ValueAnimator)?.cancel()
         tabSlidingIndicator.visibility = View.GONE
 
         val rawCount = nativeGetSessionCount()
         val count = max(1, rawCount)
         val active = safeClampInt(if (rawCount > 0) nativeGetActiveIndex() else 0, 0, count - 1)
         val fromIdx = safeClampInt(prevActiveSessionIdx, 0, count - 1)
-        val switchedSession = (fromIdx != active)
+        val countChanged = (count != prevSessionCountForTabs)
+        val switchedSession = (fromIdx != active) || (closedTabIndex >= 0) || countChanged
         prevActiveSessionIdx = active
+        prevSessionCountForTabs = count
 
         tabStrip.removeAllViews()
         val tabViews = ArrayList<TextView>(count)
@@ -9159,6 +9324,9 @@ class TermuxActivity : Activity() {
         val inactiveTabW = dpF(46f)
         val activeTabW = dpF(60f)
         val deltaW = FloatArray(count)
+
+        var ghostClosingTab: TextView? = null
+        var ghostClosingProg: Float = if (closedTabIndex >= 0) 1f else 0f
 
         fun updateSessionTabsBentoGeometry() {
             for (i in 0 until count) deltaW[i] = 0f
@@ -9195,8 +9363,8 @@ class TermuxActivity : Activity() {
                 val baseW = inactiveTabW + (activeTabW - inactiveTabW) * selF
                 val wPx = (baseW + deltaW[i]).roundToInt().coerceAtLeast(dp(32))
 
-                val restL = if (i == 0) outerR else innerR
-                val restR = if (i == count - 1) outerR else innerR
+                val restL = if (i == 0 && (ghostClosingTab == null || closedTabIndex > 0 || ghostClosingProg < 0.1f)) outerR else innerR
+                val restR = if (i == count - 1 && (ghostClosingTab == null || closedTabIndex <= count - 1 || ghostClosingProg < 0.1f)) outerR else innerR
                 val pillMorph = safeClamp(max(selF, pSelf), 0f, 1f)
                 val curL = restL + (outerR - restL) * pillMorph
                 val curR = restR + (outerR - restR) * pillMorph
@@ -9217,6 +9385,21 @@ class TermuxActivity : Activity() {
                     lp.width = wPx
                     tv.layoutParams = lp
                 }
+            }
+
+            val ghost = ghostClosingTab
+            if (ghost != null) {
+                val gF = safeClamp(ghostClosingProg, 0f, 1f)
+                val gW = (activeTabW * gF).roundToInt().coerceAtLeast(0)
+                val gMargin = (dpF(1f) * gF).roundToInt()
+                ghost.alpha = safeClamp(gF * 1.15f - 0.15f, 0f, 1f)
+                ghost.scaleX = 0.75f + 0.25f * gF
+                ghost.scaleY = 0.75f + 0.25f * gF
+                val glp = ghost.layoutParams as LinearLayout.LayoutParams
+                glp.width = gW
+                glp.marginStart = gMargin
+                glp.marginEnd = gMargin
+                ghost.layoutParams = glp
             }
         }
 
@@ -9314,22 +9497,67 @@ class TermuxActivity : Activity() {
             tabStrip.addView(tab)
         }
 
-        if (switchedSession && fromIdx in 0 until count && active in 0 until count) {
-            switchProg[fromIdx] = 1f
+        // If a session was just closed, insert a collapsing ghost tab at closedTabIndex so it shrinks
+        // simultaneously while the newly active tab expands in a single smooth animation!
+        if (closedTabIndex >= 0) {
+            val ghostFill = if (closedTabWasRoot) COLOR_ROOT_CONTAINER else uiAccentContainer
+            val ghostTxt = if (closedTabWasRoot) COLOR_ROOT else uiOnAccentContainer
+            val ghostBg = makeConnectedSegmentDrawable(ghostFill, outerR, outerR)
+            val ghostTv = TextView(this).apply {
+                text = closedTabText
+                gravity = Gravity.CENTER
+                setSingleLine(true)
+                typeface = Typeface.DEFAULT_BOLD
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                setTextColor(ghostTxt)
+                setPadding(dp(6), 0, dp(6), 0)
+                background = ghostBg
+                layoutParams = LinearLayout.LayoutParams(activeTabW.roundToInt(), tabH).apply {
+                    setMargins(dp(1), 0, dp(1), 0)
+                }
+            }
+            ghostClosingTab = ghostTv
+            val insertIdx = safeClampInt(closedTabIndex, 0, tabStrip.childCount)
+            tabStrip.addView(ghostTv, insertIdx)
+        }
+
+        if (switchedSession && active in 0 until count) {
+            val animateOldActive = (closedTabIndex < 0 && fromIdx in 0 until count && fromIdx != active)
+            if (animateOldActive) {
+                switchProg[fromIdx] = 1f
+            }
             switchProg[active] = 0f
             updateSessionTabsBentoGeometry()
-            ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 350L
+            val switchAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 320L
                 interpolator = LinearInterpolator()
                 addUpdateListener { va ->
                     val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                    val spring = 1f - kotlin.math.exp(-3.4f * t) * kotlin.math.cos(6.0f * t)
-                    switchProg[active] = safeClamp(spring, 0f, 1.15f)
-                    switchProg[fromIdx] = safeClamp(1f - spring, 0f, 1f)
+                    val spring = 1f - kotlin.math.exp(-3.5f * t) * kotlin.math.cos(5.6f * t)
+                    val smoothCollapse = (1f - t) * (1f - t)
+                    switchProg[active] = safeClamp(spring, 0f, 1.14f)
+                    if (animateOldActive) {
+                        switchProg[fromIdx] = safeClamp(1f - spring, 0f, 1f)
+                    }
+                    if (closedTabIndex >= 0) {
+                        ghostClosingProg = smoothCollapse
+                    }
                     updateSessionTabsBentoGeometry()
                 }
-                start()
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        val g = ghostClosingTab
+                        if (g != null) {
+                            tabStrip.removeView(g)
+                            ghostClosingTab = null
+                            ghostClosingProg = 0f
+                            updateSessionTabsBentoGeometry()
+                        }
+                    }
+                })
             }
+            tabStrip.tag = switchAnim
+            switchAnim.start()
         } else {
             updateSessionTabsBentoGeometry()
         }
