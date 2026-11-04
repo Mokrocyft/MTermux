@@ -139,6 +139,7 @@ private const val KEY_LINE_SPACING_PCT = "line_spacing_pct_v1" // 85..135 (defau
 private const val KEY_SCROLLBACK_LINES = "scrollback_lines_v1" // default 4000
 private const val KEY_COPY_ON_SELECT = "copy_on_select_v1"
 private const val KEY_KEEP_SCREEN_ON = "keep_screen_on_v1"
+private const val KEY_AUTO_HIDE_EXTRA_KEYS = "auto_hide_extra_keys_v1"
 private const val KEY_APP_LANG = "app_lang_v1" // 0: Auto, 1: RU, 2: EN
 internal const val ACTION_EXIT_APP = "com.termuxx.ACTION_EXIT_APP"
 private const val COLOR_PASTEL_RED = 0xFFF28B82.toInt()
@@ -469,6 +470,7 @@ class TermuxActivity : Activity() {
         appLangPref = prefs.getInt(KEY_APP_LANG, 0).coerceIn(0, 2)
         copyOnSelect = prefs.getBoolean(KEY_COPY_ON_SELECT, false)
         keepScreenOnPref = prefs.getBoolean(KEY_KEEP_SCREEN_ON, false)
+        autoHideExtraKeysOnScroll = prefs.getBoolean(KEY_AUTO_HIDE_EXTRA_KEYS, true)
         colorSeedArgb = prefs.getInt(KEY_COLOR_SEED_V2, getSystemDynamicSeedColor())
         monetStyleIndex = prefs.getInt(KEY_MONET_STYLE_V2, 0).coerceIn(0, 3)
         refreshColorSpec2026FromCpp()
