@@ -193,6 +193,7 @@ private data class SeedColorOption(
 )
 
 private val COLORBLENDR_SEEDS = arrayOf(
+    SeedColorOption("Monochrome", 0xFF8E9199.toInt()),
     SeedColorOption("Ocean Blue", 0xFF5179A9.toInt()),
     SeedColorOption("Emerald Mint", 0xFF34846F.toInt()),
     SeedColorOption("Royal Violet", 0xFF7A6FAB.toInt()),
@@ -338,6 +339,31 @@ class TermuxActivity : Activity() {
     private var prevActiveSessionIdx: Int = 0
     private lateinit var extraKeysRoot: LinearLayout
     private var isImeCurrentlyOpen: Boolean = false
+    private var isExtraKeysScrollHidden: Boolean = false
+    internal var autoHideExtraKeysOnScroll: Boolean = true
+
+    internal fun setExtraKeysScrollHidden(hidden: Boolean) {
+        if (!autoHideExtraKeysOnScroll && hidden) return
+        if (isExtraKeysScrollHidden == hidden) return
+        isExtraKeysScrollHidden = hidden
+        extraKeysRoot.animate().cancel()
+        if (hidden) {
+            val slideDist = (extraKeysRoot.height + dp(24)).toFloat().coerceAtLeast(dpF(56f))
+            extraKeysRoot.animate()
+                .translationY(slideDist)
+                .alpha(0f)
+                .setDuration(210L)
+                .setInterpolator(aosp17SpatialInterpolator)
+                .start()
+        } else {
+            extraKeysRoot.animate()
+                .translationY(0f)
+                .alpha(1f)
+                .setDuration(230L)
+                .setInterpolator(OvershootInterpolator(1.25f))
+                .start()
+        }
+    }
     private var imeOpenFraction: Float = 0f
     private var imeTransitionAnimator: ValueAnimator? = null
     private val extraKeyRowUpdaters = ArrayList<() -> Unit>(2)
@@ -469,14 +495,14 @@ class TermuxActivity : Activity() {
             setBackgroundColor(COLOR_AMOLED_BG)
         }
 
-        // Top Bar — pure #000000 seamless background, lowered safely below status bar & camera cutout
+        // Top Floating Capsules Row (no full-width background bar — expanding Sessions pill on left & Actions pill on right!)
         headerBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(COLOR_AMOLED_BG)
-            setPadding(dp(8), dp(4), dp(8), dp(4))
-            clipChildren = true
-            clipToPadding = true
+            setBackgroundColor(0x00000000)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            clipChildren = false
+            clipToPadding = false
         }
 
         val tabScroll = HorizontalScrollView(this).apply {
@@ -484,31 +510,32 @@ class TermuxActivity : Activity() {
             overScrollMode = View.OVER_SCROLL_NEVER
             isHorizontalFadingEdgeEnabled = true
             setFadingEdgeLength(dp(18))
-            clipChildren = true
-            clipToPadding = true
-            setPadding(0, 0, dp(4), 0)
+            clipChildren = false
+            clipToPadding = false
         }
         val tabContainer = FrameLayout(this).apply {
+            background = tonalBg(uiSurfaceLow, dp(22))
+            setPadding(dp(4), dp(4), dp(4), dp(4))
             clipChildren = false
             clipToPadding = false
         }
         tabSlidingIndicator = View(this).apply {
             background = makeLiquidGlassPillDrawable(uiAccentContainer, dp(15))
+            visibility = View.GONE
         }
         tabStrip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             clipChildren = false
             clipToPadding = false
-            setPadding(0, dp(2), dp(4), dp(2))
         }
         tabContainer.addView(tabSlidingIndicator, FrameLayout.LayoutParams(0, 0))
-        tabContainer.addView(tabStrip, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        tabScroll.addView(tabContainer, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        tabContainer.addView(tabStrip, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        tabScroll.addView(tabContainer, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         headerBar.addView(
             tabScroll,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
-                marginEnd = dp(6)
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(8)
             }
         )
 
@@ -516,7 +543,7 @@ class TermuxActivity : Activity() {
 
         rootLayout.addView(
             headerBar,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42))
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         )
 
         // Terminal Viewport
@@ -536,11 +563,11 @@ class TermuxActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         )
 
-        // Bottom Extra Keys Bar (shifted away from bottom & side edges when keyboard is closed)
+        // Bottom Extra Keys Bar (no black background, lifted higher with thin outer pill frame like image_602ce1.png)
         extraKeysRoot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(COLOR_AMOLED_BG)
-            setPadding(0, dp(3), 0, dp(14))
+            setBackgroundColor(0x00000000)
+            setPadding(0, dp(4), 0, dp(18))
             clipChildren = false
             clipToPadding = false
         }
@@ -606,11 +633,56 @@ class TermuxActivity : Activity() {
         try {
             val vm = getSystemService(VibratorManager::class.java)
             val vib: Vibrator? = vm?.defaultVibrator ?: getSystemService(Vibrator::class.java)
-            if (vib != null && vib.hasVibrator()) {
-                val dur = max(1L, (hapticDurationMs * scale).roundToInt().toLong())
-                val amp = (hapticAmplitude * scale).roundToInt().coerceIn(1, 255)
-                vib.vibrate(VibrationEffect.createOneShot(dur, amp))
+            if (vib == null || !vib.hasVibrator()) return
+            val baseNorm = (hapticAmplitude / 255f).coerceIn(0.15f, 1.0f)
+            if (Build.VERSION.SDK_INT >= 31) {
+                when {
+                    scale <= 0.62f && vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_LOW_TICK) -> {
+                        vib.vibrate(
+                            VibrationEffect.startComposition()
+                                .addPrimitive(VibrationEffect.Composition.PRIMITIVE_LOW_TICK, (baseNorm * 0.65f).coerceIn(0.2f, 1f))
+                                .compose()
+                        )
+                        return
+                    }
+                    scale in 0.63f..0.82f && vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_TICK) -> {
+                        vib.vibrate(
+                            VibrationEffect.startComposition()
+                                .addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, (baseNorm * 0.82f).coerceIn(0.25f, 1f))
+                                .compose()
+                        )
+                        return
+                    }
+                    scale in 0.83f..1.08f && vib.areAllPrimitivesSupported(
+                        VibrationEffect.Composition.PRIMITIVE_TICK,
+                        VibrationEffect.Composition.PRIMITIVE_CLICK
+                    ) -> {
+                        // Elastic springy feel for switches, Bento buttons, and tabs
+                        vib.vibrate(
+                            VibrationEffect.startComposition()
+                                .addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, (baseNorm * 0.55f).coerceIn(0.2f, 1f))
+                                .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, (baseNorm * 0.92f).coerceIn(0.3f, 1f), 14)
+                                .compose()
+                        )
+                        return
+                    }
+                    scale > 1.08f && vib.areAllPrimitivesSupported(
+                        VibrationEffect.Composition.PRIMITIVE_QUICK_RISE,
+                        VibrationEffect.Composition.PRIMITIVE_CLICK
+                    ) -> {
+                        vib.vibrate(
+                            VibrationEffect.startComposition()
+                                .addPrimitive(VibrationEffect.Composition.PRIMITIVE_QUICK_RISE, (baseNorm * 0.85f).coerceIn(0.3f, 1f))
+                                .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, baseNorm.coerceIn(0.4f, 1f), 18)
+                                .compose()
+                        )
+                        return
+                    }
+                }
             }
+            val dur = max(2L, (hapticDurationMs * scale).roundToInt().toLong())
+            val amp = (hapticAmplitude * scale).roundToInt().coerceIn(1, 255)
+            vib.vibrate(VibrationEffect.createOneShot(dur, amp))
         } catch (_: Throwable) {
         }
     }
@@ -670,6 +742,30 @@ class TermuxActivity : Activity() {
             } catch (_: Throwable) {
             }
         }.start()
+    }
+
+    internal fun hasIgnoreBatteryOptimizationsPermission(): Boolean {
+        return try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            pm?.isIgnoringBatteryOptimizations(packageName) == true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    internal fun requestIgnoreBatteryOptimizationsPermission() {
+        try {
+            val intent = Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                android.net.Uri.parse("package:$packageName")
+            )
+            startActivity(intent)
+        } catch (_: Throwable) {
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (_: Throwable) {
+            }
+        }
     }
 
     internal fun requestAllFilesSpecialPermission() {
@@ -735,13 +831,14 @@ class TermuxActivity : Activity() {
 
         val allFilesGranted = hasAllFilesAccessPermission()
         val stdGranted = hasStandardStoragePermission()
+        val bgUnrestricted = hasIgnoreBatteryOptimizationsPermission()
 
         // Option 1: Special All-Files Access
         val card1 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(14))
-            background = segmentedCardBg(0, 2, if (allFilesGranted) uiAccentContainer else uiSurfaceLow, 0, 20f, 5f)
+            background = segmentedCardBg(0, 3, if (allFilesGranted) uiAccentContainer else uiSurfaceLow, 0, 20f, 5f)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -791,11 +888,13 @@ class TermuxActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(14))
-            background = segmentedCardBg(1, 2, if (stdGranted) uiAccentContainer else uiSurfaceLow, 0, 20f, 5f)
+            background = segmentedCardBg(1, 3, if (stdGranted) uiAccentContainer else uiSurfaceLow, 0, 20f, 5f)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            )
+            ).apply {
+                bottomMargin = dp(3)
+            }
             attachSmoothPressAnimation(this, 0.98f)
             setOnClickListener {
                 triggerHaptic(0.85f)
@@ -834,6 +933,53 @@ class TermuxActivity : Activity() {
         })
         card2.addView(c2Col)
         pSheet.addView(card2)
+
+        // Option 3: Unrestricted Background Activity / Ignore Battery Optimizations
+        val card3 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = segmentedCardBg(2, 3, if (bgUnrestricted) uiAccentContainer else uiSurfaceLow, 0, 20f, 5f)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            attachSmoothPressAnimation(this, 0.98f)
+            setOnClickListener {
+                triggerHaptic(0.85f)
+                pDlg.dismiss()
+                requestIgnoreBatteryOptimizationsPermission()
+                onCompleted()
+            }
+        }
+        card3.addView(
+            FrameLayout(this).apply {
+                background = tonalBg(uiSurfaceContainer, dp(12))
+                layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                    marginEnd = dp(14)
+                }
+                addView(MaterialIconView(this@TermuxActivity, M3Icon.PING, uiAccent, 21f, 2.0f))
+            }
+        )
+        val c3Col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        c3Col.addView(TextView(this).apply {
+            text = tr("Работа в фоне без ограничений", "Unrestricted background execution")
+            setTextColor(COLOR_TEXT_BRIGHT)
+            typeface = Typeface.DEFAULT_BOLD
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+        })
+        c3Col.addView(TextView(this).apply {
+            text = if (bgUnrestricted) tr("Активно • Сессии и SSH не закрываются в фоне", "Active • Sessions & SSH stay alive in background")
+            else tr("Отключить оптимизацию батареи для фоновой работы", "Disable battery optimization for background sessions")
+            setTextColor(if (bgUnrestricted) uiAccent else COLOR_TEXT_DIM)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setPadding(0, dp(2), 0, 0)
+        })
+        card3.addView(c3Col)
+        pSheet.addView(card3)
 
         val btnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -996,13 +1142,33 @@ class TermuxActivity : Activity() {
 
             val n = tokens.size
             val keyHeightPx = dp(33)
-            val rowContainer = FrameLayout(this).apply {
-                setBackgroundColor(COLOR_AMOLED_BG)
+            val outerPillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.FILL
+                color = uiSurfaceLow
+            }
+            val outerPillRect = RectF()
+            val subGroupBounds = ArrayList<FloatArray>(3)
+
+            val rowContainer = object : FrameLayout(this) {
+                override fun dispatchDraw(canvas: Canvas) {
+                    outerPillPaint.color = uiSurfaceLow
+                    val padPx = dpF(3.5f)
+                    val topY = (height - keyHeightPx) * 0.5f - padPx
+                    val botY = (height + keyHeightPx) * 0.5f + padPx
+                    val pillRad = (botY - topY) * 0.5f
+                    for (bounds in subGroupBounds) {
+                        outerPillRect.set(bounds[0] - padPx, topY, bounds[1] + padPx, botY)
+                        canvas.drawRoundRect(outerPillRect, pillRad, pillRad, outerPillPaint)
+                    }
+                    super.dispatchDraw(canvas)
+                }
+            }.apply {
+                setBackgroundColor(0x00000000)
                 clipChildren = false
                 clipToPadding = false
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    dp(36)
+                    dp(41)
                 )
             }
 
@@ -1222,6 +1388,24 @@ class TermuxActivity : Activity() {
                     }
                     btn.translationX = finalLeft
                 }
+
+                // Compute connected sub-group horizontal bounds for the thin outer capsule background
+                subGroupBounds.clear()
+                var gStart = buttons[0].translationX
+                var gEnd = gStart + buttons[0].layoutParams.width
+                for (i in 1 until n) {
+                    val bLeft = buttons[i].translationX
+                    val bRight = bLeft + buttons[i].layoutParams.width
+                    if (bLeft - gEnd <= dpF(8f)) {
+                        gEnd = bRight
+                    } else {
+                        subGroupBounds.add(floatArrayOf(gStart, gEnd))
+                        gStart = bLeft
+                        gEnd = bRight
+                    }
+                }
+                subGroupBounds.add(floatArrayOf(gStart, gEnd))
+                rowContainer.invalidate()
             }
 
             rowContainer.addOnLayoutChangeListener { _, l, _, r, _, oldL, _, oldR, _ ->
@@ -1240,6 +1424,24 @@ class TermuxActivity : Activity() {
         terminalSurface.stopTextSelection()
         if (actionSpec == "PASTE" || actionSpec == "CLIP") {
             pasteFromClipboard()
+            return
+        }
+        if (actionSpec.startsWith("CMD:")) {
+            val cmdStr = actionSpec.removePrefix("CMD:").replace("\\n", "\n")
+            nativeSendText(if (cmdStr.endsWith("\n")) cmdStr else "$cmdStr\n", false)
+            terminalSurface.resetScrollAndBlink()
+            return
+        }
+        if (actionSpec.startsWith("TXT:")) {
+            val txtStr = actionSpec.removePrefix("TXT:").replace("\\n", "\n")
+            nativeSendText(txtStr, false)
+            terminalSurface.resetScrollAndBlink()
+            return
+        }
+        if (actionSpec.contains("\n") || actionSpec.endsWith("\\n")) {
+            val cleanCmd = actionSpec.replace("\\n", "\n")
+            nativeSendText(cleanCmd, false)
+            terminalSurface.resetScrollAndBlink()
             return
         }
         if (ctrlLocked && (nativeGetModifierMask() and 1) == 0) {
@@ -2500,10 +2702,10 @@ class TermuxActivity : Activity() {
     // (Two-layer Stage: Home Menu underneath + Sub-page on top for live preview!)
     // ========================================================================
     private fun showCategorizedSettingsDialog() {
-        val dlg = Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
+        val dlg = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dlg.window?.apply {
-            setBackgroundDrawable(ColorDrawable(uiSurface))
+            setBackgroundDrawable(ColorDrawable(0x00000000))
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             attributes = attributes.apply {
                 layoutInDisplayCutoutMode =
@@ -2733,19 +2935,39 @@ class TermuxActivity : Activity() {
             }
         }
 
-        fun applyNewColorThemeEverywhere() {
+        fun applyNewColorThemeEverywhere(animateSurface: Boolean = true) {
+            val prevSurface = uiSurface
+            val prevContainer = uiSurfaceContainer
             refreshColorSpec2026FromCpp()
-            pageRoot.setBackgroundColor(uiSurface)
-            detailScroll.setBackgroundColor(uiSurface)
-            dlg.window?.setBackgroundDrawable(ColorDrawable(uiSurface))
-            backBtn.background = tonalBg(uiSurfaceContainer, dp(20))
+            val nextSurface = uiSurface
+            val nextContainer = uiSurfaceContainer
+            val backBtnBg = tonalBg(prevContainer, dp(20))
+            backBtn.background = backBtnBg
+            if (animateSurface && prevSurface != nextSurface) {
+                ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 250L
+                    interpolator = aosp17SpatialInterpolator
+                    addUpdateListener { va ->
+                        val p = va.animatedValue as Float
+                        val sCol = blendColor(prevSurface, nextSurface, p)
+                        pageRoot.setBackgroundColor(sCol)
+                        detailScroll.setBackgroundColor(sCol)
+                        backBtnBg.setColor(blendColor(prevContainer, nextContainer, p))
+                    }
+                    start()
+                }
+            } else {
+                pageRoot.setBackgroundColor(nextSurface)
+                detailScroll.setBackgroundColor(nextSurface)
+                backBtnBg.setColor(nextContainer)
+            }
             headerActionsUpdateTheme?.invoke()
             rebuildTabs()
             rebuildExtraKeysBar()
             terminalSurface.postInvalidateOnAnimation()
         }
 
-        // Sub-page 1: Цвета и палитра (System Dynamic Monet by default + ColorBlendr 4 styles)
+        // Sub-page 1: Цвета и палитра (System Dynamic Monet by default + ColorBlendr 4 styles + Monochrome)
         fun showColorsAndStylesPage() {
             fun populateColorsPage() {
                 detailContainer.removeAllViews()
@@ -2761,35 +2983,82 @@ class TermuxActivity : Activity() {
                     ) { enabled ->
                         useSystemDynamicColor = enabled
                         prefs.edit().putBoolean(KEY_USE_SYSTEM_COLOR, enabled).apply()
-                        applyNewColorThemeEverywhere()
-                        populateColorsPage()
+                        applyNewColorThemeEverywhere(animateSurface = true)
+                        detailContainer.animate()
+                            .alpha(0.7f)
+                            .setDuration(90L)
+                            .withEndAction {
+                                populateColorsPage()
+                                detailContainer.animate().alpha(1f).setDuration(170L).start()
+                            }
+                            .start()
                     }
                 )
 
+                val styleCardBgs = ArrayList<GradientDrawable>(MONET_STYLES_2026.size)
+                val styleCardTitles = ArrayList<TextView>(MONET_STYLES_2026.size)
+                val styleCardSubs = ArrayList<TextView>(MONET_STYLES_2026.size)
+                val styleCardCanvases = ArrayList<ColorPreviewCanvasView>(MONET_STYLES_2026.size)
+                val styleCardCurFill = IntArray(MONET_STYLES_2026.size)
+                val styleCardCurTitleCol = IntArray(MONET_STYLES_2026.size)
+                val styleCardCurSubCol = IntArray(MONET_STYLES_2026.size)
+
+                fun animateStyleCardsInPlace() {
+                    val effSeed = if (useSystemDynamicColor) getSystemDynamicSeedColor() else colorSeedArgb
+                    val startFills = styleCardCurFill.clone()
+                    val startTitles = styleCardCurTitleCol.clone()
+                    val startSubs = styleCardCurSubCol.clone()
+                    val targetFills = IntArray(MONET_STYLES_2026.size)
+                    val targetTitles = IntArray(MONET_STYLES_2026.size)
+                    val targetSubs = IntArray(MONET_STYLES_2026.size)
+
+                    for ((idx, styleOpt) in MONET_STYLES_2026.withIndex()) {
+                        val sel = (monetStyleIndex == styleOpt.index)
+                        val toks = nativeGenerateColorSpec2026Palette(effSeed, styleOpt.index)
+                        styleCardCanvases.getOrNull(idx)?.let { cv ->
+                            cv.tokens = toks
+                            cv.invalidate()
+                        }
+                        targetFills[idx] = if (sel) toks[2] else uiSurfaceLow
+                        targetTitles[idx] = if (sel) toks[3] else COLOR_TEXT_BRIGHT
+                        targetSubs[idx] = if (sel) withAlpha(toks[3], 205) else COLOR_TEXT_DIM
+                    }
+
+                    ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 240L
+                        interpolator = aosp17SpatialInterpolator
+                        addUpdateListener { va ->
+                            val p = va.animatedValue as Float
+                            for (idx in MONET_STYLES_2026.indices) {
+                                val fCol = blendColor(startFills[idx], targetFills[idx], p)
+                                val tCol = blendColor(startTitles[idx], targetTitles[idx], p)
+                                val sCol = blendColor(startSubs[idx], targetSubs[idx], p)
+                                styleCardCurFill[idx] = fCol
+                                styleCardCurTitleCol[idx] = tCol
+                                styleCardCurSubCol[idx] = sCol
+                                styleCardBgs.getOrNull(idx)?.setColor(fCol)
+                                styleCardTitles.getOrNull(idx)?.setTextColor(tCol)
+                                styleCardSubs.getOrNull(idx)?.setTextColor(sCol)
+                            }
+                        }
+                        start()
+                    }
+                }
+
                 if (!useSystemDynamicColor) {
                     detailContainer.addView(makeSectionLabel(tr("Базовый оттенок", "Seed color")))
+                    val swatchCardBg = segmentedCardBg(0, 1, uiSurfaceLow, 0, 24f, 5f)
                     val swatchCard = LinearLayout(this).apply {
                         orientation = LinearLayout.VERTICAL
                         setPadding(dp(18), dp(16), dp(18), dp(16))
-                        background = segmentedCardBg(0, 1, uiSurfaceLow, 0, 24f, 5f)
+                        background = swatchCardBg
                     }
                     val (swatchScroll, swatchRow) = makeHorizontalChipRow()
+                    val swatchCanvases = ArrayList<Pair<Int, ColorPreviewCanvasView>>(COLORBLENDR_SEEDS.size)
+
                     for (seedOpt in COLORBLENDR_SEEDS) {
                         val previewTokens = nativeGenerateColorSpec2026Palette(seedOpt.seedArgb, monetStyleIndex)
                         val isSel = (colorSeedArgb == seedOpt.seedArgb)
-                        val swatchWrap = LinearLayout(this).apply {
-                            orientation = LinearLayout.VERTICAL
-                            gravity = Gravity.CENTER_HORIZONTAL
-                            setPadding(dp(6), dp(4), dp(6), dp(4))
-                            attachSmoothPressAnimation(this, 0.90f)
-                            setOnClickListener {
-                                triggerHaptic(0.85f)
-                                colorSeedArgb = seedOpt.seedArgb
-                                prefs.edit().putInt(KEY_COLOR_SEED_V2, colorSeedArgb).apply()
-                                applyNewColorThemeEverywhere()
-                                populateColorsPage()
-                            }
-                        }
                         val swatchCanvas = ColorPreviewCanvasView(
                             this,
                             tokens = previewTokens,
@@ -2799,14 +3068,52 @@ class TermuxActivity : Activity() {
                         ).apply {
                             layoutParams = LinearLayout.LayoutParams(dp(50), dp(50))
                         }
+                        swatchCanvases.add(seedOpt.seedArgb to swatchCanvas)
+
+                        val swatchWrap = LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            gravity = Gravity.CENTER_HORIZONTAL
+                            setPadding(dp(6), dp(4), dp(6), dp(4))
+                            attachSmoothPressAnimation(this, 0.90f)
+                            setOnClickListener {
+                                triggerHaptic(0.85f)
+                                val prevLow = uiSurfaceLow
+                                colorSeedArgb = seedOpt.seedArgb
+                                prefs.edit().putInt(KEY_COLOR_SEED_V2, colorSeedArgb).apply()
+                                applyNewColorThemeEverywhere(animateSurface = true)
+                                val nextLow = uiSurfaceLow
+                                ValueAnimator.ofFloat(0f, 1f).apply {
+                                    duration = 230L
+                                    interpolator = aosp17SpatialInterpolator
+                                    addUpdateListener { va ->
+                                        swatchCardBg.setColor(blendColor(prevLow, nextLow, va.animatedValue as Float))
+                                    }
+                                    start()
+                                }
+                                for ((sArgb, cv) in swatchCanvases) {
+                                    cv.isSwatchSelected = (sArgb == colorSeedArgb)
+                                    cv.tokens = nativeGenerateColorSpec2026Palette(sArgb, monetStyleIndex)
+                                    cv.invalidate()
+                                }
+                                animateStyleCardsInPlace()
+                            }
+                        }
                         swatchWrap.addView(swatchCanvas)
+                        if (seedOpt.name == "Monochrome") {
+                            swatchWrap.addView(TextView(this).apply {
+                                text = tr("Монохром", "Mono")
+                                setTextColor(COLOR_TEXT_DIM)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+                                setPadding(0, dp(2), 0, 0)
+                            })
+                        }
                         swatchRow.addView(swatchWrap)
                     }
                     swatchCard.addView(swatchScroll)
                     detailContainer.addView(swatchCard)
                 }
 
-                detailContainer.addView(makeSectionLabel("Palette style"))
+                detailContainer.addView(makeSectionLabel(tr("Стиль палитры", "Palette style")))
                 val effectiveSeed = if (useSystemDynamicColor) getSystemDynamicSeedColor() else colorSeedArgb
                 val enDescriptions = arrayOf(
                     "Balanced palette with soft tonal transitions",
@@ -2817,20 +3124,29 @@ class TermuxActivity : Activity() {
                 for ((idx, styleOpt) in MONET_STYLES_2026.withIndex()) {
                     val isSel = (monetStyleIndex == styleOpt.index)
                     val styleTokens = nativeGenerateColorSpec2026Palette(effectiveSeed, styleOpt.index)
+                    val fillCol = if (isSel) styleTokens[2] else uiSurfaceLow
+                    val titleCol = if (isSel) styleTokens[3] else COLOR_TEXT_BRIGHT
+                    val subCol = if (isSel) withAlpha(styleTokens[3], 205) else COLOR_TEXT_DIM
+
+                    styleCardCurFill[idx] = fillCol
+                    styleCardCurTitleCol[idx] = titleCol
+                    styleCardCurSubCol[idx] = subCol
+
+                    val cardBg = segmentedCardBg(
+                        idx,
+                        MONET_STYLES_2026.size,
+                        fillCol,
+                        0,
+                        24f,
+                        5f
+                    )
+                    styleCardBgs.add(cardBg)
 
                     val styleCard = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(18), dp(15), dp(18), dp(15))
-                        val fillCol = if (isSel) styleTokens[2] else uiSurfaceLow
-                        background = segmentedCardBg(
-                            idx,
-                            MONET_STYLES_2026.size,
-                            fillCol,
-                            0,
-                            24f,
-                            5f
-                        )
+                        background = cardBg
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -2839,40 +3155,44 @@ class TermuxActivity : Activity() {
                         }
                         attachSmoothPressAnimation(this, 0.98f)
                         setOnClickListener {
-                            if (!isSel) {
-                                triggerHaptic(0.9f)
+                            if (monetStyleIndex != styleOpt.index) {
+                                triggerHaptic(0.85f)
                                 monetStyleIndex = styleOpt.index
                                 prefs.edit().putInt(KEY_MONET_STYLE_V2, monetStyleIndex).apply()
-                                applyNewColorThemeEverywhere()
-                                populateColorsPage()
+                                applyNewColorThemeEverywhere(animateSurface = true)
+                                animateStyleCardsInPlace()
                             }
                         }
                     }
 
-                    styleCard.addView(
-                        ColorPreviewCanvasView(this, tokens = styleTokens).apply {
-                            layoutParams = LinearLayout.LayoutParams(dp(56), dp(56)).apply {
-                                marginEnd = dp(16)
-                            }
+                    val previewCv = ColorPreviewCanvasView(this, tokens = styleTokens).apply {
+                        layoutParams = LinearLayout.LayoutParams(dp(56), dp(56)).apply {
+                            marginEnd = dp(16)
                         }
-                    )
+                    }
+                    styleCardCanvases.add(previewCv)
+                    styleCard.addView(previewCv)
 
                     val textCol = LinearLayout(this).apply {
                         orientation = LinearLayout.VERTICAL
                         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                     }
-                    textCol.addView(TextView(this).apply {
+                    val tTv = TextView(this).apply {
                         text = styleOpt.title
-                        setTextColor(if (isSel) styleTokens[3] else COLOR_TEXT_BRIGHT)
+                        setTextColor(titleCol)
                         typeface = Typeface.DEFAULT_BOLD
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
-                    })
-                    textCol.addView(TextView(this).apply {
+                    }
+                    val sTv = TextView(this).apply {
                         text = tr(styleOpt.description, enDescriptions[idx])
-                        setTextColor(if (isSel) withAlpha(styleTokens[3], 205) else COLOR_TEXT_DIM)
+                        setTextColor(subCol)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         setPadding(0, dp(3), 0, 0)
-                    })
+                    }
+                    styleCardTitles.add(tTv)
+                    styleCardSubs.add(sTv)
+                    textCol.addView(tTv)
+                    textCol.addView(sTv)
                     styleCard.addView(textCol)
                     detailContainer.addView(styleCard)
                 }
@@ -3306,7 +3626,7 @@ class TermuxActivity : Activity() {
                         ),
                         selectedIndex = curPresetIdx,
                         index = 0,
-                        total = 2
+                        total = 3
                     ) { chosen ->
                         when (chosen) {
                             0 -> loadPreset(DEFAULT_EXTRA_KEYS_SPEC)
@@ -3323,22 +3643,37 @@ class TermuxActivity : Activity() {
                         title = tr("Редактируемый ряд", "Edited row"),
                         subtitle = tr("Выберите ряд для настройки кнопок", "Select row to customize"),
                         items = listOf(
-                            tr("Ряд 1 (${row1Tokens.size})", "Row 1 (${row1Tokens.size})"),
-                            tr("Ряд 2 (${row2Tokens.size})", "Row 2 (${row2Tokens.size})")
+                            tr("Ряд 1 (${row1Tokens.size} / $MAX_EXTRA_KEYS_PER_ROW)", "Row 1 (${row1Tokens.size} / $MAX_EXTRA_KEYS_PER_ROW)"),
+                            tr("Ряд 2 (${row2Tokens.size} / $MAX_EXTRA_KEYS_PER_ROW)", "Row 2 (${row2Tokens.size} / $MAX_EXTRA_KEYS_PER_ROW)")
                         ),
                         selectedIndex = activeEditRow,
                         index = 1,
-                        total = 2
+                        total = 3
                     ) { chosen ->
                         activeEditRow = chosen
                         populateKeyboardPage()
                     }
                 )
 
-                detailContainer.addView(makeSectionLabel(tr("Кнопки ряда ${activeEditRow + 1}", "Row ${activeEditRow + 1} buttons")))
+                detailContainer.addView(
+                    makeBakaSuSwitchCard(
+                        icon = M3Icon.EYE,
+                        title = tr("Автоскрытие при прокрутке", "Auto-hide on scroll"),
+                        subtitle = tr("Плавно скрывать панель клавиш при прокрутке истории вверх", "Smoothly hide extra keys bar when scrolling up into history"),
+                        checked = autoHideExtraKeysOnScroll,
+                        index = 2,
+                        total = 3
+                    ) { enabled ->
+                        autoHideExtraKeysOnScroll = enabled
+                        prefs.edit().putBoolean(KEY_AUTO_HIDE_EXTRA_KEYS, enabled).apply()
+                        if (!enabled) setExtraKeysScrollHidden(false)
+                    }
+                )
+
+                detailContainer.addView(makeSectionLabel(tr("Кнопки ряда ${activeEditRow + 1} (${targetList.size}/$MAX_EXTRA_KEYS_PER_ROW)", "Row ${activeEditRow + 1} buttons (${targetList.size}/$MAX_EXTRA_KEYS_PER_ROW)")))
                 val activeKeysCard = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(dp(18), dp(14), dp(18), dp(14))
+                    setPadding(dp(16), dp(14), dp(16), dp(14))
                     background = segmentedCardBg(0, 2, uiSurfaceLow, 0, 22f, 5f)
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3347,41 +3682,79 @@ class TermuxActivity : Activity() {
                         bottomMargin = dp(2)
                     }
                 }
-                val (curScroll, curRow) = makeHorizontalChipRow()
                 if (targetList.isEmpty()) {
-                    curRow.addView(TextView(this).apply {
-                        text = tr("Ряд пуст", "Row is empty")
+                    activeKeysCard.addView(TextView(this).apply {
+                        text = tr("Ряд пуст — выберите клавиши из таблицы ниже", "Row is empty — tap keys from the grid below")
                         setTextColor(COLOR_TEXT_DIM)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                        setPadding(dp(4), dp(4), dp(4), dp(4))
+                        setPadding(dp(4), dp(4), dp(4), dp(6))
                     })
                 } else {
-                    for (idx in targetList.indices) {
-                        val (disp, _) = parseKeyToken(targetList[idx])
-                        curRow.addView(makeExpressiveChip("$disp ✕", true) {
-                            targetList.removeAt(idx)
-                            persistRows()
-                            populateKeyboardPage()
-                        })
+                    // Multi-row wrap grid for active row tokens (up to 4 per row so all are visible without horizontal scroll)
+                    val chunkedActive = targetList.withIndex().chunked(4)
+                    for (rowChunk in chunkedActive) {
+                        val rLine = LinearLayout(this).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply {
+                                bottomMargin = dp(6)
+                            }
+                        }
+                        for (item in rowChunk) {
+                            val idx = item.index
+                            val (disp, _) = parseKeyToken(item.value)
+                            rLine.addView(
+                                makeExpressiveChip("$disp  ✕", true) {
+                                    targetList.removeAt(idx)
+                                    persistRows()
+                                    populateKeyboardPage()
+                                }.apply {
+                                    layoutParams = LinearLayout.LayoutParams(0, dp(36), 1f).apply {
+                                        marginEnd = dp(6)
+                                    }
+                                }
+                            )
+                        }
+                        for (rem in rowChunk.size until 4) {
+                            rLine.addView(View(this).apply {
+                                layoutParams = LinearLayout.LayoutParams(0, dp(36), 1f).apply {
+                                    marginEnd = dp(6)
+                                }
+                            })
+                        }
+                        activeKeysCard.addView(rLine)
                     }
                 }
-                activeKeysCard.addView(curScroll)
 
                 val actActionsRow = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    setPadding(0, dp(8), 0, 0)
+                    setPadding(0, dp(6), 0, 0)
                 }
-                actActionsRow.addView(makeExpressiveChip(tr("+ Своя клавиша", "+ Custom key"), true) {
-                    val (bindDlg, bindSheet) = createExpressiveDialog(390)
+                actActionsRow.addView(makeExpressiveChip(tr("+ Своя клавиша / Макрос", "+ Custom key / Macro"), true) {
+                    val (bindDlg, bindSheet) = createExpressiveDialog(420)
                     bindSheet.addView(TextView(this).apply {
-                        text = tr("Привязка клавиши или команды", "Bind key or command")
+                        text = tr("Конструктор клавиши / макроса", "Custom Key & Macro Builder")
                         setTextColor(COLOR_TEXT_BRIGHT)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
                         typeface = Typeface.DEFAULT_BOLD
+                        setPadding(0, 0, 0, dp(4))
+                    })
+                    bindSheet.addView(TextView(this).apply {
+                        text = tr("Создайте кнопку для мгновенного ввода команды, текста или сочетания клавиш", "Create a button to send a shell command, text snippet, or key combo")
+                        setTextColor(COLOR_TEXT_DIM)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         setPadding(0, 0, 0, dp(10))
                     })
+
+                    var macroMode = 0 // 0 = CMD (with Enter), 1 = TXT (without Enter), 2 = Key / Combo
+                    val modeRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        setPadding(0, 0, 0, dp(10))
+                    }
                     val lblEdit = EditText(this).apply {
-                        hint = tr("Надпись (напр. C-c или top)", "Label (e.g. C-c or top)")
+                        hint = tr("Надпись на кнопке (напр. top, git, C-c)", "Button label (e.g. top, git, C-c)")
                         setHintTextColor(COLOR_TEXT_DIM)
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.MONOSPACE
@@ -3391,7 +3764,7 @@ class TermuxActivity : Activity() {
                         setSingleLine(true)
                     }
                     val actEdit = EditText(this).apply {
-                        hint = tr("Действие (CTRL+C, ALT+B, htop\\n)", "Action (CTRL+C, ALT+B, htop\\n)")
+                        hint = tr("Команда с авто-Enter (напр. htop)", "Shell command with Enter (e.g. htop)")
                         setHintTextColor(COLOR_TEXT_DIM)
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.MONOSPACE
@@ -3403,16 +3776,92 @@ class TermuxActivity : Activity() {
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
                         ).apply {
-                            topMargin = dp(10)
+                            topMargin = dp(8)
                         }
                     }
+
+                    fun rebuildModePills() {
+                        modeRow.removeAllViews()
+                        val modes = listOf(
+                            tr("Команда ↵", "Command ↵"),
+                            tr("Текст", "Text"),
+                            tr("Клавиша", "Key combo")
+                        )
+                        for ((mIdx, mTitle) in modes.withIndex()) {
+                            modeRow.addView(
+                                makeExpressiveChip(mTitle, macroMode == mIdx) {
+                                    macroMode = mIdx
+                                    actEdit.hint = when (macroMode) {
+                                        0 -> tr("Команда с авто-Enter (напр. htop)", "Shell command with Enter (e.g. htop)")
+                                        1 -> tr("Текст без Enter (напр. ssh root@)", "Text snippet without Enter (e.g. ssh root@)")
+                                        else -> tr("Код клавиши (напр. CTRL+C, ALT+B, F5)", "Key spec (e.g. CTRL+C, ALT+B, F5)")
+                                    }
+                                    rebuildModePills()
+                                }.apply {
+                                    layoutParams = LinearLayout.LayoutParams(0, dp(34), 1f).apply {
+                                        if (mIdx < 2) marginEnd = dp(6)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                    rebuildModePills()
+                    bindSheet.addView(modeRow)
                     bindSheet.addView(lblEdit)
                     bindSheet.addView(actEdit)
+
+                    // Quick templates row inside the dialog
+                    bindSheet.addView(TextView(this).apply {
+                        text = tr("Готовые шаблоны (нажмите для подстановки):", "Quick templates (tap to fill):")
+                        setTextColor(COLOR_TEXT_DIM)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        setPadding(0, dp(10), 0, dp(6))
+                    })
+                    val tplGrid = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                    }
+                    val templates = listOf(
+                        Triple("htop", "htop", 0),
+                        Triple("cls", "clear", 0),
+                        Triple("su", "su", 0),
+                        Triple("git st", "git status", 0),
+                        Triple("ssh", "ssh ", 1),
+                        Triple("grep", " | grep ", 1),
+                        Triple("C-x", "CTRL+X", 2),
+                        Triple("A-.", "ALT+.", 2)
+                    )
+                    for (tChunk in templates.chunked(4)) {
+                        val tRow = LinearLayout(this).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply {
+                                bottomMargin = dp(6)
+                            }
+                        }
+                        for ((tLbl, tAct, tMode) in tChunk) {
+                            tRow.addView(
+                                makeExpressiveChip(tLbl, false) {
+                                    macroMode = tMode
+                                    rebuildModePills()
+                                    lblEdit.setText(tLbl)
+                                    actEdit.setText(tAct)
+                                }.apply {
+                                    layoutParams = LinearLayout.LayoutParams(0, dp(32), 1f).apply {
+                                        marginEnd = dp(5)
+                                    }
+                                }
+                            )
+                        }
+                        tplGrid.addView(tRow)
+                    }
+                    bindSheet.addView(tplGrid)
 
                     val btnBar = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.END
-                        setPadding(0, dp(14), 0, 0)
+                        setPadding(0, dp(12), 0, 0)
                     }
                     btnBar.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { bindDlg.dismiss() })
                     btnBar.addView(makeExpressiveChip(tr("Добавить", "Add"), true) {
@@ -3426,13 +3875,16 @@ class TermuxActivity : Activity() {
                             return@makeExpressiveChip
                         }
                         val l = lblEdit.text.toString().trim().replace("|", "")
-                        val a = actEdit.text.toString().trim().replace("|", "")
-                        if (l.isNotEmpty() || a.isNotEmpty()) {
-                            val tok = when {
-                                l.isNotEmpty() && a.isNotEmpty() && l != a -> "$l::$a"
-                                a.isNotEmpty() -> a
-                                else -> l
+                        val aRaw = actEdit.text.toString().trim().replace("|", "")
+                        if (l.isNotEmpty() || aRaw.isNotEmpty()) {
+                            val disp = l.ifEmpty { aRaw.take(6) }
+                            val body = aRaw.ifEmpty { l }
+                            val finalAct = when (macroMode) {
+                                0 -> if (body.startsWith("CMD:")) body else "CMD:$body"
+                                1 -> if (body.startsWith("TXT:")) body else "TXT:$body"
+                                else -> body
                             }
+                            val tok = if (disp != finalAct) "$disp::$finalAct" else finalAct
                             targetList.add(tok)
                             persistRows()
                             populateKeyboardPage()
@@ -3442,12 +3894,12 @@ class TermuxActivity : Activity() {
                     bindSheet.addView(btnBar)
                     bindDlg.show()
                 })
-                actActionsRow.addView(makeExpressiveChip(tr("Очистить", "Clear row"), false) {
+                actActionsRow.addView(makeExpressiveChip(tr("Очистить", "Clear"), false) {
                     targetList.clear()
                     persistRows()
                     populateKeyboardPage()
                 })
-                actActionsRow.addView(makeExpressiveChip(tr("Сброс по умолчанию", "Reset default"), false) {
+                actActionsRow.addView(makeExpressiveChip(tr("Сброс", "Reset"), false) {
                     loadPreset(DEFAULT_EXTRA_KEYS_SPEC)
                     Toast.makeText(
                         this@TermuxActivity,
@@ -3460,41 +3912,84 @@ class TermuxActivity : Activity() {
 
                 val catalogCard = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(dp(18), dp(14), dp(18), dp(14))
+                    setPadding(dp(16), dp(14), dp(16), dp(14))
                     background = segmentedCardBg(1, 2, uiSurfaceLow, 0, 22f, 5f)
                 }
                 catalogCard.addView(TextView(this).apply {
-                    text = tr("Быстрое добавление клавиш", "Quick add keys")
+                    text = tr("Каталог специальных клавиш (нажмите для добавления)", "Special keys catalog (tap to add)")
                     setTextColor(COLOR_TEXT_BRIGHT)
                     typeface = Typeface.DEFAULT_BOLD
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-                    setPadding(0, 0, 0, dp(6))
+                    setPadding(0, 0, 0, dp(8))
                 })
-                val (pScroll, pRow) = makeHorizontalChipRow()
-                val keys = listOf(
-                    "ESC", "TAB", "CTRL", "ALT", "ENTER", "BKSP", "DEL", "SPC",
-                    "▲", "▼", "◀", "▶", "HOME", "END", "PGUP", "PGDN",
-                    "-", "/", "|", "\\", "_", "~", ":", ";", "\"", "'",
-                    "C-c::CTRL+C", "C-z::CTRL+Z", "C-d::CTRL+D", "C-l::CTRL+L",
-                    "F1", "F2", "F3", "F4", "F5", "F10", "F12"
+
+                val categorizedKeys = listOf(
+                    tr("Модификаторы и ввод", "Modifiers & input") to listOf(
+                        "ESC", "TAB", "CTRL", "ALT", "ENTER", "BKSP", "DEL", "SPC", "PASTE::PASTE"
+                    ),
+                    tr("Навигация и курсор", "Navigation & cursor") to listOf(
+                        "▲", "▼", "◀", "▶", "HOME", "END", "PGUP", "PGDN"
+                    ),
+                    tr("Символы терминала", "Terminal symbols") to listOf(
+                        "-", "/", "|", "\\", "_", "~", ":", ";", "\"", "'", "&", "$", "#", "*"
+                    ),
+                    tr("Сигналы и функции", "Signals & F-keys") to listOf(
+                        "C-c::CTRL+C", "C-z::CTRL+Z", "C-d::CTRL+D", "C-l::CTRL+L",
+                        "C-a::CTRL+A", "C-e::CTRL+E", "C-r::CTRL+R", "C-w::CTRL+W",
+                        "F1", "F2", "F3", "F4", "F5", "F10", "F12"
+                    )
                 )
-                for (k in keys) {
-                    val (d, _) = parseKeyToken(k)
-                    pRow.addView(makeExpressiveChip("+ $d", false) {
-                        if (targetList.size >= MAX_EXTRA_KEYS_PER_ROW) {
-                            Toast.makeText(
-                                this@TermuxActivity,
-                                tr("Максимум $MAX_EXTRA_KEYS_PER_ROW клавиш в одном ряду", "Maximum $MAX_EXTRA_KEYS_PER_ROW keys per row"),
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        } else {
-                            targetList.add(k)
-                            persistRows()
-                            populateKeyboardPage()
-                        }
+
+                for ((catName, keyItems) in categorizedKeys) {
+                    catalogCard.addView(TextView(this).apply {
+                        text = catName
+                        setTextColor(uiAccent)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        setPadding(dp(2), dp(6), dp(2), dp(6))
                     })
+                    for (kChunk in keyItems.chunked(4)) {
+                        val gridRow = LinearLayout(this).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply {
+                                bottomMargin = dp(6)
+                            }
+                        }
+                        for (k in kChunk) {
+                            val (d, _) = parseKeyToken(k)
+                            gridRow.addView(
+                                makeExpressiveChip("+ $d", false) {
+                                    if (targetList.size >= MAX_EXTRA_KEYS_PER_ROW) {
+                                        Toast.makeText(
+                                            this@TermuxActivity,
+                                            tr("Максимум $MAX_EXTRA_KEYS_PER_ROW клавиш в одном ряду", "Maximum $MAX_EXTRA_KEYS_PER_ROW keys per row"),
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    } else {
+                                        targetList.add(k)
+                                        persistRows()
+                                        populateKeyboardPage()
+                                    }
+                                }.apply {
+                                    layoutParams = LinearLayout.LayoutParams(0, dp(35), 1f).apply {
+                                        marginEnd = dp(6)
+                                    }
+                                }
+                            )
+                        }
+                        for (rem in kChunk.size until 4) {
+                            gridRow.addView(View(this).apply {
+                                layoutParams = LinearLayout.LayoutParams(0, dp(35), 1f).apply {
+                                    marginEnd = dp(6)
+                                }
+                            })
+                        }
+                        catalogCard.addView(gridRow)
+                    }
                 }
-                catalogCard.addView(pScroll)
                 detailContainer.addView(catalogCard)
             }
 
@@ -3733,7 +4228,7 @@ class TermuxActivity : Activity() {
                 ) { showHapticsCategory() }
             )
 
-            homeContainer.addView(makeSectionLabel(tr("Память и доступ", "Storage & access")))
+            homeContainer.addView(makeSectionLabel(tr("Память и фоновый режим", "Storage & background")))
 
             homeContainer.addView(
                 makeMainSettingsNavCard(
@@ -3741,8 +4236,22 @@ class TermuxActivity : Activity() {
                     subtitle = tr("Спец. доступ ко всем файлам и обычное разрешение хранилища", "All files special access and standard storage permission"),
                     icon = M3Icon.STORAGE,
                     index = 0,
-                    total = 1
+                    total = 2
                 ) { showStoragePermissionsModal { rebuildHomeMenu() } }
+            )
+
+            val bgActive = hasIgnoreBatteryOptimizationsPermission()
+            homeContainer.addView(
+                makeMainSettingsNavCard(
+                    title = tr("Работа в фоне без ограничений", "Unrestricted background execution"),
+                    subtitle = if (bgActive) tr("Активно • Фоновые сессии и SSH защищены от выгрузки", "Active • Background sessions and SSH are protected")
+                    else tr("Разрешить работу в фоне без ограничений батареи", "Allow background activity without battery restrictions"),
+                    icon = M3Icon.PING,
+                    index = 1,
+                    total = 2
+                ) {
+                    requestIgnoreBatteryOptimizationsPermission()
+                }
             )
         }
 
@@ -3781,14 +4290,18 @@ class TermuxActivity : Activity() {
         if (targetView === rootLayout) {
             var isImeAnimating = false
             var maxObservedImePx = dp(280)
-            var lastAnimatedBottomPx = initBot
-            var inertiaAnimator: ValueAnimator? = null
+            var lastAppliedBottomPx = initBot
+            var lastAppliedFraction = -1f
 
-            fun updateExtraKeysForImeFraction(frac: Float, inertiaOffsetY: Float = 0f) {
-                imeOpenFraction = safeClamp(frac, 0f, 1f)
-                val botPad = (dpF(14f) * (1f - imeOpenFraction) + dpF(3f) * imeOpenFraction).roundToInt()
-                extraKeysRoot.setPadding(0, dp(3), 0, botPad)
-                extraKeysRoot.translationY = inertiaOffsetY
+            fun applyExtraKeysImeFractionIfChanged(frac: Float) {
+                val clamped = safeClamp(frac, 0f, 1f)
+                if (abs(clamped - lastAppliedFraction) < 0.004f) return
+                lastAppliedFraction = clamped
+                imeOpenFraction = clamped
+                val botPad = (dpF(18f) * (1f - clamped) + dpF(4f) * clamped).roundToInt()
+                if (extraKeysRoot.paddingBottom != botPad) {
+                    extraKeysRoot.setPadding(0, dp(4), 0, botPad)
+                }
                 for (updater in extraKeyRowUpdaters) {
                     updater()
                 }
@@ -3800,7 +4313,13 @@ class TermuxActivity : Activity() {
                         if ((animation.typeMask and WindowInsets.Type.ime()) != 0) {
                             isImeAnimating = true
                             imeTransitionAnimator?.cancel()
-                            inertiaAnimator?.cancel()
+                            // Unhide extraKeysRoot if it was scroll-hidden
+                            if (isExtraKeysScrollHidden) {
+                                isExtraKeysScrollHidden = false
+                                extraKeysRoot.animate().cancel()
+                                extraKeysRoot.translationY = 0f
+                                extraKeysRoot.alpha = 1f
+                            }
                         }
                     }
 
@@ -3808,6 +4327,15 @@ class TermuxActivity : Activity() {
                         insets: WindowInsets,
                         runningAnimations: MutableList<WindowInsetsAnimation>
                     ): WindowInsets {
+                        var hasImeAnim = false
+                        for (a in runningAnimations) {
+                            if ((a.typeMask and WindowInsets.Type.ime()) != 0) {
+                                hasImeAnim = true
+                                break
+                            }
+                        }
+                        if (!hasImeAnim) return insets
+
                         val sysBars = insets.getInsets(
                             WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
                         )
@@ -3817,21 +4345,19 @@ class TermuxActivity : Activity() {
                         }
                         val safeTop = max(sysBars.top, fallbackStatusBarPx) + dp(extraTopDp)
                         val curBottom = max(sysBars.bottom, ime.bottom) + dp(extraBottomDp)
-                        val velocityPx = (curBottom - lastAnimatedBottomPx).toFloat()
-                        lastAnimatedBottomPx = curBottom
-
-                        targetView.setPadding(
-                            sysBars.left + dp(extraLeftDp),
-                            safeTop,
-                            sysBars.right + dp(extraRightDp),
-                            curBottom
-                        )
+                        if (curBottom != lastAppliedBottomPx) {
+                            lastAppliedBottomPx = curBottom
+                            targetView.setPadding(
+                                sysBars.left + dp(extraLeftDp),
+                                safeTop,
+                                sysBars.right + dp(extraRightDp),
+                                curBottom
+                            )
+                        }
 
                         val span = max(dp(160), maxObservedImePx - sysBars.bottom).toFloat()
                         val rawFrac = safeClamp((ime.bottom - sysBars.bottom).toFloat() / span, 0f, 1f)
-                        // Subtle physical inertia lag while following the moving keyboard
-                        val inertiaLagY = safeClamp(velocityPx * 0.28f, -dpF(14f), dpF(14f))
-                        updateExtraKeysForImeFraction(rawFrac, inertiaLagY)
+                        applyExtraKeysImeFractionIfChanged(rawFrac)
                         return insets
                     }
 
@@ -3843,30 +4369,22 @@ class TermuxActivity : Activity() {
                                 WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
                             )?.bottom ?: 0
                             val imeB = curInsets?.getInsets(WindowInsets.Type.ime())?.bottom ?: 0
+                            val safeTop = max(
+                                curInsets?.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())?.top ?: 0,
+                                fallbackStatusBarPx
+                            ) + dp(extraTopDp)
+                            val finalBot = max(sysB, imeB) + dp(extraBottomDp)
+                            lastAppliedBottomPx = finalBot
+                            targetView.setPadding(
+                                (curInsets?.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())?.left ?: 0) + dp(extraLeftDp),
+                                safeTop,
+                                (curInsets?.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())?.right ?: 0) + dp(extraRightDp),
+                                finalBot
+                            )
                             val nowOpen = imeB > dp(80)
                             isImeCurrentlyOpen = nowOpen
-                            val startF = imeOpenFraction
-                            val endF = if (nowOpen) 1f else 0f
-                            val startY = if (abs(extraKeysRoot.translationY) > 1f) {
-                                extraKeysRoot.translationY
-                            } else {
-                                if (nowOpen) dpF(10f) else -dpF(8f)
-                            }
-
-                            inertiaAnimator?.cancel()
-                            inertiaAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-                                duration = 340L
-                                interpolator = LinearInterpolator()
-                                addUpdateListener { va ->
-                                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                                    // Underdamped spring settle for inertial rebound after keyboard stops!
-                                    val spring = 1f - kotlin.math.exp(-3.8f * t) * kotlin.math.cos(5.8f * t)
-                                    val curF = startF + (endF - startF) * spring
-                                    val curY = startY * kotlin.math.exp(-4.2f * t) * kotlin.math.cos(6.2f * t)
-                                    updateExtraKeysForImeFraction(curF, curY)
-                                }
-                                start()
-                            }
+                            applyExtraKeysImeFractionIfChanged(if (nowOpen) 1f else 0f)
+                            terminalSurface.postInvalidateOnAnimation()
                         }
                     }
                 }
@@ -3886,35 +4404,43 @@ class TermuxActivity : Activity() {
 
                 if (!isImeAnimating) {
                     if (nowOpen != isImeCurrentlyOpen) {
-                        val startBottom = lastAnimatedBottomPx
-                        lastAnimatedBottomPx = targetBottom
+                        val startBottom = lastAppliedBottomPx
+                        lastAppliedBottomPx = targetBottom
                         isImeCurrentlyOpen = nowOpen
                         val startF = imeOpenFraction
                         val endF = if (nowOpen) 1f else 0f
-                        val dirSign = if (nowOpen) 1f else -1f
 
                         imeTransitionAnimator?.cancel()
                         imeTransitionAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-                            duration = 340L
-                            interpolator = LinearInterpolator()
+                            duration = 250L
+                            interpolator = aosp17SpatialInterpolator
                             addUpdateListener { va ->
                                 val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                                val padEase = 1f - (1f - t) * (1f - t) * (1f - t)
-                                val spring = 1f - kotlin.math.exp(-3.6f * t) * kotlin.math.cos(5.6f * t)
-                                val curBot = (startBottom + (targetBottom - startBottom) * padEase).roundToInt()
+                                val curBot = (startBottom + (targetBottom - startBottom) * t).roundToInt()
                                 v.setPadding(
                                     sysBars.left + dp(extraLeftDp),
                                     safeTop,
                                     sysBars.right + dp(extraRightDp),
                                     curBot
                                 )
-                                val inertiaY = dirSign * dpF(9f) * kotlin.math.sin(t * Math.PI.toFloat()) * (1f - t * 0.5f)
-                                updateExtraKeysForImeFraction(startF + (endF - startF) * spring, inertiaY)
+                                applyExtraKeysImeFractionIfChanged(startF + (endF - startF) * t)
                             }
+                            addListener(object : android.animation.AnimatorListenerAdapter() {
+                                override fun onAnimationEnd(animation: android.animation.Animator) {
+                                    v.setPadding(
+                                        sysBars.left + dp(extraLeftDp),
+                                        safeTop,
+                                        sysBars.right + dp(extraRightDp),
+                                        targetBottom
+                                    )
+                                    applyExtraKeysImeFractionIfChanged(endF)
+                                    terminalSurface.postInvalidateOnAnimation()
+                                }
+                            })
                             start()
                         }
                     } else {
-                        lastAnimatedBottomPx = targetBottom
+                        lastAppliedBottomPx = targetBottom
                         v.setPadding(
                             sysBars.left + dp(extraLeftDp),
                             safeTop,
@@ -4623,6 +5149,8 @@ class TermuxActivity : Activity() {
         val groupLayout = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            background = tonalBg(uiSurfaceLow, dp(22))
+            setPadding(dp(4), dp(4), dp(4), dp(4))
             clipChildren = false
             clipToPadding = false
         }
@@ -4720,7 +5248,11 @@ class TermuxActivity : Activity() {
             }
         }
 
-        headerActionsUpdateTheme = { updateHeaderGroupGeometry() }
+        headerActionsUpdateTheme = {
+            groupLayout.background = tonalBg(uiSurfaceLow, dp(22))
+            (tabStrip.parent as? View)?.background = tonalBg(uiSurfaceLow, dp(22))
+            updateHeaderGroupGeometry()
+        }
 
         for (i in 0 until n) {
             val sp = specs[i]
@@ -4772,7 +5304,7 @@ class TermuxActivity : Activity() {
             val frame = FrameLayout(this).apply {
                 background = bg
                 layoutParams = LinearLayout.LayoutParams(baseW.roundToInt(), btnH).apply {
-                    setMargins(dp(1), dp(2), if (i < n - 1) dp(1) else 0, dp(2))
+                    setMargins(if (i > 0) dp(1) else 0, 0, if (i < n - 1) dp(1) else 0, 0)
                 }
                 addView(icView)
                 setOnTouchListener { v, ev ->
@@ -4983,10 +5515,10 @@ class TermuxActivity : Activity() {
     private val sftpRemoteDirCache = java.util.concurrent.ConcurrentHashMap<String, List<SftpItemEntry>>()
 
     private fun showWorkspaceHubDialog(initialTab: Int = 0) {
-        val dlg = Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
+        val dlg = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dlg.window?.apply {
-            setBackgroundDrawable(ColorDrawable(uiSurface))
+            setBackgroundDrawable(ColorDrawable(0x00000000))
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             attributes = attributes.apply {
                 layoutInDisplayCutoutMode =
@@ -5034,6 +5566,11 @@ class TermuxActivity : Activity() {
         var sftpTreeMode = false
         var sftpShowHidden = true
         val expandedTreePaths = HashSet<String>()
+        var newlyExpandedTreePath: String? = null
+        val selectedSftpPaths = LinkedHashSet<String>()
+        var lastRenderedEntries: List<SftpItemEntry> = emptyList()
+        val batchClipSources = ArrayList<String>()
+        var batchClipIsMove = false
         var sftpSearchActive = false
         var sftpSearchQuery = ""
         var prevSftpSourceIdx = 0
@@ -5112,36 +5649,116 @@ class TermuxActivity : Activity() {
             setPadding(dp(12), dp(2), dp(12), dp(6))
         }
 
+        val sessionsOuterPillView = tabStrip.parent as? View
+        val startSessionsPillWidth = (sessionsOuterPillView?.width ?: 0).takeIf { it > 0 } ?: dp(68)
+
+        val termBackIcon = MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiOnAccentContainer, 18.5f, 2.0f).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(20), dp(20)).apply {
+                marginEnd = dp(6)
+            }
+        }
+        val termBackLabel = TextView(this@TermuxActivity).apply {
+            text = tr("Терминал", "Terminal")
+            setSingleLine(true)
+            setTextColor(uiOnAccentContainer)
+            typeface = Typeface.DEFAULT_BOLD
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        }
         val termBackChip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = tonalBg(uiAccentContainer, dp(14))
-            setPadding(dp(11), dp(7), dp(12), dp(7))
+            gravity = Gravity.CENTER
+            background = tonalBg(uiAccentContainer, dp(24))
+            setPadding(dp(14), dp(8), dp(16), dp(8))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                dp(38)
             ).apply {
                 marginEnd = dp(8)
             }
-            addView(
-                MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiAccent, 18.5f, 2.0f).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(20), dp(20)).apply {
-                        marginEnd = dp(6)
-                    }
-                }
-            )
-            addView(TextView(this@TermuxActivity).apply {
-                text = tr("Терминал", "Terminal")
-                setTextColor(uiAccent)
-                typeface = Typeface.DEFAULT_BOLD
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            })
+            addView(termBackIcon)
+            addView(termBackLabel)
             attachSmoothPressAnimation(this, 0.93f)
             setOnClickListener {
-                triggerHaptic(0.8f)
-                dlg.dismiss()
+                triggerHaptic(0.85f)
+                // Smoothly morph "Терминал" card back into the Sessions pill width as Hub closes!
+                val curChipW = width.toFloat().coerceAtLeast(dpF(80f))
+                val targetSessW = startSessionsPillWidth.toFloat().coerceAtLeast(dpF(58f))
+                ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 190L
+                    interpolator = predictiveCommitInterpolator
+                    addUpdateListener { va ->
+                        val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                        val lp = layoutParams as LinearLayout.LayoutParams
+                        lp.width = (curChipW + (targetSessW - curChipW) * t).roundToInt()
+                        layoutParams = lp
+                        termBackLabel.alpha = (1f - t * 1.4f).coerceIn(0f, 1f)
+                    }
+                    start()
+                }
+                ensureCenteredPivot(root)
+                root.animate()
+                    .scaleX(0.90f)
+                    .scaleY(0.90f)
+                    .alpha(0f)
+                    .setDuration(195L)
+                    .setInterpolator(predictiveCommitInterpolator)
+                    .withEndAction {
+                        dlg.dismiss()
+                        sessionsOuterPillView?.let { pill ->
+                            pill.scaleX = 0.92f
+                            pill.scaleY = 0.88f
+                            pill.animate()
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(260L)
+                                .setInterpolator(OvershootInterpolator(1.8f))
+                                .start()
+                        }
+                    }
+                    .start()
             }
         }
+        // Morph from the top-left Sessions pill (whether 1 session or multiple sessions!) into the rounded "Терминал" capsule
+        termBackChip.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                if (termBackChip.viewTreeObserver.isAlive) {
+                    termBackChip.viewTreeObserver.removeOnPreDrawListener(this)
+                }
+                val finalChipW = termBackChip.width.takeIf { it > 0 } ?: dp(116)
+                val fromW = startSessionsPillWidth.toFloat()
+                val toW = finalChipW.toFloat()
+                termBackLabel.alpha = 0f
+                termBackIcon.scaleX = 0.75f
+                termBackIcon.scaleY = 0.75f
+                ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 340L
+                    interpolator = LinearInterpolator()
+                    addUpdateListener { va ->
+                        val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                        val spring = 1f - kotlin.math.exp(-3.6f * t) * kotlin.math.cos(5.6f * t)
+                        val lp = termBackChip.layoutParams as LinearLayout.LayoutParams
+                        lp.width = (fromW + (toW - fromW) * spring).roundToInt().coerceAtLeast(dp(48))
+                        termBackChip.layoutParams = lp
+                        val fadeT = ((t - 0.15f) / 0.85f).coerceIn(0f, 1f)
+                        termBackLabel.alpha = fadeT
+                        termBackIcon.scaleX = (0.75f + 0.25f * spring).coerceIn(0.7f, 1.1f)
+                        termBackIcon.scaleY = (0.75f + 0.25f * spring).coerceIn(0.7f, 1.1f)
+                    }
+                    addListener(object : android.animation.AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                            val lp = termBackChip.layoutParams as LinearLayout.LayoutParams
+                            lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
+                            termBackChip.layoutParams = lp
+                            termBackLabel.alpha = 1f
+                            termBackIcon.scaleX = 1f
+                            termBackIcon.scaleY = 1f
+                        }
+                    })
+                    start()
+                }
+                return true
+            }
+        })
         topNavRow.addView(termBackChip)
 
         fun makeTopNavTab(title: String, onSelect: () -> Unit): Pair<LinearLayout, View> {
@@ -6110,27 +6727,36 @@ class TermuxActivity : Activity() {
             } else {
                 for ((idx, srv) in servers.withIndex()) {
                     val card = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                        setPadding(dp(14), dp(13), dp(10), dp(13))
-                        background = segmentedCardBg(idx, servers.size, uiSurfaceLow, 0, 22f, 5f)
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(16), dp(14), dp(14), dp(14))
+                        background = segmentedCardBg(idx, servers.size, uiSurfaceLow, 0, 24f, 5f)
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
                         ).apply {
-                            bottomMargin = if (idx < servers.size - 1) dp(2) else dp(10)
+                            bottomMargin = if (idx < servers.size - 1) dp(3) else dp(12)
                         }
-                        attachSmoothPressAnimation(this, 0.98f)
+                        attachSmoothPressAnimation(this, 0.985f)
                         setOnClickListener {
-                            triggerHaptic(0.85f)
+                            triggerHaptic(0.9f)
                             connectToSshServerInTerminal(srv, dlg)
                         }
                     }
 
-                    card.addView(
+                    // Top Row: Server Icon + Full Unclipped Label & Host:Port + More Menu
+                    val topRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    }
+
+                    topRow.addView(
                         FrameLayout(this).apply {
-                            background = tonalBg(uiAccentContainer, dp(12))
-                            layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                            background = tonalBg(uiAccentContainer, dp(14))
+                            layoutParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply {
                                 marginEnd = dp(12)
                             }
                             addView(MaterialIconView(this@TermuxActivity, M3Icon.SERVER, uiAccent, 21f, 2.0f))
@@ -6139,138 +6765,56 @@ class TermuxActivity : Activity() {
 
                     val infoCol = LinearLayout(this).apply {
                         orientation = LinearLayout.VERTICAL
-                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginEnd = dp(8)
+                        }
                     }
                     infoCol.addView(TextView(this).apply {
                         text = srv.label
                         setSingleLine(true)
+                        ellipsize = TextUtils.TruncateAt.END
                         setTextColor(COLOR_TEXT_BRIGHT)
                         typeface = Typeface.DEFAULT_BOLD
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
                     })
                     infoCol.addView(TextView(this).apply {
                         text = "${srv.username}@${srv.host}" + (if (srv.port != 22) ":${srv.port}" else "")
                         setSingleLine(true)
+                        ellipsize = TextUtils.TruncateAt.MIDDLE
                         setTextColor(COLOR_TEXT_DIM)
                         typeface = Typeface.MONOSPACE
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                        setPadding(0, dp(2), 0, dp(4))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
+                        setPadding(0, dp(2), 0, 0)
                     })
-
-                    val badgeScroll = HorizontalScrollView(this).apply {
-                        isHorizontalScrollBarEnabled = false
-                        overScrollMode = View.OVER_SCROLL_NEVER
-                    }
-                    val badgeRow = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                    }
-                    fun makeMiniBadge(txt: String) = TextView(this).apply {
-                        text = txt
-                        setSingleLine(true)
-                        maxLines = 1
-                        ellipsize = TextUtils.TruncateAt.END
-                        setTextColor(uiAccent)
-                        typeface = Typeface.MONOSPACE
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
-                        background = tonalBg(uiAccentContainer, dp(6))
-                        setPadding(dp(7), dp(2), dp(7), dp(2))
-                        layoutParams = LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ).apply {
-                            marginEnd = dp(5)
-                        }
-                    }
-                    badgeRow.addView(makeMiniBadge(when (srv.authType) {
-                        0 -> tr("Пароль", "Pass")
-                        1 -> tr("Ключ", "Key")
-                        else -> "Agent"
-                    }))
-                    if (srv.localForwards.isNotBlank()) {
-                        badgeRow.addView(makeMiniBadge("-L ${srv.localForwards.take(20)}"))
-                    }
-                    if (srv.remoteForwards.isNotBlank()) {
-                        badgeRow.addView(makeMiniBadge("-R ${srv.remoteForwards.take(16)}"))
-                    }
-                    if (srv.dynamicSocksPort.isNotBlank()) {
-                        badgeRow.addView(makeMiniBadge("-D ${srv.dynamicSocksPort}"))
-                    }
-                    badgeScroll.addView(badgeRow)
-                    infoCol.addView(badgeScroll)
-                    card.addView(infoCol)
+                    topRow.addView(infoCol)
 
                     val cachedPing = serverPingCacheMs[srv.id]
-                    val pingPill = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER
-                        minimumWidth = dp(74)
-                        background = tonalBg(uiSurfaceContainer, dp(10))
-                        setPadding(dp(8), dp(6), dp(9), dp(6))
-                        layoutParams = LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ).apply {
-                            marginStart = dp(6)
-                            marginEnd = dp(6)
-                        }
-                        attachSmoothPressAnimation(this, 0.92f)
-                    }
-                    pingPill.addView(
-                        MaterialIconView(this, M3Icon.PING, uiAccent, 15f, 1.9f).apply {
-                            layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply {
-                                marginEnd = dp(4)
-                            }
-                        }
-                    )
                     val pingTv = TextView(this).apply {
                         setSingleLine(true)
                         maxLines = 1
                         typeface = Typeface.MONOSPACE
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                         if (cachedPing == null) {
                             text = tr("Пинг", "Ping")
-                            setTextColor(COLOR_TEXT)
+                            setTextColor(COLOR_TEXT_BRIGHT)
                         } else if (cachedPing >= 0) {
                             text = "$cachedPing ${tr("мс", "ms")}"
                             setTextColor(if (cachedPing < 85) COLOR_PING_GOOD else if (cachedPing < 200) COLOR_PING_WARN else COLOR_ROOT)
                         } else {
-                            text = tr("Не в сети", "Offline")
+                            text = tr("Оффлайн", "Offline")
                             setTextColor(COLOR_ROOT)
                         }
                     }
                     pingBadgeViews[srv.id] = pingTv
-                    pingPill.addView(pingTv)
-                    pingPill.setOnClickListener {
-                        triggerHaptic(0.8f)
-                        pingServerAsync(srv, pingTv)
-                    }
-                    card.addView(pingPill)
 
-                    card.addView(
-                        makeExpressiveChip(
-                            title = "SFTP",
-                            selected = false,
-                            accentColor = COLOR_TEXT_BRIGHT,
-                            containerColor = uiSurfaceContainer
-                        ) {
-                            activeSftpServer = srv
-                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
-                            previousTab = activeTab
-                            activeTab = 1
-                            renderActiveTab()
-                        }.apply {
-                            background = tonalBg(uiSurfaceContainer, dp(10))
-                        }
-                    )
-
-                    card.addView(
+                    topRow.addView(
                         FrameLayout(this).apply {
-                            layoutParams = LinearLayout.LayoutParams(dp(34), dp(36))
-                            addView(MaterialIconView(this@TermuxActivity, M3Icon.MORE_VERT, COLOR_TEXT, 20f))
-                            attachSmoothPressAnimation(this)
+                            background = tonalBg(uiSurfaceContainer, dp(12))
+                            layoutParams = LinearLayout.LayoutParams(dp(36), dp(36))
+                            addView(MaterialIconView(this@TermuxActivity, M3Icon.MORE_VERT, COLOR_TEXT_BRIGHT, 19.5f))
+                            attachSmoothPressAnimation(this, 0.90f)
                             setOnClickListener {
-                                triggerHaptic(0.8f)
+                                triggerHaptic(0.85f)
                                 val (mDlg, mSheet) = createExpressiveDialog(390)
                                 mSheet.addView(TextView(this@TermuxActivity).apply {
                                     text = srv.label
@@ -6371,6 +6915,132 @@ class TermuxActivity : Activity() {
                             }
                         }
                     )
+                    card.addView(topRow)
+
+                    // Bottom Row: Auth & Port-Forward Badges on Left + Connected Ping & SFTP Buttons on Right
+                    val bottomRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(0, dp(10), 0, 0)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    }
+
+                    val badgeScroll = HorizontalScrollView(this).apply {
+                        isHorizontalScrollBarEnabled = false
+                        overScrollMode = View.OVER_SCROLL_NEVER
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginEnd = dp(8)
+                        }
+                    }
+                    val badgeRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+                    fun makeMiniBadge(txt: String) = TextView(this).apply {
+                        text = txt
+                        setSingleLine(true)
+                        maxLines = 1
+                        setTextColor(uiAccent)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                        background = tonalBg(uiAccentContainer, dp(8))
+                        setPadding(dp(9), dp(4), dp(9), dp(4))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            marginEnd = dp(5)
+                        }
+                    }
+                    badgeRow.addView(makeMiniBadge(when (srv.authType) {
+                        0 -> tr("Пароль", "Pass")
+                        1 -> tr("Ключ", "Key")
+                        else -> "Agent"
+                    }))
+                    if (srv.localForwards.isNotBlank()) {
+                        badgeRow.addView(makeMiniBadge("-L ${srv.localForwards}"))
+                    }
+                    if (srv.remoteForwards.isNotBlank()) {
+                        badgeRow.addView(makeMiniBadge("-R ${srv.remoteForwards}"))
+                    }
+                    if (srv.dynamicSocksPort.isNotBlank()) {
+                        badgeRow.addView(makeMiniBadge("-D ${srv.dynamicSocksPort}"))
+                    }
+                    badgeScroll.addView(badgeRow)
+                    bottomRow.addView(badgeScroll)
+
+                    // Connected M3 Expressive Action Group (like image_602ce1.png) for [Ping | SFTP]
+                    val actionsGroup = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        background = tonalBg(uiSurfaceContainer, dp(16))
+                        setPadding(dp(3), dp(3), dp(3), dp(3))
+                    }
+
+                    val pingPill = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER
+                        minimumWidth = dp(76)
+                        background = makeConnectedSegmentDrawable(uiSurfaceHigh, dpF(13f), dpF(4f))
+                        setPadding(dp(10), dp(6), dp(10), dp(6))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            marginEnd = dp(2)
+                        }
+                        attachSmoothPressAnimation(this, 0.93f)
+                        setOnClickListener {
+                            triggerHaptic(0.85f)
+                            pingServerAsync(srv, pingTv)
+                        }
+                    }
+                    pingPill.addView(
+                        MaterialIconView(this, M3Icon.PING, uiAccent, 15f, 1.95f).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply {
+                                marginEnd = dp(5)
+                            }
+                        }
+                    )
+                    pingPill.addView(pingTv)
+                    actionsGroup.addView(pingPill)
+
+                    val sftpPill = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER
+                        background = makeConnectedSegmentDrawable(uiAccentContainer, dpF(4f), dpF(13f))
+                        setPadding(dp(12), dp(6), dp(13), dp(6))
+                        attachSmoothPressAnimation(this, 0.93f)
+                        setOnClickListener {
+                            triggerHaptic(0.9f)
+                            activeSftpServer = srv
+                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                            previousTab = activeTab
+                            activeTab = 1
+                            renderActiveTab()
+                        }
+                    }
+                    sftpPill.addView(
+                        MaterialIconView(this, M3Icon.FOLDER, uiAccent, 14.5f, 2.0f).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(15), dp(15)).apply {
+                                marginEnd = dp(5)
+                            }
+                        }
+                    )
+                    sftpPill.addView(TextView(this).apply {
+                        text = "SFTP"
+                        setSingleLine(true)
+                        setTextColor(uiOnAccentContainer)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    })
+                    actionsGroup.addView(sftpPill)
+
+                    bottomRow.addView(actionsGroup)
+                    card.addView(bottomRow)
                     listCol.addView(card)
                 }
             }
@@ -7032,40 +7702,160 @@ class TermuxActivity : Activity() {
 
             rebuildClipBanner = {
                 clipBannerHolder.removeAllViews()
-                val clipFile = fileClipSource
-                if (activeSftpServer == null && clipFile != null) {
+                val srv = activeSftpServer
+                val activeDirStr = currentActivePathStr()
+
+                if (selectedSftpPaths.isNotEmpty()) {
+                    val (selScroll, selRow) = makeHorizontalChipRow()
+                    selScroll.setPadding(dp(14), dp(2), dp(14), dp(6))
+                    selRow.addView(
+                        TextView(this).apply {
+                            text = tr("Выбрано: ${selectedSftpPaths.size}", "Selected: ${selectedSftpPaths.size}")
+                            setTextColor(uiOnAccentContainer)
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            background = tonalBg(uiAccentContainer, dp(12))
+                            setPadding(dp(12), dp(7), dp(12), dp(7))
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply {
+                                marginEnd = dp(6)
+                            }
+                        }
+                    )
+                    selRow.addView(makeExpressiveChip(tr("Все", "All"), false) {
+                        for (e in lastRenderedEntries) {
+                            selectedSftpPaths.add(e.path)
+                        }
+                        rebuildClipBanner()
+                        populateEntriesIntoRowsCol(null, lastRenderedEntries)
+                    })
+                    if (srv == null) {
+                        selRow.addView(makeExpressiveChip(tr("Копировать", "Copy"), false) {
+                            batchClipSources.clear()
+                            batchClipSources.addAll(selectedSftpPaths)
+                            batchClipIsMove = false
+                            fileClipSource = null
+                            selectedSftpPaths.clear()
+                            rebuildClipBanner()
+                            populateEntriesIntoRowsCol(null, lastRenderedEntries)
+                        })
+                        selRow.addView(makeExpressiveChip(tr("Вырезать", "Cut"), false) {
+                            batchClipSources.clear()
+                            batchClipSources.addAll(selectedSftpPaths)
+                            batchClipIsMove = true
+                            fileClipSource = null
+                            selectedSftpPaths.clear()
+                            rebuildClipBanner()
+                            populateEntriesIntoRowsCol(null, lastRenderedEntries)
+                        })
+                    }
+                    selRow.addView(makeExpressiveChip(tr("В .tar.gz", "Archive .tar.gz"), false) {
+                        val targets = selectedSftpPaths.toList()
+                        val archiveName = "archive_${System.currentTimeMillis() / 1000}.tar.gz"
+                        val archivePath = if (activeDirStr == "/") "/$archiveName" else "$activeDirStr/$archiveName"
+                        val relNames = targets.map { it.substringAfterLast('/') }.filter { it.isNotEmpty() }
+                        val joinedArgs = relNames.joinToString(" ") { shellEscapeSingle(it) }
+                        val tarCmd = "cd -- ${shellEscapeSingle(activeDirStr)} && tar -czf ${shellEscapeSingle(archivePath)} -- $joinedArgs"
+                        selectedSftpPaths.clear()
+                        rebuildClipBanner()
+                        Thread {
+                            if (srv == null) {
+                                nativeExecLocalRootCmd(tarCmd)
+                                runOnUiThread {
+                                    Toast.makeText(this, tr("Создан архив: $archiveName", "Created: $archiveName"), Toast.LENGTH_SHORT).show()
+                                    refreshSftpListInPlace(true, null)
+                                }
+                            } else {
+                                runRemoteSftpViaCpp23(srv, tarCmd)
+                                runOnUiThread {
+                                    Toast.makeText(this, tr("Создан архив: $archiveName", "Created: $archiveName"), Toast.LENGTH_SHORT).show()
+                                    refreshSftpListInPlace(true, null)
+                                }
+                            }
+                        }.start()
+                    })
+                    selRow.addView(
+                        makeExpressiveChip(
+                            title = tr("Удалить (${selectedSftpPaths.size})", "Delete (${selectedSftpPaths.size})"),
+                            selected = true,
+                            accentColor = COLOR_ROOT,
+                            containerColor = COLOR_ROOT_CONTAINER
+                        ) {
+                            val toDel = selectedSftpPaths.toList()
+                            selectedSftpPaths.clear()
+                            rebuildClipBanner()
+                            val joined = toDel.joinToString(" ") { shellEscapeSingle(it) }
+                            Thread {
+                                if (srv == null) {
+                                    var allDeleted = true
+                                    for (p in toDel) {
+                                        if (!File(p).deleteRecursively()) allDeleted = false
+                                    }
+                                    if (!allDeleted) {
+                                        nativeExecLocalRootCmd("rm -rf -- $joined")
+                                    }
+                                    runOnUiThread { refreshSftpListInPlace(true, null) }
+                                } else {
+                                    runRemoteSftpViaCpp23(srv, "rm -rf -- $joined")
+                                    runOnUiThread { refreshSftpListInPlace(true, null) }
+                                }
+                            }.start()
+                        }
+                    )
+                    selRow.addView(makeExpressiveChip(tr("Сброс ✕", "Clear ✕"), false) {
+                        selectedSftpPaths.clear()
+                        rebuildClipBanner()
+                        populateEntriesIntoRowsCol(null, lastRenderedEntries)
+                    })
+                    clipBannerHolder.addView(selScroll)
+                } else if (srv == null && (fileClipSource != null || batchClipSources.isNotEmpty())) {
                     val clipBanner = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(14), dp(4), dp(14), dp(4))
                     }
-                    clipBanner.addView(makeExpressiveChip(tr("Вставить «${clipFile.name}»", "Paste '${clipFile.name}'"), true) {
-                        val dst = File(localCurrentDir, clipFile.name)
-                        try {
-                            if (clipFile.exists() && localCurrentDir.canWrite()) {
-                                if (clipFile.isDirectory) clipFile.copyRecursively(dst, overwrite = true)
-                                else clipFile.copyTo(dst, overwrite = true)
-                                if (fileClipIsMove) clipFile.deleteRecursively()
-                                fileClipSource = null
-                                rebuildClipBanner()
-                                refreshSftpListInPlace(false, null)
-                            } else {
-                                val op = if (fileClipIsMove) "mv -f" else "cp -rf"
-                                Thread {
-                                    nativeExecLocalRootCmd("$op -- ${shellEscapeSingle(clipFile.absolutePath)} ${shellEscapeSingle(dst.absolutePath)}")
-                                    runOnUiThread {
-                                        fileClipSource = null
-                                        rebuildClipBanner()
-                                        refreshSftpListInPlace(false, null)
-                                    }
-                                }.start()
-                            }
-                        } catch (e: Throwable) {
-                            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    val labelTxt = if (batchClipSources.isNotEmpty()) {
+                        tr("Вставить (${batchClipSources.size})", "Paste (${batchClipSources.size})")
+                    } else {
+                        tr("Вставить «${fileClipSource!!.name}»", "Paste '${fileClipSource!!.name}'")
+                    }
+                    clipBanner.addView(makeExpressiveChip(labelTxt, true) {
+                        val sources = if (batchClipSources.isNotEmpty()) {
+                            batchClipSources.map { File(it) }
+                        } else {
+                            listOfNotNull(fileClipSource)
                         }
+                        val isMove = if (batchClipSources.isNotEmpty()) batchClipIsMove else fileClipIsMove
+                        Thread {
+                            for (src in sources) {
+                                val dst = File(localCurrentDir, src.name)
+                                var handledDirect = false
+                                try {
+                                    if (src.exists() && localCurrentDir.canWrite()) {
+                                        if (src.isDirectory) src.copyRecursively(dst, overwrite = true)
+                                        else src.copyTo(dst, overwrite = true)
+                                        if (isMove) src.deleteRecursively()
+                                        handledDirect = true
+                                    }
+                                } catch (_: Throwable) {}
+                                if (!handledDirect) {
+                                    val op = if (isMove) "mv -f" else "cp -rf"
+                                    nativeExecLocalRootCmd("$op -- ${shellEscapeSingle(src.absolutePath)} ${shellEscapeSingle(dst.absolutePath)}")
+                                }
+                            }
+                            runOnUiThread {
+                                fileClipSource = null
+                                batchClipSources.clear()
+                                rebuildClipBanner()
+                                refreshSftpListInPlace(true, null)
+                            }
+                        }.start()
                     })
                     clipBanner.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) {
                         fileClipSource = null
+                        batchClipSources.clear()
                         rebuildClipBanner()
                     })
                     clipBannerHolder.addView(clipBanner)
@@ -7222,20 +8012,80 @@ class TermuxActivity : Activity() {
                     })
                 }
 
+                actions.add(Triple(M3Icon.CHECK, if (selectedSftpPaths.contains(item.path)) tr("Снять выделение", "Deselect") else tr("Выделить объект", "Select item")) {
+                    mDlg.dismiss()
+                    if (selectedSftpPaths.contains(item.path)) {
+                        selectedSftpPaths.remove(item.path)
+                    } else {
+                        selectedSftpPaths.add(item.path)
+                    }
+                    rebuildClipBanner()
+                    populateEntriesIntoRowsCol(null, lastRenderedEntries)
+                })
+
                 if (srv == null) {
                     actions.add(Triple(M3Icon.COPY, tr("Копировать", "Copy")) {
+                        batchClipSources.clear()
                         fileClipSource = File(item.path)
                         fileClipIsMove = false
                         mDlg.dismiss()
                         rebuildClipBanner()
                     })
                     actions.add(Triple(M3Icon.FOLDER_OPEN, tr("Вырезать (Переместить)", "Cut (Move)")) {
+                        batchClipSources.clear()
                         fileClipSource = File(item.path)
                         fileClipIsMove = true
                         mDlg.dismiss()
                         rebuildClipBanner()
                     })
                 }
+
+                actions.add(Triple(M3Icon.STORAGE, tr("Упаковать в .tar.gz", "Compress to .tar.gz")) {
+                    mDlg.dismiss()
+                    val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
+                    val outArchive = if (parentDir == "/") "/${item.name}.tar.gz" else "$parentDir/${item.name}.tar.gz"
+                    val tarCmd = "cd -- ${shellEscapeSingle(parentDir)} && tar -czf ${shellEscapeSingle(outArchive)} -- ${shellEscapeSingle(item.name)}"
+                    Thread {
+                        if (srv == null) {
+                            nativeExecLocalRootCmd(tarCmd)
+                        } else {
+                            runRemoteSftpViaCpp23(srv, tarCmd)
+                        }
+                        runOnUiThread {
+                            Toast.makeText(this@TermuxActivity, tr("Архив создан: ${item.name}.tar.gz", "Archived: ${item.name}.tar.gz"), Toast.LENGTH_SHORT).show()
+                            refreshSftpListInPlace(true, null)
+                        }
+                    }.start()
+                })
+
+                val lowerFileName = item.name.lowercase()
+                if (!item.isDirectory && (lowerFileName.endsWith(".tar.gz") || lowerFileName.endsWith(".tgz") || lowerFileName.endsWith(".tar") || lowerFileName.endsWith(".zip"))) {
+                    actions.add(Triple(M3Icon.FOLDER_OPEN, tr("Распаковать архив здесь", "Extract archive here")) {
+                        mDlg.dismiss()
+                        val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
+                        val extractCmd = if (lowerFileName.endsWith(".zip")) {
+                            "cd -- ${shellEscapeSingle(parentDir)} && unzip -o -- ${shellEscapeSingle(item.path)}"
+                        } else {
+                            "cd -- ${shellEscapeSingle(parentDir)} && tar -xf ${shellEscapeSingle(item.path)}"
+                        }
+                        Thread {
+                            if (srv == null) {
+                                nativeExecLocalRootCmd(extractCmd)
+                            } else {
+                                runRemoteSftpViaCpp23(srv, extractCmd)
+                            }
+                            runOnUiThread {
+                                Toast.makeText(this@TermuxActivity, tr("Распаковано: ${item.name}", "Extracted: ${item.name}"), Toast.LENGTH_SHORT).show()
+                                refreshSftpListInPlace(true, null)
+                            }
+                        }.start()
+                    })
+                }
+
+                actions.add(Triple(M3Icon.COPY, tr("Скопировать полный путь", "Copy full path")) {
+                    mDlg.dismiss()
+                    copyToClipboard(item.path, true)
+                })
 
                 if (!item.isDirectory) {
                     actions.add(Triple(M3Icon.DOWNLOAD, tr("Скачать в Загрузки", "Download to /sdcard/Download")) {
@@ -7456,10 +8306,14 @@ class TermuxActivity : Activity() {
             }
 
             fun populateEntriesIntoRowsCol(errStr: String?, entries: List<SftpItemEntry>) {
+                lastRenderedEntries = entries
                 val srv = activeSftpServer
                 val activePathStr = currentActivePathStr()
                 val hasParentRow = (activePathStr != "/" && sftpSearchQuery.isBlank())
                 val animateDir = sftpTransitionDir
+                val expandedTreePrefix = newlyExpandedTreePath?.let { if (it == "/") "/" else "$it/" }
+                newlyExpandedTreePath = null
+
                 rowsCol.removeAllViews()
                 if (animateDir != 0) {
                     val forward = animateDir > 0
@@ -7505,6 +8359,8 @@ class TermuxActivity : Activity() {
                         setOnClickListener {
                             triggerHaptic(0.75f)
                             triggerFolderShakeAnimation(upIconBadge, -1)
+                            selectedSftpPaths.clear()
+                            rebuildClipBanner()
                             val parentPath = activePathStr.substringBeforeLast('/').ifEmpty { "/" }
                             sftpTransitionDir = -1
                             if (srv == null) {
@@ -7541,13 +8397,58 @@ class TermuxActivity : Activity() {
                 }
 
                 if (errStr != null) {
-                    rowsCol.addView(TextView(this).apply {
-                        text = errStr
-                        setTextColor(COLOR_ROOT)
-                        typeface = Typeface.MONOSPACE
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                        setPadding(dp(18), dp(24), dp(18), dp(24))
+                    val errCard = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        gravity = Gravity.CENTER_HORIZONTAL
+                        background = tonalBg(uiSurfaceLow, dp(24))
+                        setPadding(dp(22), dp(24), dp(22), dp(20))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            topMargin = dp(8)
+                        }
+                    }
+                    val errIconBadge = FrameLayout(this).apply {
+                        background = tonalBg(COLOR_ROOT_CONTAINER, dp(16))
+                        layoutParams = LinearLayout.LayoutParams(dp(50), dp(50)).apply {
+                            bottomMargin = dp(12)
+                        }
+                        addView(MaterialIconView(this@TermuxActivity, M3Icon.SERVER, COLOR_PASTEL_RED, 24f, 2.05f))
+                    }
+                    errCard.addView(errIconBadge)
+                    errCard.addView(TextView(this).apply {
+                        text = tr("Ошибка подключения SFTP", "SFTP Connection Error")
+                        gravity = Gravity.CENTER
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
                     })
+                    errCard.addView(TextView(this).apply {
+                        text = errStr
+                        gravity = Gravity.CENTER
+                        setTextColor(COLOR_PASTEL_RED)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
+                        background = tonalBg(COLOR_ROOT_CONTAINER, dp(14))
+                        setPadding(dp(14), dp(10), dp(14), dp(10))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            topMargin = dp(10)
+                            bottomMargin = dp(14)
+                        }
+                    })
+                    errCard.addView(
+                        makeExpressiveChip(
+                            title = tr("Повторить попытку", "Retry connection"),
+                            selected = true
+                        ) {
+                            refreshSftpListInPlace(true, null)
+                        }
+                    )
+                    rowsCol.addView(errCard)
                 } else if (entries.isEmpty()) {
                     rowsCol.addView(TextView(this).apply {
                         text = if (sftpSearchQuery.isNotBlank()) tr("Нет файлов по запросу «$sftpSearchQuery»", "No files matching '$sftpSearchQuery'") else tr("Папка пуста", "Folder is empty")
@@ -7560,35 +8461,47 @@ class TermuxActivity : Activity() {
                 } else {
                     var animatedFolderCount = 0
                     for (item in entries) {
+                        val isItemSelected = selectedSftpPaths.contains(item.path)
                         val iconType = when {
+                            isItemSelected -> M3Icon.CHECK
                             !item.isDirectory -> M3Icon.FILE
                             item.isExpanded -> M3Icon.FOLDER_OPEN
                             else -> M3Icon.FOLDER
                         }
-                        val iconTint = if (item.isDirectory) uiAccent else COLOR_TEXT_BRIGHT
+                        val iconTint = when {
+                            isItemSelected -> uiOnAccent
+                            item.isDirectory -> uiAccent
+                            else -> COLOR_TEXT_BRIGHT
+                        }
+                        val badgeFill = when {
+                            isItemSelected -> uiAccent
+                            item.isDirectory -> uiAccentContainer
+                            else -> uiSurfaceContainer
+                        }
                         val itemIconBadge = FrameLayout(this).apply {
-                            background = tonalBg(
-                                if (item.isDirectory) uiAccentContainer else uiSurfaceContainer,
-                                dp(11)
-                            )
+                            background = tonalBg(badgeFill, dp(11))
                             layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
                                 marginEnd = dp(12)
                             }
                             addView(MaterialIconView(this@TermuxActivity, iconType, iconTint, 20.5f, 2.0f))
                         }
-                        if (animateDir != 0 && animatedFolderCount < 14) {
+
+                        val isExpandedChild = expandedTreePrefix != null && item.path.startsWith(expandedTreePrefix)
+                        if ((animateDir != 0 || isExpandedChild) && animatedFolderCount < 16) {
                             animatedFolderCount++
-                            val delayMs = (animatedFolderCount * 15L).coerceAtMost(135L)
+                            val delayMs = (animatedFolderCount * 14L).coerceAtMost(130L)
+                            val shakeDir = if (animateDir != 0) animateDir else 1
                             itemIconBadge.postDelayed({
-                                triggerFolderShakeAnimation(itemIconBadge, animateDir)
+                                triggerFolderShakeAnimation(itemIconBadge, shakeDir)
                             }, delayMs)
                         }
 
+                        val rowFill = if (isItemSelected) blendColor(uiSurfaceLow, uiAccentContainer, 0.55f) else uiSurfaceLow
                         val row = LinearLayout(this).apply {
                             orientation = LinearLayout.HORIZONTAL
                             gravity = Gravity.CENTER_VERTICAL
                             setPadding(dp(14 + item.depth * 14), dp(11), dp(10), dp(11))
-                            background = segmentedCardBg(currentCardIdx, max(1, totalCards), uiSurfaceLow, 0, 20f, 5f)
+                            background = segmentedCardBg(currentCardIdx, max(1, totalCards), rowFill, 0, 20f, 5f)
                             layoutParams = LinearLayout.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -7597,14 +8510,27 @@ class TermuxActivity : Activity() {
                             }
                             attachSmoothPressAnimation(this, 0.985f)
                             setOnClickListener {
+                                if (selectedSftpPaths.isNotEmpty()) {
+                                    triggerHaptic(0.85f)
+                                    if (selectedSftpPaths.contains(item.path)) {
+                                        selectedSftpPaths.remove(item.path)
+                                    } else {
+                                        selectedSftpPaths.add(item.path)
+                                    }
+                                    rebuildClipBanner()
+                                    populateEntriesIntoRowsCol(null, lastRenderedEntries)
+                                    return@setOnClickListener
+                                }
                                 triggerHaptic(0.75f)
                                 if (item.isDirectory) {
                                     triggerFolderShakeAnimation(itemIconBadge, 1)
                                     if (srv == null && sftpTreeMode) {
                                         if (expandedTreePaths.contains(item.path)) {
                                             expandedTreePaths.remove(item.path)
+                                            newlyExpandedTreePath = null
                                         } else {
                                             expandedTreePaths.add(item.path)
+                                            newlyExpandedTreePath = item.path
                                         }
                                         refreshSftpListInPlace(false, null)
                                     } else if (srv == null) {
@@ -7625,8 +8551,14 @@ class TermuxActivity : Activity() {
                                 }
                             }
                             setOnLongClickListener {
-                                triggerHaptic(1.2f)
-                                openEntryMenu(item)
+                                triggerHaptic(1.25f)
+                                if (selectedSftpPaths.contains(item.path)) {
+                                    selectedSftpPaths.remove(item.path)
+                                } else {
+                                    selectedSftpPaths.add(item.path)
+                                }
+                                rebuildClipBanner()
+                                populateEntriesIntoRowsCol(null, lastRenderedEntries)
                                 true
                             }
                         }
@@ -7784,11 +8716,6 @@ class TermuxActivity : Activity() {
                                 start()
                             }
                             loadingWrap.addView(morphBadge)
-                            loadingWrap.addView(TextView(this).apply {
-                                text = tr("Загрузка каталога SFTP…", "Loading SFTP directory…")
-                                setTextColor(COLOR_TEXT_DIM)
-                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                            })
                             rowsCol.addView(loadingWrap)
                         }
 
@@ -9370,7 +10297,8 @@ class TermuxActivity : Activity() {
                 val curR = restR + (outerR - restR) * pillMorph
 
                 val activeFill = if (isRoot) COLOR_ROOT_CONTAINER else uiAccentContainer
-                val fillCol = blendColor(uiSurfaceContainer, activeFill, safeClamp(max(selF, pSelf * 0.85f), 0f, 1f))
+                val colorT = safeClamp(max(selF, pSelf * 0.85f), 0f, 1f)
+                val fillCol = blendColor(uiSurfaceHigh, activeFill, colorT)
                 val activeTxtCol = if (isRoot) COLOR_ROOT else uiOnAccentContainer
                 val txtCol = blendColor(COLOR_TEXT_BRIGHT, activeTxtCol, safeClamp(max(selF, pSelf), 0f, 1f))
 
@@ -9380,6 +10308,12 @@ class TermuxActivity : Activity() {
 
                 val tv = tabViews[i]
                 tv.setTextColor(txtCol)
+                // Living squash-and-stretch during session switch & press!
+                val midSquash = if (selF in 0.03f..0.97f) {
+                    kotlin.math.sin(selF.coerceIn(0f, 1f) * Math.PI.toFloat())
+                } else 0f
+                val pressSquash = safeClamp(pSelf, 0f, 1f)
+                tv.scaleY = (1f - 0.11f * midSquash - 0.06f * pressSquash).coerceIn(0.84f, 1.04f)
                 val lp = tv.layoutParams as LinearLayout.LayoutParams
                 if (lp.width != wPx) {
                     lp.width = wPx
@@ -9848,7 +10782,15 @@ class TermuxActivity : Activity() {
                         if (deltaRows != 0) {
                             scrollAccum -= deltaRows * cellHeight
                             val maxSb = nativeGetActiveScrollback()
-                            scrollOffset = safeClampInt(scrollOffset - deltaRows, 0, max(0, maxSb))
+                            // Allow negative scrollOffset down to -(rows - 2) so the last line can be scrolled all the way to the top!
+                            val minSb = -max(0, rows - 2)
+                            scrollOffset = safeClampInt(scrollOffset - deltaRows, minSb, max(0, maxSb))
+                            // Auto-hide extra keys bar when scrolling up into history, restore when scrolling back down
+                            if (deltaRows < 0 && scrollOffset > 1) {
+                                setExtraKeysScrollHidden(true)
+                            } else if (deltaRows > 0 || scrollOffset <= 0) {
+                                setExtraKeysScrollHidden(false)
+                            }
                             actionMode?.invalidateContentRect()
                             invalidateAllRows()
                         }
@@ -10102,8 +11044,13 @@ class TermuxActivity : Activity() {
             }
         }
 
+        private var unoccludedHeightPx: Int = 0
+
         internal fun resetScrollAndBlink() {
             scrollOffset = 0
+            if (isExtraKeysScrollHidden) {
+                setExtraKeysScrollHidden(false)
+            }
             scheduleBlinkLoop()
             invalidateAllRows()
         }
@@ -10115,25 +11062,33 @@ class TermuxActivity : Activity() {
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
+            if (!isImeCurrentlyOpen || h > unoccludedHeightPx || w != oldw) {
+                unoccludedHeightPx = max(h, unoccludedHeightPx)
+            }
             syncSize()
         }
 
-        internal fun syncSize() {
+        internal fun syncSize(forceResize: Boolean = false) {
             val w = width
             val h = height
             if (w <= 0 || h <= 0) return
+            if (!isImeCurrentlyOpen || h > unoccludedHeightPx) {
+                unoccludedHeightPx = h
+            }
+            val effectiveH = max(h, unoccludedHeightPx)
             val newCols = max(10, (w / cellWidth).toInt())
-            val newRows = max(4, (h / cellHeight).toInt())
+            val newRows = max(4, (effectiveH / cellHeight).toInt())
             val changed = (newCols != cols || newRows != rows)
             cols = newCols
             rows = newRows
             if (changed || rowNodes == null || rowNodes?.size != rows) {
                 rowNodes = arrayOfNulls(rows)
                 rowNodesValid = BooleanArray(rows)
-            } else {
+                nativeResizeActive(rows, cols, cellWidth.roundToInt(), cellHeight.roundToInt())
+            } else if (forceResize) {
                 rowNodesValid?.fill(false)
+                nativeResizeActive(rows, cols, cellWidth.roundToInt(), cellHeight.roundToInt())
             }
-            nativeResizeActive(rows, cols, cellWidth.roundToInt(), cellHeight.roundToInt())
             postInvalidateOnAnimation()
         }
 
@@ -10199,6 +11154,21 @@ class TermuxActivity : Activity() {
                 nativeClearDirtyFlags()
             }
 
+            val cursorStateForPan = nativeGetCursorState()
+            val curCursorRow = if (cursorStateForPan >= 0) (cursorStateForPan ushr 16) and 0x1FFF else 0
+            val overscrollUpPx = if (scrollOffset < 0) (-scrollOffset) * cellHeight else 0f
+            val imeOccludedPanPx = if (scrollOffset == 0 && height > 0 && (curCursorRow + 1) * cellHeight > height) {
+                (curCursorRow + 1) * cellHeight - height + dpF(4f)
+            } else {
+                0f
+            }
+            val totalPanUpPx = overscrollUpPx + imeOccludedPanPx
+
+            canvas.save()
+            if (totalPanUpPx != 0f) {
+                canvas.translate(0f, -totalPanUpPx)
+            }
+
             if (canvas.isHardwareAccelerated) {
                 val rowHeightPx = ceil(cellHeight.toDouble()).toInt()
                 for (r in 0 until rows) {
@@ -10226,6 +11196,7 @@ class TermuxActivity : Activity() {
                     drawSingleRow(canvas, r, r * cellHeight)
                 }
             }
+            canvas.restore()
 
             val selecting = nativeIsSelectingText()
 
@@ -10245,7 +11216,7 @@ class TermuxActivity : Activity() {
             }
 
             // Draw Cursor (True VSYNC VS Code Smooth / Phase / Expand / Blink / Solid)
-            if (scrollOffset == 0 && !selecting) {
+            if (scrollOffset <= 0 && !selecting) {
                 val cursorState = nativeGetCursorState()
                 if (cursorState >= 0) {
                     val rawShape = (cursorState ushr 29) and 3
@@ -10254,7 +11225,7 @@ class TermuxActivity : Activity() {
                     val cCol = cursorState and 0xFFFF
                     if (cRow in 0 until rows && cCol in 0 until cols) {
                         val targetX = cCol * cellWidth
-                        val targetY = cRow * cellHeight
+                        val targetY = cRow * cellHeight - totalPanUpPx
                         val nowNs = System.nanoTime()
 
                         var stillMoving = false
@@ -10463,7 +11434,7 @@ class TermuxActivity : Activity() {
             val bottom = top + cellHeight
             val baseY = top + cellBaseline
 
-            val packed = nativePackRowRender(scrollOffset, r, bgRunsBuf, glyphRunsBuf)
+            val packed = nativePackRowRender(max(0, scrollOffset), r, bgRunsBuf, glyphRunsBuf)
             val bgCount = (packed ushr 16) and 0xFFFF
             val glCount = packed and 0xFFFF
 
@@ -10632,6 +11603,7 @@ class TermuxActivity : Activity() {
          */
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
             outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_FILTER or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
                 EditorInfo.IME_FLAG_NO_EXTRACT_UI or
@@ -10953,6 +11925,7 @@ class TermuxActivity : Activity() {
                 } else {
                     lastPreDeleteCount = 0
                     super.setComposingText(str, newCursorPosition)
+                    BaseInputConnection.removeComposingSpans(localBuffer)
                     applyLocalBufferDiffToPty()
                 }
                 rearmLockedModifiersIfNeeded()

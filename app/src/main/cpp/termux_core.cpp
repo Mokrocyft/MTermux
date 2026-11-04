@@ -4123,7 +4123,7 @@ Java_com_termuxx_app_TermuxActivity_nativeListLocalDir(
     // automatically use root `su -c` fallback so root users can browse all system directories!
     if (dir == nullptr || (entries.empty() && (dirPath == "/" || dirPath.rfind("/data", 0) == 0 || dirPath.rfind("/system", 0) == 0))) {
         std::string pattern = showHidden ? "* .*" : "*";
-        std::string rootScript = "cd " + shellEscapeSingleCpp(dirPath) + " 2>/dev/null && for f in " + pattern + "; do [ -e \"$f\" ] || [ -L \"$f\" ] || continue; [ \"$f\" = \".\" ] || [ \"$f\" = \"..\" ] && continue; stat -L -c '@@E@@%F|%s|%Y|%A|%n' -- \"$f\" 2>/dev/null || stat -c '@@E@@%F|%s|%Y|%A|%n' -- \"$f\" 2>/dev/null || (if [ -d \"$f\" ]; then printf '@@E@@directory|0|0|drwxr-xr-x|%s\\n' \"$f\"; else printf '@@E@@file|0|0|-rw-r--r--|%s\\n' \"$f\"; fi); done; true";
+        std::string rootScript = "cd -- " + shellEscapeSingleCpp(dirPath) + " 2>/dev/null && { stat -L -c '@@E@@%F|%s|%Y|%A|%n' -- " + pattern + " 2>/dev/null; stat -c '@@E@@%F|%s|%Y|%A|%n' -- " + pattern + " 2>/dev/null; }; true";
         std::string rootOut;
         if (execRootShellCommandCpp26(rootScript, rootOut, 6000) && !rootOut.empty()) {
             entries.clear();
@@ -4452,10 +4452,19 @@ Java_com_termuxx_app_TermuxActivity_nativeListRemoteSftpDir(
     std::string query = trimCpp(jstringToStdString(env, jSearchQuery));
     for (char& c : query) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
 
-    // Build POSIX-compliant remote listing wrapped in /bin/sh -c so zsh/fish login shells never fail on globs!
+    // Build POSIX-compliant remote listing wrapped in /bin/sh -c WITHOUT subshell around `cd`!
+    // Uses fast single-pass batch `stat -L -c` first (1 process for the whole directory!), with fallback loop for BSD/BusyBox.
     std::string pattern = showHidden ? "* .*" : "*";
-    std::string innerPosixScript = "(cd " + shellEscapeSingleCpp(remoteDir) + " 2>/dev/null || cd ~) && printf '@@PWD@@%s\\n' \"$(pwd)\" && for f in " + pattern + "; do " +
-        std::string(R"sh([ "$f" = "." ] || [ "$f" = ".." ] || [ "$f" = "*" ] || [ "$f" = ".*" ] && continue; [ -e "$f" ] || [ -L "$f" ] || continue; stat -L -c '@@E@@%F|%s|%Y|%A|%n' -- "$f" 2>/dev/null || stat -c '@@E@@%F|%s|%Y|%A|%n' -- "$f" 2>/dev/null || stat -L -f '@@E@@%HT|%z|%m|%Sp|%N' -- "$f" 2>/dev/null || stat -f '@@E@@%HT|%z|%m|%Sp|%N' -- "$f" 2>/dev/null || (if [ -d "$f" ]; then printf '@@E@@directory|0|0|drwxr-xr-x|%s\n' "$f"; else printf '@@E@@file|0|0|-rw-r--r--|%s\n' "$f"; fi); done; true)sh");
+    std::string innerPosixScript =
+        "if ! cd -- " + shellEscapeSingleCpp(remoteDir) + " 2>/dev/null; then cd -- \"$HOME\" 2>/dev/null || cd /; fi; "
+        "printf '@@PWD@@%s\\n' \"$(pwd)\"; "
+        "if stat -c '%F' . >/dev/null 2>&1; then "
+        "stat -L -c '@@E@@%F|%s|%Y|%A|%n' -- " + pattern + " 2>/dev/null; "
+        "stat -c '@@E@@%F|%s|%Y|%A|%n' -- " + pattern + " 2>/dev/null; "
+        "else "
+        "for f in " + pattern + "; do " +
+        std::string(R"sh([ "$f" = "." ] || [ "$f" = ".." ] || [ "$f" = "*" ] || [ "$f" = ".*" ] && continue; [ -e "$f" ] || [ -L "$f" ] || continue; stat -L -f '@@E@@%HT|%z|%m|%Sp|%N' -- "$f" 2>/dev/null || stat -f '@@E@@%HT|%z|%m|%Sp|%N' -- "$f" 2>/dev/null || (if [ -d "$f" ]; then printf '@@E@@directory|0|0|drwxr-xr-x|%s\n' "$f"; else printf '@@E@@file|0|0|-rw-r--r--|%s\n' "$f"; fi); done; )sh") +
+        "fi; true";
     std::string remoteScript = "sh -c " + shellEscapeSingleCpp(innerPosixScript);
 
     std::string rawOut;
@@ -4798,8 +4807,9 @@ Java_com_termuxx_app_TermuxActivity_nativeGenerateColorSpec2026Palette(
     JNIEnv* env, jclass /*clazz*/, jint seedArgb, jint styleIndex
 ) {
     OklchColor seed = argbToOklch(static_cast<uint32_t>(seedArgb));
+    bool isMonochromeSeed = (seed.C < 0.015f);
     float H = seed.hDeg;
-    float baseC = std::clamp(seed.C, 0.06f, 0.20f);
+    float baseC = isMonochromeSeed ? 0.0f : std::clamp(seed.C, 0.06f, 0.20f);
 
     float hPrimary = H;
     float cPrimary = 0.125f;
@@ -4855,6 +4865,13 @@ Java_com_termuxx_app_TermuxActivity_nativeGenerateColorSpec2026Palette(
             hNeutral = wrapHue(H + 14.0f);
             cNeutral = 0.021f;
             break;
+    }
+
+    if (isMonochromeSeed) {
+        cPrimary = 0.0f;
+        cSecondary = 0.0f;
+        cTertiary = 0.0f;
+        cNeutral = 0.0f;
     }
 
     jint tokens[14];
