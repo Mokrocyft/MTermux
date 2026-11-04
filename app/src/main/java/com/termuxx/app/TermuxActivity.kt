@@ -2293,9 +2293,9 @@ class TermuxActivity : Activity() {
 
     internal inner class ColorPreviewCanvasView(
         context: Context,
-        private val tokens: IntArray,
-        private val isSwatchWithCenter: Boolean = false,
-        private val seedCenterColor: Int = 0,
+        var tokens: IntArray,
+        val isSwatchWithCenter: Boolean = false,
+        val seedCenterColor: Int = 0,
         var isSwatchSelected: Boolean = false
     ) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
