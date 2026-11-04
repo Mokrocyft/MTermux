@@ -3314,6 +3314,11 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
     int modes = engine->mModes.load(std::memory_order_relaxed);
     int clampedOffset = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp<int>(scrollOffset, 0, engine->mScrollbackCount);
     int logicalY = screenRow - clampedOffset;
+    if ((modes & MODE_ALT_SCREEN) ? (logicalY < 0 || logicalY >= engine->mRows)
+                                  : (logicalY < -engine->mScrollbackCount || logicalY >= engine->mRows)) {
+        engine->unlock();
+        return 0;
+    }
     const Row& row = engine->getRowByLogicalY(logicalY);
     int cols = std::min<int>(engine->mCols, static_cast<int>(row.cells.size()));
 
