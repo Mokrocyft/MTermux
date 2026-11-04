@@ -7310,6 +7310,7 @@ class TermuxActivity : Activity() {
 
             lateinit var rebuildBreadcrumbs: (Boolean) -> Unit
             lateinit var rebuildClipBanner: () -> Unit
+            lateinit var populateEntriesIntoRowsCol: (String?, List<SftpItemEntry>) -> Unit
             lateinit var refreshSftpListInPlace: (Boolean, (() -> Unit)?) -> Unit
             lateinit var openMaterialCreateItemSheet: () -> Unit
             lateinit var openMaterialImportSheet: () -> Unit
@@ -8307,7 +8308,7 @@ class TermuxActivity : Activity() {
                 mDlg.show()
             }
 
-            fun populateEntriesIntoRowsCol(errStr: String?, entries: List<SftpItemEntry>) {
+            populateEntriesIntoRowsCol = { errStr, entries ->
                 lastRenderedEntries = entries
                 val srv = activeSftpServer
                 val activePathStr = currentActivePathStr()
