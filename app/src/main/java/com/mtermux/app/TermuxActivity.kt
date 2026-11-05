@@ -6699,11 +6699,11 @@ class TermuxActivity : Activity() {
         val pillOuterR = pillInnerH * 0.5f
         val pillInnerR = dpF(5f)
 
-        val termOuterFrame = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        val termOuterFrame = FrameLayout(this).apply {
             background = tonalBg(uiSurfaceLow, dp(22))
             setPadding(dp(4), dp(4), dp(4), dp(4))
+            clipChildren = true
+            clipToPadding = true
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -7022,13 +7022,18 @@ class TermuxActivity : Activity() {
             triggerHaptic(0.85f)
             val curOuterW = termOuterFrame.width.toFloat().coerceAtLeast(dpF(76f))
             val targetSessW = startSessionsPillWidth.toFloat().coerceAtLeast(dpF(54f))
-            animEngine.drive(termOuterFrame, 190L, 1, onStep = { t ->
-                val p = safeClamp(t, 0f, 1f)
-                val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                lp.width = (curOuterW + (targetSessW - curOuterW) * p).roundToInt()
-                lp.weight = 0f
-                termOuterFrame.layoutParams = lp
-            })
+            ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 190L
+                interpolator = aosp17SpatialInterpolator
+                addUpdateListener { va ->
+                    val p = safeClamp(va.animatedValue as Float, 0f, 1f)
+                    val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                    lp.width = (curOuterW + (targetSessW - curOuterW) * p).roundToInt()
+                    lp.weight = 0f
+                    termOuterFrame.layoutParams = lp
+                }
+                start()
+            }
             ensureCenteredPivot(root)
             animEngine.morph(root, alpha = 0f, sx = 0.90f, sy = 0.90f, durationMs = 180L, interp = predictiveCommitInterpolator) {
                 root.visibility = View.INVISIBLE
@@ -7109,7 +7114,7 @@ class TermuxActivity : Activity() {
                 captureLabelRef: Boolean = false,
                 onClick: () -> Unit
             ): LinearLayout {
-                return LinearLayout(this).apply {
+                return LinearLayout(this@TermuxActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER
                     minimumWidth = minW
@@ -7221,131 +7226,621 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            val prevMode = currentTermPillMode
-            val prevExpandedRight = (prevMode > 0)
-            val isExpandedRight = (targetMode != 0)
-            val startTermW = termOuterFrame.width
-
-            // If collapsing the expanded "Терминал" menu back to compact mode with animation,
-            // smoothly fold the live expanded segments leftward into "Терминал" FIRST while
-            // hubTabsOuter expands in from the right, and then swap in the compact chip!
-            if (animateMorph && prevExpandedRight && !isExpandedRight && termOuterFrame.childCount > 1 && startTermW > dp(150)) {
-                currentTermPillMode = 0
-                lastTermPillTrashConfirm = false
-                termPillCountTv = null
-                termExpandAnim?.cancel()
-                termAccessoryAnim?.cancel()
-
-                val accPill = if (activeTab == 1) createAccessoryPillView() else null
-                var accW = 0
-                if (accPill != null) {
-                    accPill.measure(
-                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-                        View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
+            fun buildContentRow(mode: Int): LinearLayout {
+                val contentRow = LinearLayout(this@TermuxActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = FrameLayout.LayoutParams(
+                        if (mode != 0) FrameLayout.LayoutParams.MATCH_PARENT else FrameLayout.LayoutParams.WRAP_CONTENT,
+                        pillInnerH
                     )
-                    accW = accPill.measuredWidth.coerceAtLeast(dp(36))
-                    accPill.alpha = 0f
-                    accPill.scaleX = 0.82f
-                    accPill.scaleY = 0.82f
-                    accPill.translationX = -dpF(4f)
-                    termOuterFrame.addView(accPill, 1, LinearLayout.LayoutParams(accW, pillInnerH).apply {
-                        marginEnd = 0
-                    })
                 }
 
-                val firstChip = termOuterFrame.getChildAt(0) as? LinearLayout
-                val lblV = firstChip?.getChildAt(1) as? TextView
-                val targetLabelW = if (lblV != null) {
-                    lblV.measure(
-                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-                        View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
-                    )
-                    lblV.measuredWidth.coerceAtLeast(dp(54))
-                } else {
-                    dp(58)
-                }
-                val exactTermBackW = dp(12) + dp(19) + dp(5) + targetLabelW + dp(13)
-                val exactCompactW = termOuterFrame.paddingLeft + exactTermBackW + (if (accPill != null) (dp(2) + accW) else 0) + termOuterFrame.paddingRight
-                val targetCompactW = if (activeTab == 1) exactCompactW else (termOuterFrame.paddingLeft + exactTermBackW + termOuterFrame.paddingRight)
+                when (mode) {
+                    1 -> {
+                        val srv = activeSftpServer
+                        val activeDirStr = if (srv == null) localCurrentDir.absolutePath else remoteCurrentPath
 
-                hubTabsOuter.visibility = View.VISIBLE
-                hubTabsOuter.alpha = 0f
-                hubTabsOuter.scaleX = 0.94f
-                hubTabsOuter.scaleY = 0.94f
-
-                termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 250L
-                    interpolator = aosp17SpatialInterpolator
-                    addUpdateListener { va ->
-                        val p = safeClamp(va.animatedValue as Float, 0f, 1f)
-                        val inv = 1f - p
-                        val curW = (startTermW + (targetCompactW - startTermW) * p).roundToInt()
-                        val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                        lp.width = curW
-                        lp.weight = 0f
-                        lp.marginEnd = (dpF(8f) * p).roundToInt()
-                        termOuterFrame.layoutParams = lp
-
-                        if (prevMode == 3 && termOuterFrame.childCount > 0) {
-                            if (firstChip != null && firstChip.childCount >= 2) {
-                                val icV = firstChip.getChildAt(0)
-                                val expandP = safeClamp((p - 0.05f) / 0.95f, 0f, 1f)
-                                if (lblV != null) {
-                                    lblV.visibility = View.VISIBLE
-                                    lblV.alpha = expandP
-                                    val lblLp = lblV.layoutParams as LinearLayout.LayoutParams
-                                    lblLp.width = (targetLabelW.toFloat() * expandP).roundToInt()
-                                    lblV.layoutParams = lblLp
+                        contentRow.addView(
+                            makeSegmentPill(
+                                icon = M3Icon.TERMINAL,
+                                label = "${selectedSftpPaths.size}",
+                                leftR = pillOuterR,
+                                rightR = pillInnerR,
+                                fillCol = uiAccentContainer,
+                                tintCol = uiOnAccentContainer,
+                                weightVal = 1.05f,
+                                minW = dp(54),
+                                captureLabelRef = true
+                            ) {
+                                exitToTerminalAnimated()
+                            }
+                        )
+                        contentRow.addView(
+                            makeSegmentPill(
+                                icon = M3Icon.SELECT_ALL,
+                                label = null,
+                                leftR = pillInnerR,
+                                rightR = pillInnerR,
+                                fillCol = uiSurfaceHigh,
+                                tintCol = COLOR_TEXT_BRIGHT,
+                                weightVal = 0.85f
+                            ) {
+                                trashConfirmExpanded = false
+                                if (selectedSftpPaths.size >= lastRenderedEntries.size && lastRenderedEntries.isNotEmpty()) {
+                                    selectedSftpPaths.clear()
+                                    rebuildUniversalTermPill(true)
+                                } else {
+                                    for (e in lastRenderedEntries) {
+                                        selectedSftpPaths.add(e.path)
+                                    }
+                                    rebuildUniversalTermPill(false)
                                 }
-                                val icLp = icV.layoutParams as LinearLayout.LayoutParams
-                                icLp.marginEnd = (dpF(5f) * expandP).roundToInt()
-                                icV.layoutParams = icLp
-                                val leftPad = (dpF(8f) + dpF(4f) * expandP).roundToInt()
-                                val rightPad = (dpF(8f) + dpF(5f) * expandP).roundToInt()
-                                firstChip.setPadding(leftPad, 0, rightPad, 0)
-                                val chipLp = firstChip.layoutParams as LinearLayout.LayoutParams
-                                chipLp.marginEnd = (dpF(2f) * expandP).roundToInt()
-                                firstChip.layoutParams = chipLp
+                                activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                            }
+                        )
+                        if (srv == null) {
+                            contentRow.addView(
+                                makeSegmentPill(
+                                    icon = M3Icon.COPY,
+                                    label = null,
+                                    leftR = pillInnerR,
+                                    rightR = pillInnerR,
+                                    fillCol = uiSurfaceHigh,
+                                    tintCol = COLOR_TEXT_BRIGHT,
+                                    weightVal = 0.85f
+                                ) {
+                                    trashConfirmExpanded = false
+                                    batchClipSources.clear()
+                                    batchClipSources.addAll(selectedSftpPaths)
+                                    batchClipIsMove = false
+                                    fileClipSource = null
+                                    selectedSftpPaths.clear()
+                                    triggerHaptic(0.9f)
+                                    toast(tr("Скопировано в буфер", "Copied to clipboard"))
+                                    rebuildUniversalTermPill(true)
+                                    activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                                }
+                            )
+                            contentRow.addView(
+                                makeSegmentPill(
+                                    icon = M3Icon.CHMOD,
+                                    label = null,
+                                    leftR = pillInnerR,
+                                    rightR = pillInnerR,
+                                    fillCol = uiSurfaceHigh,
+                                    tintCol = COLOR_TEXT_BRIGHT,
+                                    weightVal = 0.85f
+                                ) {
+                                    trashConfirmExpanded = false
+                                    batchClipSources.clear()
+                                    batchClipSources.addAll(selectedSftpPaths)
+                                    batchClipIsMove = true
+                                    fileClipSource = null
+                                    selectedSftpPaths.clear()
+                                    triggerHaptic(0.9f)
+                                    toast(tr("Вырезано в буфер", "Cut to clipboard"))
+                                    rebuildUniversalTermPill(true)
+                                    activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                                }
+                            )
+                        }
+                        val trashBtn = LinearLayout(this@TermuxActivity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER
+                            background = makeConnectedSegmentDrawable(
+                                COLOR_ROOT_CONTAINER,
+                                if (trashConfirmExpanded) pillOuterR else pillInnerR,
+                                if (trashConfirmExpanded) pillOuterR else pillInnerR
+                            )
+                            val hPad = if (trashConfirmExpanded) dp(12) else dp(8)
+                            setPadding(hPad, 0, hPad, 0)
+                            layoutParams = LinearLayout.LayoutParams(
+                                0,
+                                pillInnerH,
+                                if (trashConfirmExpanded) 2.2f else 0.85f
+                            ).apply {
+                                marginEnd = dp(2)
+                            }
+                            addView(
+                                MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
+                                layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                                    if (trashConfirmExpanded) marginEnd = dp(5)
+                                }
+                            })
+                            if (trashConfirmExpanded) {
+                                addView(TextView(this@TermuxActivity).apply {
+                                    text = tr("Уверены?", "Sure?")
+                                    setSingleLine(true)
+                                    setTextColor(COLOR_ROOT)
+                                    typeface = Typeface.DEFAULT_BOLD
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                })
+                            }
+                            attachSmoothPressAnimation(this, 0.93f)
+                            setOnClickListener {
+                                if (!trashConfirmExpanded) {
+                                    triggerHaptic(1.1f)
+                                    trashConfirmExpanded = true
+                                    rebuildUniversalTermPill(true)
+                                } else {
+                                    triggerHaptic(1.35f)
+                                    val targets = selectedSftpPaths.toList()
+                                    selectedSftpPaths.clear()
+                                    trashConfirmExpanded = false
+                                    rebuildUniversalTermPill(true)
+                                    Thread {
+                                        if (srv != null) {
+                                            for (p in targets) {
+                                                try {
+                                                    sftpDeletePathRecursive(srv, p)
+                                                } catch (_: Throwable) {}
+                                            }
+                                        } else {
+                                            for (p in targets) {
+                                                val f = File(p)
+                                                var ok = false
+                                                try {
+                                                    if (f.exists()) {
+                                                        if (f.isDirectory) f.deleteRecursively() else f.delete()
+                                                        ok = !f.exists()
+                                                    }
+                                                } catch (_: Throwable) {}
+                                                if (!ok && f.exists()) {
+                                                    nativeExecLocalRootCmd("rm -rf -- ${shellEscapeSingle(p)}")
+                                                }
+                                            }
+                                        }
+                                        runOnUiThread {
+                                            activeSftpRefreshCallback?.invoke(true, null)
+                                        }
+                                    }.start()
+                                }
+                            }
+                        }
+                        contentRow.addView(trashBtn)
+
+                        contentRow.addView(
+                            makeSegmentPill(
+                                icon = M3Icon.CLOSE,
+                                label = null,
+                                leftR = pillInnerR,
+                                rightR = pillOuterR,
+                                fillCol = uiSurfaceHigh,
+                                tintCol = COLOR_TEXT_BRIGHT,
+                                marginEndDp = 0,
+                                weightVal = 0.85f
+                            ) {
+                                trashConfirmExpanded = false
+                                selectedSftpPaths.clear()
+                                rebuildUniversalTermPill(true)
+                                activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                            }
+                        )
+                    }
+                    2 -> {
+                        contentRow.addView(
+                            makeSegmentPill(
+                                icon = M3Icon.TERMINAL,
+                                label = "${selectedPackageNames.size}",
+                                leftR = pillOuterR,
+                                rightR = pillInnerR,
+                                fillCol = uiAccentContainer,
+                                tintCol = uiOnAccentContainer,
+                                weightVal = 1.0f,
+                                minW = dp(54),
+                                captureLabelRef = true
+                            ) {
+                                exitToTerminalAnimated()
+                            }
+                        )
+                        contentRow.addView(
+                            makeSegmentPill(
+                                icon = M3Icon.SELECT_ALL,
+                                label = tr("Все", "All"),
+                                leftR = pillInnerR,
+                                rightR = pillInnerR,
+                                fillCol = uiSurfaceHigh,
+                                tintCol = COLOR_TEXT_BRIGHT,
+                                weightVal = 1.15f
+                            ) {
+                                trashConfirmExpanded = false
+                                if (selectedPackageNames.size >= lastUserPackageNames.size && lastUserPackageNames.isNotEmpty()) {
+                                    selectedPackageNames.clear()
+                                    rebuildUniversalTermPill(true)
+                                } else {
+                                    selectedPackageNames.addAll(lastUserPackageNames)
+                                    rebuildUniversalTermPill(false)
+                                }
+                                activePackagesPopulateCallback?.invoke()
+                            }
+                        )
+                        val pkgTrashBtn = LinearLayout(this@TermuxActivity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER
+                            background = makeConnectedSegmentDrawable(
+                                COLOR_ROOT_CONTAINER,
+                                if (trashConfirmExpanded) pillOuterR else pillInnerR,
+                                if (trashConfirmExpanded) pillOuterR else pillInnerR
+                            )
+                            setPadding(dp(12), 0, dp(12), 0)
+                            layoutParams = LinearLayout.LayoutParams(
+                                0,
+                                pillInnerH,
+                                if (trashConfirmExpanded) 2.1f else 1.25f
+                            ).apply {
+                                marginEnd = dp(2)
+                            }
+                            addView(
+                                MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
+                                    layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                                        marginEnd = dp(5)
+                                    }
+                                }
+                            )
+                            addView(TextView(this@TermuxActivity).apply {
+                                text = if (trashConfirmExpanded) tr("Уверены?", "Sure?") else tr("Удалить", "Remove")
+                                setSingleLine(true)
+                                setTextColor(COLOR_ROOT)
+                                typeface = Typeface.DEFAULT_BOLD
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            })
+                            attachSmoothPressAnimation(this, 0.93f)
+                            setOnClickListener {
+                                if (!trashConfirmExpanded) {
+                                    triggerHaptic(1.1f)
+                                    trashConfirmExpanded = true
+                                    rebuildUniversalTermPill(true)
+                                } else {
+                                    triggerHaptic(1.35f)
+                                    val pkgsToRemove = selectedPackageNames.joinToString(" ")
+                                    selectedPackageNames.clear()
+                                    trashConfirmExpanded = false
+                                    dlg.dismiss()
+                                    nativeSendText("apt remove -y $pkgsToRemove\n", false)
+                                }
+                            }
+                        }
+                        contentRow.addView(pkgTrashBtn)
+
+                        contentRow.addView(
+                            makeSegmentPill(
+                                icon = M3Icon.CLOSE,
+                                label = null,
+                                leftR = pillInnerR,
+                                rightR = pillOuterR,
+                                fillCol = uiSurfaceHigh,
+                                tintCol = COLOR_TEXT_BRIGHT,
+                                marginEndDp = 0,
+                                weightVal = 0.85f
+                            ) {
+                                trashConfirmExpanded = false
+                                selectedPackageNames.clear()
+                                rebuildUniversalTermPill(true)
+                                activePackagesPopulateCallback?.invoke()
+                            }
+                        )
+                    }
+                    3 -> {
+                        val termDrawerChip = makeSegmentPill(
+                            icon = M3Icon.TERMINAL,
+                            label = null,
+                            leftR = pillOuterR,
+                            rightR = pillInnerR,
+                            fillCol = uiAccentContainer,
+                            tintCol = uiOnAccentContainer,
+                            marginEndDp = 3,
+                            weightVal = 0f,
+                            minW = dp(36)
+                        ) {
+                            exitToTerminalAnimated()
+                        }
+                        contentRow.addView(termDrawerChip)
+
+                        val curSrc = currentSftpSourceCode()
+                        val srcHotbarOuter = FrameLayout(this@TermuxActivity).apply {
+                            clipChildren = true
+                            clipToPadding = true
+                            layoutParams = LinearLayout.LayoutParams(0, pillInnerH, 1f).apply {
+                                marginEnd = dp(3)
+                            }
+                        }
+                        val srcSlidingPill = View(this@TermuxActivity).apply {
+                            background = makeLiquidGlassPillDrawable(activePillColor, pillOuterR.roundToInt())
+                            layoutParams = FrameLayout.LayoutParams(0, pillInnerH)
+                        }
+                        srcHotbarOuter.addView(srcSlidingPill)
+
+                        val srcHotbarRow = LinearLayout(this@TermuxActivity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            layoutParams = FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                pillInnerH
+                            )
+                        }
+                        srcHotbarOuter.addView(srcHotbarRow)
+
+                        val sources = listOf(
+                            Triple(0, M3Icon.FOLDER, "Termux"),
+                            Triple(1, M3Icon.STORAGE, "SD"),
+                            Triple(2, M3Icon.ROOT_HASH, "Root"),
+                            Triple(3, M3Icon.SERVER, "SSH")
+                        )
+                        val srcTabViews = ArrayList<LinearLayout>(4)
+                        val srcIcons = ArrayList<MaterialIconView>(4)
+                        val srcLabels = ArrayList<TextView>(4)
+                        val srcSelProgs = FloatArray(4) { idx -> if (idx == curSrc) 1f else 0f }
+                        var srcSwitchAnim: ValueAnimator? = null
+
+                        fun updateSrcHotbarGeometry() {
+                            for (idx in 0 until 4) {
+                                val sf = safeClamp(srcSelProgs[idx], 0f, 1f)
+                                val ic = srcIcons[idx]
+                                val icLp = ic.layoutParams as LinearLayout.LayoutParams
+                                val icW = (dpF(15f) * sf).roundToInt()
+                                val icM = (dpF(4f) * sf).roundToInt()
+                                ic.visibility = View.VISIBLE
+                                ic.alpha = sf
+                                ic.scaleX = 0.65f + 0.35f * sf
+                                ic.scaleY = 0.65f + 0.35f * sf
+                                if (icLp.width != icW || icLp.marginEnd != icM) {
+                                    icLp.width = icW
+                                    icLp.marginEnd = icM
+                                    ic.layoutParams = icLp
+                                }
+                                val box = srcTabViews[idx]
+                                val lp = box.layoutParams as LinearLayout.LayoutParams
+                                val targetW = 0.86f + 0.50f * sf
+                                if (abs(lp.weight - targetW) > 0.004f) {
+                                    lp.weight = targetW
+                                    box.layoutParams = lp
+                                }
+                                srcLabels[idx].setTextColor(blendColor(COLOR_TEXT_DIM, COLOR_TEXT_BRIGHT, sf))
+                            }
+                            (srcSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
+                                syncLiquidPillGeometryNow(srcSlidingPill, srcHotbarOuter, st)
                             }
                         }
 
-                        if (accPill != null) {
-                            val accFade = safeClamp((p - 0.10f) / 0.90f, 0f, 1f)
-                            accPill.alpha = accFade
-                            accPill.scaleX = 0.82f + 0.18f * accFade
-                            accPill.scaleY = 0.82f + 0.18f * accFade
-                            accPill.translationX = -dpF(4f) * (1f - accFade)
+                        fun selectSourceAnimated(sCode: Int, targetBox: LinearLayout, onSwitched: () -> Unit) {
+                            srcSwitchAnim?.cancel()
+                            val startProgs = FloatArray(4) { srcSelProgs[it] }
+                            srcSwitchAnim = animEngine.drive("srcSwitch", 230L, 0, onStep = { t ->
+                                val p = safeClamp(t, 0f, 1f)
+                                for (i in 0 until 4) {
+                                    val goal = if (i == sCode) 1f else 0f
+                                    srcSelProgs[i] = startProgs[i] + (goal - startProgs[i]) * p
+                                }
+                                updateSrcHotbarGeometry()
+                            })
+                            animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, targetBox, animate = true)
+                            srcHotbarRow.postDelayed({
+                                onSwitched()
+                            }, 175L)
                         }
 
-                        val startIndex = if (accPill != null) 2 else 1
-                        for (cIdx in startIndex until termOuterFrame.childCount) {
-                            val ch = termOuterFrame.getChildAt(cIdx)
-                            ch.alpha = (inv * inv).coerceIn(0f, 1f)
-                            ch.translationX = -dpF(12f) * p
+                        for ((sCode, sIcon, sLbl) in sources) {
+                            val isSel = (curSrc == sCode)
+                            val ic = MaterialIconView(this@TermuxActivity, sIcon, uiOnAccentContainer, 15f, 2.0f).apply {
+                                layoutParams = LinearLayout.LayoutParams(if (isSel) dp(15) else 0, dp(15)).apply {
+                                    marginEnd = if (isSel) dp(4) else 0
+                                }
+                                alpha = if (isSel) 1f else 0f
+                            }
+                            val tv = TextView(this@TermuxActivity).apply {
+                                text = sLbl
+                                setSingleLine(true)
+                                setTextColor(if (isSel) COLOR_TEXT_BRIGHT else COLOR_TEXT_DIM)
+                                typeface = Typeface.DEFAULT_BOLD
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
+                            }
+                            val box = LinearLayout(this@TermuxActivity).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER
+                                setPadding(dp(4), 0, dp(4), 0)
+                                layoutParams = LinearLayout.LayoutParams(
+                                    0,
+                                    pillInnerH,
+                                    if (isSel) 1.36f else 0.86f
+                                )
+                                addView(ic)
+                                addView(tv)
+                                attachSmoothPressAnimation(this, 0.94f)
+                                setOnClickListener {
+                                    triggerHaptic(0.85f)
+                                    when (sCode) {
+                                        0 -> {
+                                            selectSourceAnimated(0, this) {
+                                                activeSftpServer = null
+                                                localCurrentDir = appRootDir
+                                                prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).apply()
+                                                termDrawerExpanded = false
+                                                rebuildUniversalTermPill(true)
+                                                activeSftpBreadcrumbsCallback?.invoke(true)
+                                                activeSftpRefreshCallback?.invoke(false, null)
+                                            }
+                                        }
+                                        1 -> {
+                                            val switchToSd = {
+                                                selectSourceAnimated(1, this) {
+                                                    activeSftpServer = null
+                                                    localCurrentDir = sdDirGlobal
+                                                    prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).apply()
+                                                    termDrawerExpanded = false
+                                                    rebuildUniversalTermPill(true)
+                                                    activeSftpBreadcrumbsCallback?.invoke(true)
+                                                    activeSftpRefreshCallback?.invoke(false, null)
+                                                }
+                                            }
+                                            if (!hasAllFilesAccessPermission() && !hasStandardStoragePermission()) {
+                                                showStoragePermissionsModal { switchToSd() }
+                                            } else {
+                                                switchToSd()
+                                            }
+                                        }
+                                        2 -> {
+                                            selectSourceAnimated(2, this) {
+                                                activeSftpServer = null
+                                                localCurrentDir = fsRootDir
+                                                prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).apply()
+                                                termDrawerExpanded = false
+                                                rebuildUniversalTermPill(true)
+                                                activeSftpBreadcrumbsCallback?.invoke(true)
+                                                activeSftpRefreshCallback?.invoke(false, null)
+                                            }
+                                        }
+                                        3 -> {
+                                            val saved = loadSavedSftpServers()
+                                            if (saved.isEmpty()) {
+                                                showSftpServerConfigModal(null) { srvNew ->
+                                                    selectSourceAnimated(3, this) {
+                                                        activeSftpServer = srvNew
+                                                        remoteCurrentPath = srvNew.remotePath
+                                                        termDrawerExpanded = false
+                                                        rebuildUniversalTermPill(true)
+                                                        activeSftpBreadcrumbsCallback?.invoke(true)
+                                                        activeSftpRefreshCallback?.invoke(false, null)
+                                                    }
+                                                }
+                                            } else if (saved.size == 1 && activeSftpServer == null) {
+                                                val onlySrv = saved[0]
+                                                selectSourceAnimated(3, this) {
+                                                    activeSftpServer = onlySrv
+                                                    remoteCurrentPath = onlySrv.remotePath
+                                                    termDrawerExpanded = false
+                                                    rebuildUniversalTermPill(true)
+                                                    activeSftpBreadcrumbsCallback?.invoke(true)
+                                                    activeSftpRefreshCallback?.invoke(false, null)
+                                                }
+                                            } else {
+                                                showSftpServersListModal { chosenSrv ->
+                                                    selectSourceAnimated(3, this) {
+                                                        activeSftpServer = chosenSrv
+                                                        remoteCurrentPath = chosenSrv.remotePath
+                                                        termDrawerExpanded = false
+                                                        rebuildUniversalTermPill(true)
+                                                        activeSftpBreadcrumbsCallback?.invoke(true)
+                                                        activeSftpRefreshCallback?.invoke(false, null)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            srcTabViews.add(box)
+                            srcIcons.add(ic)
+                            srcLabels.add(tv)
+                            srcHotbarRow.addView(box)
                         }
+                        srcHotbarRow.post {
+                            val curTargetBox = srcTabViews.getOrNull(curSrc)
+                            if (curTargetBox != null) {
+                                animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, curTargetBox, animate = false)
+                            }
+                        }
+                        contentRow.addView(srcHotbarOuter)
 
-                        val fadeP = safeClamp((p - 0.08f) / 0.92f, 0f, 1f)
-                        hubTabsOuter.alpha = fadeP
-                        hubTabsOuter.scaleX = 0.94f + 0.06f * fadeP
-                        hubTabsOuter.scaleY = 0.94f + 0.06f * fadeP
-                        (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
-                            syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
+                        val closeChip = makeSegmentPill(
+                            icon = M3Icon.CLOSE,
+                            label = null,
+                            leftR = pillInnerR,
+                            rightR = pillOuterR,
+                            fillCol = uiSurfaceHigh,
+                            tintCol = COLOR_TEXT_BRIGHT,
+                            marginEndDp = 0,
+                            weightVal = 0f,
+                            minW = dp(34)
+                        ) {
+                            termDrawerExpanded = false
+                            rebuildUniversalTermPill(true)
+                        }
+                        contentRow.addView(closeChip)
+                    }
+                    else -> {
+                        // Mode 0: Default Compact State
+                        val showSourceAccessory = (activeTab == 1)
+                        val wantAccessory = hasPasteClipboard || showSourceAccessory
+                        val mainLeftR = pillOuterR
+                        val mainRightR = if (wantAccessory) pillInnerR else pillOuterR
+                        val termBackChipBg = makeConnectedSegmentDrawable(uiAccentContainer, mainLeftR, mainRightR)
+
+                        val termBackIcon = MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiOnAccentContainer, 18f, 2.0f).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(19), dp(19)).apply {
+                                marginEnd = dp(5)
+                            }
+                        }
+                        val termBackLabel = TextView(this@TermuxActivity).apply {
+                            text = tr("Терминал", "Terminal")
+                            setSingleLine(true)
+                            setTextColor(uiOnAccentContainer)
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        }
+                        var swipeStartX = 0f
+                        var swipeTriggered = false
+                        val termBackChip = LinearLayout(this@TermuxActivity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER
+                            background = termBackChipBg
+                            setPadding(dp(12), 0, dp(13), 0)
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                pillInnerH
+                            ).apply {
+                                if (wantAccessory) marginEnd = dp(2)
+                            }
+                            addView(termBackIcon)
+                            addView(termBackLabel)
+                            attachSmoothPressAnimation(this, 0.94f)
+                            if (activeTab == 1) {
+                                setOnTouchListener { _, ev ->
+                                    when (ev.actionMasked) {
+                                        MotionEvent.ACTION_DOWN -> {
+                                            swipeStartX = ev.rawX
+                                            swipeTriggered = false
+                                            false
+                                        }
+                                        MotionEvent.ACTION_MOVE -> {
+                                            if (!swipeTriggered && (ev.rawX - swipeStartX) > dpF(26f)) {
+                                                swipeTriggered = true
+                                                triggerHaptic(1.0f)
+                                                termDrawerExpanded = true
+                                                rebuildUniversalTermPill(true)
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                        else -> swipeTriggered
+                                    }
+                                }
+                                setOnLongClickListener {
+                                    triggerHaptic(1.15f)
+                                    termDrawerExpanded = true
+                                    rebuildUniversalTermPill(true)
+                                    true
+                                }
+                            }
+                            setOnClickListener {
+                                if (!swipeTriggered) {
+                                    exitToTerminalAnimated()
+                                }
+                            }
+                        }
+                        contentRow.addView(termBackChip)
+
+                        if (wantAccessory) {
+                            val accessoryPill = createAccessoryPillView()
+                            contentRow.addView(accessoryPill)
                         }
                     }
-                    addListener(object : android.animation.AnimatorListenerAdapter() {
-                        override fun onAnimationEnd(animation: android.animation.Animator) {
-                            if (!termDrawerExpanded && selectedSftpPaths.isEmpty() && selectedPackageNames.isEmpty()) {
-                                currentTermPillMode = -1
-                                termAccessoryProg = if (activeTab == 1) 1f else 0f
-                                rebuildUniversalTermPill(false)
-                            }
-                        }
-                    })
-                    start()
                 }
-                return@rebuildPillLambda
+                return contentRow
             }
 
+            val prevMode = currentTermPillMode
             currentTermPillMode = targetMode
             lastTermPillTrashConfirm = trashConfirmExpanded
             lastTermPillHasClip = hasPasteClipboard
@@ -7355,892 +7850,190 @@ class TermuxActivity : Activity() {
 
             termExpandAnim?.cancel()
             termAccessoryAnim?.cancel()
-            termOuterFrame.removeAllViews()
 
-            if (isFileSelectionMode) {
-                val srv = activeSftpServer
-                val activeDirStr = if (srv == null) localCurrentDir.absolutePath else remoteCurrentPath
+            val startTermW = termOuterFrame.width
 
-                // 1. Compact Terminal icon + selected count (fixed minWidth so count changes never jitter!)
-                termOuterFrame.addView(
-                    makeSegmentPill(
-                        icon = M3Icon.TERMINAL,
-                        label = "${selectedSftpPaths.size}",
-                        leftR = pillOuterR,
-                        rightR = pillInnerR,
-                        fillCol = uiAccentContainer,
-                        tintCol = uiOnAccentContainer,
-                        weightVal = 1.05f,
-                        minW = dp(54),
-                        captureLabelRef = true
-                    ) {
-                        exitToTerminalAnimated()
-                    }
-                )
-                // 2. Select All icon (M3Icon.SELECT_ALL)
-                termOuterFrame.addView(
-                    makeSegmentPill(
-                        icon = M3Icon.SELECT_ALL,
-                        label = null,
-                        leftR = pillInnerR,
-                        rightR = pillInnerR,
-                        fillCol = uiSurfaceHigh,
-                        tintCol = COLOR_TEXT_BRIGHT,
-                        weightVal = 0.85f
-                    ) {
-                        trashConfirmExpanded = false
-                        if (selectedSftpPaths.size >= lastRenderedEntries.size && lastRenderedEntries.isNotEmpty()) {
-                            selectedSftpPaths.clear()
-                            rebuildUniversalTermPill(true)
-                        } else {
-                            for (e in lastRenderedEntries) {
-                                selectedSftpPaths.add(e.path)
-                            }
-                            rebuildUniversalTermPill(false)
-                        }
-                        activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
-                    }
-                )
-                if (srv == null) {
-                    // 3. Copy icon (M3Icon.COPY)
-                    termOuterFrame.addView(
-                        makeSegmentPill(
-                            icon = M3Icon.COPY,
-                            label = null,
-                            leftR = pillInnerR,
-                            rightR = pillInnerR,
-                            fillCol = uiSurfaceHigh,
-                            tintCol = COLOR_TEXT_BRIGHT,
-                            weightVal = 0.85f
-                        ) {
-                            trashConfirmExpanded = false
-                            batchClipSources.clear()
-                            batchClipSources.addAll(selectedSftpPaths)
-                            batchClipIsMove = false
-                            fileClipSource = null
-                            selectedSftpPaths.clear()
-                            rebuildUniversalTermPill(true)
-                            activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
-                        }
-                    )
-                    // 4. Cut icon (M3Icon.CUT - scissors)
-                    termOuterFrame.addView(
-                        makeSegmentPill(
-                            icon = M3Icon.CUT,
-                            label = null,
-                            leftR = pillInnerR,
-                            rightR = pillInnerR,
-                            fillCol = uiSurfaceHigh,
-                            tintCol = COLOR_TEXT_BRIGHT,
-                            weightVal = 0.85f
-                        ) {
-                            trashConfirmExpanded = false
-                            batchClipSources.clear()
-                            batchClipSources.addAll(selectedSftpPaths)
-                            batchClipIsMove = true
-                            fileClipSource = null
-                            selectedSftpPaths.clear()
-                            rebuildUniversalTermPill(true)
-                            activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
-                        }
-                    )
-                }
-                // 5. Compress to .zip icon (M3Icon.ARCHIVE_ZIP)
-                termOuterFrame.addView(
-                    makeSegmentPill(
-                        icon = M3Icon.ARCHIVE_ZIP,
-                        label = null,
-                        leftR = pillInnerR,
-                        rightR = pillInnerR,
-                        fillCol = uiSurfaceHigh,
-                        tintCol = COLOR_TEXT_BRIGHT,
-                        weightVal = 0.85f
-                    ) {
-                        trashConfirmExpanded = false
-                        val targets = selectedSftpPaths.toList()
-                        val archiveName = if (targets.size == 1) {
-                            "${targets[0].substringAfterLast('/')}.zip"
-                        } else {
-                            "archive_${System.currentTimeMillis() / 1000}.zip"
-                        }
-                        val archivePath = if (activeDirStr == "/") "/$archiveName" else "$activeDirStr/$archiveName"
-                        selectedSftpPaths.clear()
-                        rebuildUniversalTermPill(true)
-                        activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
-                        compressPathsToZipAsync(srv, activeDirStr, targets, archivePath) { _, createdName ->
-                            Toast.makeText(this, tr("Создан архив: $createdName", "Archived: $createdName"), Toast.LENGTH_SHORT).show()
-                            activeSftpRefreshCallback?.invoke(true, null)
-                        }
-                    }
-                )
-                // 6. Expandable Trash Icon -> on 1st tap smoothly unfolds in-place with "Уверены?"!
-                val trashBg = makeConnectedSegmentDrawable(
-                    COLOR_ROOT_CONTAINER,
-                    if (trashConfirmExpanded) pillOuterR else pillInnerR,
-                    if (trashConfirmExpanded) pillOuterR else pillInnerR
-                )
-                val trashIconView = MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
-                        marginEnd = if (trashConfirmExpanded) dp(5) else 0
-                    }
-                }
-                val trashSureTv = TextView(this@TermuxActivity).apply {
-                    text = tr("Уверены?", "Sure?")
-                    setSingleLine(true)
-                    setTextColor(COLOR_ROOT)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
-                    alpha = if (trashConfirmExpanded) 1f else 0f
-                    visibility = if (trashConfirmExpanded) View.VISIBLE else View.GONE
-                }
-                val trashBtn = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER
-                    background = trashBg
-                    setPadding(dp(10), 0, dp(10), 0)
-                    layoutParams = LinearLayout.LayoutParams(
-                        0,
-                        pillInnerH,
-                        if (trashConfirmExpanded) 2.15f else 0.90f
-                    ).apply {
-                        marginEnd = dp(2)
-                    }
-                    addView(trashIconView)
-                    addView(trashSureTv)
-                    attachSmoothPressAnimation(this, 0.93f)
-                    setOnClickListener {
-                        if (!trashConfirmExpanded) {
-                            triggerHaptic(1.1f)
-                            trashConfirmExpanded = true
-                            lastTermPillTrashConfirm = true
-                            trashSureTv.visibility = View.VISIBLE
-                            trashSureTv.alpha = 0f
-                            animEngine.drive(this, 240L, 0, onStep = { t ->
-                                val p = safeClamp(t, 0f, 1f)
-                                val curR = pillInnerR + (pillOuterR - pillInnerR) * p
-                                trashBg.cornerRadii = floatArrayOf(curR, curR, curR, curR, curR, curR, curR, curR)
-                                val lp = layoutParams as LinearLayout.LayoutParams
-                                lp.weight = 0.90f + (2.15f - 0.90f) * p
-                                layoutParams = lp
-                                val icLp = trashIconView.layoutParams as LinearLayout.LayoutParams
-                                icLp.marginEnd = (dpF(5f) * p).roundToInt()
-                                trashIconView.layoutParams = icLp
-                                trashSureTv.alpha = safeClamp((p - 0.18f) / 0.82f, 0f, 1f)
-                            })
-                        } else {
-                            triggerHaptic(1.35f)
-                            trashConfirmExpanded = false
-                            val toDel = selectedSftpPaths.toList()
-                            selectedSftpPaths.clear()
-                            rebuildUniversalTermPill(true)
-                            val joined = toDel.joinToString(" ") { shellEscapeSingle(it) }
-                            Thread {
-                                if (srv == null) {
-                                    var allDeleted = true
-                                    for (p in toDel) {
-                                        if (!File(p).deleteRecursively()) allDeleted = false
-                                    }
-                                    if (!allDeleted) {
-                                        nativeExecLocalRootCmd("rm -rf -- $joined")
-                                    }
-                                } else {
-                                    runRemoteSftpViaCpp26(srv, "rm -rf -- $joined")
-                                }
-                                runOnUiThread { activeSftpRefreshCallback?.invoke(true, null) }
-                            }.start()
-                        }
-                    }
-                }
-                termOuterFrame.addView(trashBtn)
-
-                // 7. Close/Clear selection icon
-                termOuterFrame.addView(
-                    makeSegmentPill(
-                        icon = M3Icon.CLOSE,
-                        label = null,
-                        leftR = pillInnerR,
-                        rightR = pillOuterR,
-                        fillCol = uiSurfaceHigh,
-                        tintCol = COLOR_TEXT_BRIGHT,
-                        marginEndDp = 0,
-                        weightVal = 0.85f
-                    ) {
-                        trashConfirmExpanded = false
-                        selectedSftpPaths.clear()
-                        rebuildUniversalTermPill(true)
-                        activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
-                    }
-                )
-            } else if (isPkgSelectionMode) {
-                // Batch Package Selection Toolbar in Пакеты tab (in-place counter update!)
-                termOuterFrame.addView(
-                    makeSegmentPill(
-                        icon = M3Icon.TERMINAL,
-                        label = "${selectedPackageNames.size}",
-                        leftR = pillOuterR,
-                        rightR = pillInnerR,
-                        fillCol = uiAccentContainer,
-                        tintCol = uiOnAccentContainer,
-                        weightVal = 1.0f,
-                        minW = dp(54),
-                        captureLabelRef = true
-                    ) {
-                        exitToTerminalAnimated()
-                    }
-                )
-                termOuterFrame.addView(
-                    makeSegmentPill(
-                        icon = M3Icon.SELECT_ALL,
-                        label = tr("Все", "All"),
-                        leftR = pillInnerR,
-                        rightR = pillInnerR,
-                        fillCol = uiSurfaceHigh,
-                        tintCol = COLOR_TEXT_BRIGHT,
-                        weightVal = 1.15f
-                    ) {
-                        trashConfirmExpanded = false
-                        if (selectedPackageNames.size >= lastUserPackageNames.size && lastUserPackageNames.isNotEmpty()) {
-                            selectedPackageNames.clear()
-                            rebuildUniversalTermPill(true)
-                        } else {
-                            selectedPackageNames.addAll(lastUserPackageNames)
-                            rebuildUniversalTermPill(false)
-                        }
-                        activePackagesPopulateCallback?.invoke()
-                    }
-                )
-                val pkgTrashBtn = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER
-                    background = makeConnectedSegmentDrawable(
-                        COLOR_ROOT_CONTAINER,
-                        if (trashConfirmExpanded) pillOuterR else pillInnerR,
-                        if (trashConfirmExpanded) pillOuterR else pillInnerR
-                    )
-                    setPadding(dp(12), 0, dp(12), 0)
-                    layoutParams = LinearLayout.LayoutParams(
-                        0,
-                        pillInnerH,
-                        if (trashConfirmExpanded) 2.1f else 1.25f
-                    ).apply {
-                        marginEnd = dp(2)
-                    }
-                    addView(
-                        MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
-                            layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
-                                marginEnd = dp(5)
-                            }
-                        }
-                    )
-                    addView(TextView(this@TermuxActivity).apply {
-                        text = if (trashConfirmExpanded) tr("Уверены?", "Sure?") else tr("Удалить", "Remove")
-                        setSingleLine(true)
-                        setTextColor(COLOR_ROOT)
-                        typeface = Typeface.DEFAULT_BOLD
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    })
-                    attachSmoothPressAnimation(this, 0.93f)
-                    setOnClickListener {
-                        if (!trashConfirmExpanded) {
-                            triggerHaptic(1.1f)
-                            trashConfirmExpanded = true
-                            rebuildUniversalTermPill(true)
-                        } else {
-                            triggerHaptic(1.35f)
-                            val pkgsToRemove = selectedPackageNames.joinToString(" ")
-                            selectedPackageNames.clear()
-                            trashConfirmExpanded = false
-                            dlg.dismiss()
-                            nativeSendText("apt remove -y $pkgsToRemove\n", false)
-                        }
-                    }
-                }
-                termOuterFrame.addView(pkgTrashBtn)
-
-                termOuterFrame.addView(
-                    makeSegmentPill(
-                        icon = M3Icon.CLOSE,
-                        label = null,
-                        leftR = pillInnerR,
-                        rightR = pillOuterR,
-                        fillCol = uiSurfaceHigh,
-                        tintCol = COLOR_TEXT_BRIGHT,
-                        marginEndDp = 0,
-                        weightVal = 0.85f
-                    ) {
-                        trashConfirmExpanded = false
-                        selectedPackageNames.clear()
-                        rebuildUniversalTermPill(true)
-                        activePackagesPopulateCallback?.invoke()
-                    }
-                )
-            } else if (activeTab == 1 && termDrawerExpanded) {
-                // Файлы Source Switcher Hotbar inside "Терминал" capsule:
-                // Smoothly compresses "Терминал" into a compact icon chip [ >_ ] while unfolding [ Termux | SD | Root | SSH ]!
-                val startChipFromMorph = animateMorph && !prevExpandedRight
-                val termDrawerIcon = MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiOnAccentContainer, 18f, 2.0f).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(19), dp(19)).apply {
-                        marginEnd = if (startChipFromMorph) dp(5) else 0
-                    }
-                }
-                val termDrawerLabel = TextView(this@TermuxActivity).apply {
-                    text = tr("Терминал", "Terminal")
-                    setSingleLine(true)
-                    setTextColor(uiOnAccentContainer)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                    alpha = if (startChipFromMorph) 1f else 0f
-                    visibility = if (startChipFromMorph) View.VISIBLE else View.GONE
-                }
-                termDrawerLabel.measure(
+            if (animateMorph && prevMode > 0 && targetMode == 0 && termOuterFrame.childCount > 0 && startTermW > dp(140)) {
+                // Smooth collapse / fold into compact capsule
+                val oldRow = termOuterFrame.getChildAt(termOuterFrame.childCount - 1)
+                val newRow = buildContentRow(0)
+                newRow.measure(
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
                     View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
                 )
-                val fullTermLabelW = termDrawerLabel.measuredWidth.coerceAtLeast(dp(58))
-                termDrawerLabel.layoutParams = LinearLayout.LayoutParams(
-                    if (startChipFromMorph) fullTermLabelW else 0,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-                val termDrawerChip = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER
-                    minimumWidth = dp(36)
-                    background = makeConnectedSegmentDrawable(uiAccentContainer, pillOuterR, pillInnerR)
-                    val initHPad = if (startChipFromMorph) dp(12) else dp(8)
-                    setPadding(initHPad, 0, initHPad, 0)
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        pillInnerH
-                    ).apply {
-                        marginEnd = dp(3)
-                    }
-                    addView(termDrawerIcon)
-                    addView(termDrawerLabel)
-                    attachSmoothPressAnimation(this, 0.94f)
-                    setOnClickListener {
-                        exitToTerminalAnimated()
-                    }
-                }
-                termOuterFrame.addView(termDrawerChip)
+                val exactCompactW = newRow.measuredWidth + termOuterFrame.paddingLeft + termOuterFrame.paddingRight
+                newRow.alpha = 0f
+                newRow.scaleX = 0.94f
+                newRow.scaleY = 0.94f
+                termOuterFrame.addView(newRow)
 
-                val curSrc = currentSftpSourceCode()
-                val srcHotbarOuter = FrameLayout(this).apply {
-                    clipChildren = true
-                    clipToPadding = true
-                    layoutParams = LinearLayout.LayoutParams(0, pillInnerH, 1f).apply {
-                        marginEnd = dp(3)
-                    }
-                }
-                val srcSlidingPill = View(this).apply {
-                    background = makeLiquidGlassPillDrawable(activePillColor, pillOuterR.roundToInt())
-                    layoutParams = FrameLayout.LayoutParams(0, pillInnerH)
-                }
-                srcHotbarOuter.addView(srcSlidingPill)
-
-                val srcHotbarRow = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        pillInnerH
-                    )
-                }
-                srcHotbarOuter.addView(srcHotbarRow)
-
-                val sources = listOf(
-                    Triple(0, M3Icon.FOLDER, "Termux"),
-                    Triple(1, M3Icon.STORAGE, "SD"),
-                    Triple(2, M3Icon.ROOT_HASH, "Root"),
-                    Triple(3, M3Icon.SERVER, "SSH")
-                )
-                val srcTabViews = ArrayList<LinearLayout>(4)
-                val srcIcons = ArrayList<MaterialIconView>(4)
-                val srcLabels = ArrayList<TextView>(4)
-                val srcSelProgs = FloatArray(4) { idx -> if (idx == curSrc) 1f else 0f }
-                var srcSwitchAnim: ValueAnimator? = null
-
-                fun updateSrcHotbarGeometry() {
-                    for (idx in 0 until 4) {
-                        val sf = safeClamp(srcSelProgs[idx], 0f, 1f)
-                        val ic = srcIcons[idx]
-                        val icLp = ic.layoutParams as LinearLayout.LayoutParams
-                        val icW = (dpF(15f) * sf).roundToInt()
-                        val icM = (dpF(4f) * sf).roundToInt()
-                        ic.visibility = View.VISIBLE
-                        ic.alpha = sf
-                        ic.scaleX = 0.65f + 0.35f * sf
-                        ic.scaleY = 0.65f + 0.35f * sf
-                        if (icLp.width != icW || icLp.marginEnd != icM) {
-                            icLp.width = icW
-                            icLp.marginEnd = icM
-                            ic.layoutParams = icLp
-                        }
-                        val box = srcTabViews[idx]
-                        val lp = box.layoutParams as LinearLayout.LayoutParams
-                        val targetW = 0.86f + 0.50f * sf
-                        if (abs(lp.weight - targetW) > 0.004f) {
-                            lp.weight = targetW
-                            box.layoutParams = lp
-                        }
-                        srcLabels[idx].setTextColor(blendColor(COLOR_TEXT_DIM, COLOR_TEXT_BRIGHT, sf))
-                    }
-                    (srcSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
-                        syncLiquidPillGeometryNow(srcSlidingPill, srcHotbarOuter, st)
-                    }
-                }
-
-                fun selectSourceAnimated(sCode: Int, targetBox: LinearLayout, onSwitched: () -> Unit) {
-                    srcSwitchAnim?.cancel()
-                    val startProgs = FloatArray(4) { srcSelProgs[it] }
-                    srcSwitchAnim = animEngine.drive("srcSwitch", 230L, 0, onStep = { t ->
-                        val p = safeClamp(t, 0f, 1f)
-                        for (i in 0 until 4) {
-                            val goal = if (i == sCode) 1f else 0f
-                            srcSelProgs[i] = startProgs[i] + (goal - startProgs[i]) * p
-                        }
-                        updateSrcHotbarGeometry()
-                    })
-                    animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, targetBox, animate = true)
-                    srcHotbarRow.postDelayed({
-                        onSwitched()
-                    }, 175L)
-                }
-
-                for ((sCode, sIcon, sLbl) in sources) {
-                    val isSel = (curSrc == sCode)
-                    val ic = MaterialIconView(this, sIcon, uiOnAccentContainer, 15f, 2.0f).apply {
-                        layoutParams = LinearLayout.LayoutParams(if (isSel) dp(15) else 0, dp(15)).apply {
-                            marginEnd = if (isSel) dp(4) else 0
-                        }
-                        alpha = if (isSel) 1f else 0f
-                    }
-                    val tv = TextView(this).apply {
-                        text = sLbl
-                        setSingleLine(true)
-                        setTextColor(if (isSel) COLOR_TEXT_BRIGHT else COLOR_TEXT_DIM)
-                        typeface = Typeface.DEFAULT_BOLD
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
-                    }
-                    val box = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER
-                        setPadding(dp(4), 0, dp(4), 0)
-                        layoutParams = LinearLayout.LayoutParams(
-                            0,
-                            pillInnerH,
-                            if (isSel) 1.36f else 0.86f
-                        )
-                        addView(ic)
-                        addView(tv)
-                        attachSmoothPressAnimation(this, 0.94f)
-                        setOnClickListener {
-                            triggerHaptic(0.85f)
-                            when (sCode) {
-                                0 -> {
-                                    selectSourceAnimated(0, this) {
-                                        activeSftpServer = null
-                                        localCurrentDir = appRootDir
-prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).apply()
-                                        termDrawerExpanded = false
-                                        rebuildUniversalTermPill(true)
-                                        activeSftpBreadcrumbsCallback?.invoke(true)
-                                        activeSftpRefreshCallback?.invoke(false, null)
-                                    }
-                                }
-                                1 -> {
-                                    val switchToSd = {
-                                        selectSourceAnimated(1, this) {
-                                            activeSftpServer = null
-                                            localCurrentDir = sdDirGlobal
-prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).apply()
-                                            termDrawerExpanded = false
-                                            rebuildUniversalTermPill(true)
-                                            activeSftpBreadcrumbsCallback?.invoke(true)
-                                            activeSftpRefreshCallback?.invoke(false, null)
-                                        }
-                                    }
-                                    if (!hasAllFilesAccessPermission() && !hasStandardStoragePermission()) {
-                                        showStoragePermissionsModal { switchToSd() }
-                                    } else {
-                                        switchToSd()
-                                    }
-                                }
-                                2 -> {
-                                    selectSourceAnimated(2, this) {
-                                        activeSftpServer = null
-                                        localCurrentDir = fsRootDir
-prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).apply()
-                                        termDrawerExpanded = false
-                                        rebuildUniversalTermPill(true)
-                                        activeSftpBreadcrumbsCallback?.invoke(true)
-                                        activeSftpRefreshCallback?.invoke(false, null)
-                                    }
-                                }
-                                3 -> {
-                                    val saved = loadSshServers()
-                                    if (saved.isEmpty()) {
-                                        Toast.makeText(this@TermuxActivity, tr("Сначала добавьте SSH-сервер во вкладке SSH", "Add an SSH server in the SSH tab first"), Toast.LENGTH_SHORT).show()
-                                    } else if (saved.size == 1 && activeSftpServer == null) {
-                                        val srv = saved[0]
-                                        selectSourceAnimated(3, this) {
-                                            activeSftpServer = srv
-                                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
-                                            termDrawerExpanded = false
-                                            rebuildUniversalTermPill(true)
-                                            activeSftpBreadcrumbsCallback?.invoke(true)
-                                            activeSftpRefreshCallback?.invoke(false, null)
-                                        }
-                                    } else {
-                                        val curIdx = saved.indexOfFirst { it.id == activeSftpServer?.id }.coerceAtLeast(0)
-                                        showBakaSuChooseDialog(
-                                            title = tr("Выберите SSH-сервер", "Select SSH Server"),
-                                            items = saved.map { it.label },
-                                            descriptions = saved.map { "${it.username}@${it.host}:${it.port}" },
-                                            selectedIndex = curIdx
-                                        ) { chosen ->
-                                            val srv = saved[chosen]
-                                            selectSourceAnimated(3, this) {
-                                                activeSftpServer = srv
-                                                remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
-                                                termDrawerExpanded = false
-                                                rebuildUniversalTermPill(true)
-                                                activeSftpBreadcrumbsCallback?.invoke(true)
-                                                activeSftpRefreshCallback?.invoke(false, null)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    srcIcons.add(ic)
-                    srcLabels.add(tv)
-                    srcTabViews.add(box)
-                    srcHotbarRow.addView(box)
-                }
-
-                srcHotbarRow.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
-                    override fun onPreDraw(): Boolean {
-                        if (srcHotbarRow.viewTreeObserver.isAlive) {
-                            srcHotbarRow.viewTreeObserver.removeOnPreDrawListener(this)
-                        }
-                        val target = srcTabViews.getOrNull(curSrc) ?: return true
-                        animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, target, animate = false)
-                        return true
-                    }
-                })
-                termOuterFrame.addView(srcHotbarOuter)
-
-                // Collapse drawer button
-                termOuterFrame.addView(
-                    makeSegmentPill(
-                        icon = M3Icon.CLOSE,
-                        label = null,
-                        leftR = pillInnerR,
-                        rightR = pillOuterR,
-                        fillCol = uiSurfaceHigh,
-                        tintCol = COLOR_TEXT_BRIGHT,
-                        marginEndDp = 0,
-                        weightVal = 0f,
-                        minW = dp(34)
-                    ) {
-                        termDrawerExpanded = false
-                        rebuildUniversalTermPill(true)
-                    }
-                )
-            } else {
-                // Collapsed Default State:
-                // Smoothly animates the right accessory button [ 📁 ▸ ] or [ 📋 Вставить ]
-                // sliding & scaling in/out when entering or leaving the Файлы tab!
-                val showSourceAccessory = (activeTab == 1)
-                val wantAccessory = hasPasteClipboard || showSourceAccessory
-                val targetAccProg = if (wantAccessory) 1f else 0f
-                val initAccProg = if (animateMorph && prevMode == 0) termAccessoryProg else targetAccProg
-                val mainLeftR = pillOuterR
-                val initRightR = pillOuterR + (pillInnerR - pillOuterR) * initAccProg
-                val termBackChipBg = makeConnectedSegmentDrawable(uiAccentContainer, mainLeftR, initRightR)
-
-                val termBackIcon = MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiOnAccentContainer, 18f, 2.0f).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(19), dp(19)).apply {
-                        marginEnd = dp(5)
-                    }
-                }
-                val termBackLabel = TextView(this@TermuxActivity).apply {
-                    text = tr("Терминал", "Terminal")
-                    setSingleLine(true)
-                    setTextColor(uiOnAccentContainer)
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                }
-                var swipeStartX = 0f
-                var swipeTriggered = false
-                val termBackChip = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER
-                    background = termBackChipBg
-                    setPadding(dp(12), 0, dp(13), 0)
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        pillInnerH
-                    ).apply {
-                        marginEnd = (dpF(2f) * initAccProg).roundToInt()
-                    }
-                    addView(termBackIcon)
-                    addView(termBackLabel)
-                    attachSmoothPressAnimation(this, 0.94f)
-                    if (activeTab == 1) {
-                        setOnTouchListener { _, ev ->
-                            when (ev.actionMasked) {
-                                MotionEvent.ACTION_DOWN -> {
-                                    swipeStartX = ev.rawX
-                                    swipeTriggered = false
-                                    false
-                                }
-                                MotionEvent.ACTION_MOVE -> {
-                                    if (!swipeTriggered && (ev.rawX - swipeStartX) > dpF(26f)) {
-                                        swipeTriggered = true
-                                        triggerHaptic(1.0f)
-                                        termDrawerExpanded = true
-                                        rebuildUniversalTermPill(true)
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                }
-                                else -> swipeTriggered
-                            }
-                        }
-                        setOnLongClickListener {
-                            triggerHaptic(1.15f)
-                            termDrawerExpanded = true
-                            rebuildUniversalTermPill(true)
-                            true
-                        }
-                    }
-                    setOnClickListener {
-                        if (!swipeTriggered) {
-                            exitToTerminalAnimated()
-                        }
-                    }
-                }
-                termOuterFrame.addView(termBackChip)
-
-                val accessoryPill: LinearLayout = createAccessoryPillView()
-                accessoryPill.measure(
-                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-                    View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
-                )
-                val fullAccW = accessoryPill.measuredWidth.coerceAtLeast(dp(40))
-                termOuterFrame.addView(accessoryPill)
-
-                fun applyAccessoryMorph(prog: Float) {
-                    val p = safeClamp(prog, 0f, 1f)
-                    val curRightR = pillOuterR + (pillInnerR - pillOuterR) * p
-                    termBackChipBg.cornerRadii = floatArrayOf(
-                        mainLeftR, mainLeftR,
-                        curRightR, curRightR,
-                        curRightR, curRightR,
-                        mainLeftR, mainLeftR
-                    )
-                    val backLp = termBackChip.layoutParams as LinearLayout.LayoutParams
-                    val nextMargin = (dpF(2f) * p).roundToInt()
-                    if (backLp.marginEnd != nextMargin) {
-                        backLp.marginEnd = nextMargin
-                        termBackChip.layoutParams = backLp
-                    }
-                    val curAccW = (fullAccW * p).roundToInt()
-                    val accLp = accessoryPill.layoutParams as LinearLayout.LayoutParams
-                    if (curAccW <= 1) {
-                        accessoryPill.visibility = View.GONE
-                        accLp.width = 0
-                        accessoryPill.layoutParams = accLp
-                    } else {
-                        accessoryPill.visibility = View.VISIBLE
-                        accLp.width = curAccW
-                        accessoryPill.layoutParams = accLp
-                        accessoryPill.alpha = safeClamp((p - 0.12f) / 0.88f, 0f, 1f)
-                        accessoryPill.scaleX = 0.72f + 0.28f * p
-                        accessoryPill.scaleY = 0.72f + 0.28f * p
-                        accessoryPill.translationX = -dpF(6f) * (1f - p)
-                    }
-                }
-
-                if (animateMorph && prevMode == 0 && abs(targetAccProg - initAccProg) > 0.01f) {
-                    applyAccessoryMorph(initAccProg)
-                    val startP = initAccProg
-                    termAccessoryAnim = animEngine.drive("termAcc", 265L, 0, onStep = { t ->
-                        val f = safeClamp(t, 0f, 1f)
-                        termAccessoryProg = startP + (targetAccProg - startP) * f
-                        applyAccessoryMorph(termAccessoryProg)
-                    }, onEnd = {
-                        termAccessoryProg = targetAccProg
-                        applyAccessoryMorph(targetAccProg)
-                    })
-                } else {
-                    termAccessoryProg = targetAccProg
-                    applyAccessoryMorph(targetAccProg)
-                }
-            }
-
-            // Smooth horizontal unfolding & folding of "Терминал" (`termOuterFrame`) to the right!
-            val totalNavW = (topNavRow.width - topNavRow.paddingLeft - topNavRow.paddingRight)
-                .takeIf { it > 0 } ?: (resources.displayMetrics.widthPixels - dp(28))
-
-            if (isExpandedRight) {
-                if (animateMorph && !prevExpandedRight && startTermW > 0 && totalNavW > startTermW + dp(12)) {
-                    // Smoothly unfold "Терминал" from startTermW -> totalNavW while compressing & fading hubTabsOuter!
-                    hubTabsOuter.visibility = View.VISIBLE
-                    for (cIdx in 1 until termOuterFrame.childCount) {
-                        val ch = termOuterFrame.getChildAt(cIdx)
-                        ch.alpha = 0f
-                        ch.translationX = -dpF(12f)
-                        ch.scaleX = 0.90f
-                        ch.scaleY = 0.90f
-                    }
-                    termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                        duration = 270L
-                        interpolator = PathInterpolator(0.12f, 1.0f, 0.24f, 1.0f)
-                        addUpdateListener { va ->
-                            val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                            val curW = (startTermW + (totalNavW - startTermW) * t).roundToInt()
-                            val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                            lp.width = curW
-                            lp.weight = 0f
-                            lp.marginEnd = (dpF(8f) * (1f - t)).roundToInt()
-                            termOuterFrame.layoutParams = lp
-
-                            hubTabsOuter.alpha = (1f - t * 1.45f).coerceIn(0f, 1f)
-                            hubTabsOuter.scaleX = 1f - 0.08f * t
-                            hubTabsOuter.scaleY = 1f - 0.08f * t
-
-                            if (currentTermPillMode == 3 && termOuterFrame.childCount > 0) {
-                                val firstChip = termOuterFrame.getChildAt(0) as? LinearLayout
-                                if (firstChip != null && firstChip.childCount >= 2) {
-                                    val icV = firstChip.getChildAt(0)
-                                    val lblV = firstChip.getChildAt(1) as? TextView
-                                    val invT = (1f - t * 1.25f).coerceIn(0f, 1f)
-                                    if (lblV != null) {
-                                        lblV.visibility = if (invT > 0.02f) View.VISIBLE else View.GONE
-                                        lblV.alpha = invT
-                                        val lblLp = lblV.layoutParams as LinearLayout.LayoutParams
-                                        lblLp.width = (dpF(62f) * invT).roundToInt()
-                                        lblV.layoutParams = lblLp
-                                    }
-                                    val icLp = icV.layoutParams as LinearLayout.LayoutParams
-                                    icLp.marginEnd = (dpF(5f) * invT).roundToInt()
-                                    icV.layoutParams = icLp
-                                    val hPad = (dpF(8f) + dpF(4f) * invT).roundToInt()
-                                    firstChip.setPadding(hPad, 0, hPad, 0)
-                                }
-                            }
-                            for (cIdx in 1 until termOuterFrame.childCount) {
-                                val ch = termOuterFrame.getChildAt(cIdx)
-                                val delay = (cIdx - 1) * 0.05f
-                                val cp = safeClamp((t - delay) / (1f - delay).coerceAtLeast(0.4f), 0f, 1f)
-                                ch.alpha = cp
-                                ch.translationX = -dpF(12f) * (1f - cp)
-                                ch.scaleX = 0.90f + 0.10f * cp
-                                ch.scaleY = 0.90f + 0.10f * cp
-                            }
-                        }
-                        addListener(object : android.animation.AnimatorListenerAdapter() {
-                            override fun onAnimationEnd(animation: android.animation.Animator) {
-                                if (currentTermPillMode != 0) {
-                                    hubTabsOuter.visibility = View.GONE
-                                    hubTabsOuter.alpha = 1f
-                                    hubTabsOuter.scaleX = 1f
-                                    hubTabsOuter.scaleY = 1f
-                                    val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                                    lp.width = 0
-                                    lp.weight = 1f
-                                    lp.marginEnd = 0
-                                    termOuterFrame.layoutParams = lp
-                                    for (cIdx in 1 until termOuterFrame.childCount) {
-                                        val ch = termOuterFrame.getChildAt(cIdx)
-                                        ch.alpha = 1f
-                                        ch.translationX = 0f
-                                        ch.scaleX = 1f
-                                        ch.scaleY = 1f
-                                    }
-                                }
-                            }
-                        })
-                        start()
-                    }
-                } else {
-                    hubTabsOuter.visibility = View.GONE
-                    hubTabsOuter.alpha = 1f
-                    hubTabsOuter.scaleX = 1f
-                    hubTabsOuter.scaleY = 1f
-                    val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                    lp.width = 0
-                    lp.weight = 1f
-                    lp.marginEnd = 0
-                    termOuterFrame.layoutParams = lp
-                }
-            } else {
                 hubTabsOuter.visibility = View.VISIBLE
-                if (animateMorph && prevExpandedRight && startTermW > dp(160)) {
-                    // Smoothly fold "Терминал" from full width back to compact width while expanding hubTabsOuter!
-                    termOuterFrame.measure(
-                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-                        View.MeasureSpec.makeMeasureSpec(pillInnerH + dp(8), View.MeasureSpec.EXACTLY)
-                    )
-                    val targetCompactW = termOuterFrame.measuredWidth.coerceAtLeast(dp(116))
-                    hubTabsOuter.alpha = 0f
-                    hubTabsOuter.scaleX = 0.92f
-                    hubTabsOuter.scaleY = 0.92f
-                    termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                        duration = 260L
-                        interpolator = PathInterpolator(0.12f, 1.0f, 0.24f, 1.0f)
-                        addUpdateListener { va ->
-                            val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                            val curW = (startTermW + (targetCompactW - startTermW) * t).roundToInt()
-                            val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                            lp.width = curW
-                            lp.weight = 0f
-                            lp.marginEnd = (dpF(8f) * t).roundToInt()
-                            termOuterFrame.layoutParams = lp
+                hubTabsOuter.alpha = 0f
+                hubTabsOuter.scaleX = 0.94f
+                hubTabsOuter.scaleY = 0.94f
 
-                            val fadeP = safeClamp((t - 0.10f) / 0.90f, 0f, 1f)
-                            hubTabsOuter.alpha = fadeP
-                            hubTabsOuter.scaleX = 0.92f + 0.08f * fadeP
-                            hubTabsOuter.scaleY = 0.92f + 0.08f * fadeP
-                        }
-                        addListener(object : android.animation.AnimatorListenerAdapter() {
-                            override fun onAnimationEnd(animation: android.animation.Animator) {
-                                if (currentTermPillMode == 0) {
-                                    val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                                    lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
-                                    lp.weight = 0f
-                                    lp.marginEnd = dp(8)
-                                    termOuterFrame.layoutParams = lp
-                                    hubTabsOuter.alpha = 1f
-                                    hubTabsOuter.scaleX = 1f
-                                    hubTabsOuter.scaleY = 1f
-                                }
-                            }
-                        })
-                        start()
-                    }
-                } else {
-                    hubTabsOuter.alpha = 1f
-                    hubTabsOuter.scaleX = 1f
-                    hubTabsOuter.scaleY = 1f
-                    val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                    lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
-                    lp.weight = 0f
-                    lp.marginEnd = dp(8)
-                    termOuterFrame.layoutParams = lp
-                }
-                hubTabsRow.post {
-                    val activeView = hubTabContainers.getOrNull(activeTab)
-                    if (activeView != null) {
+                termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 260L
+                    interpolator = PathInterpolator(0.12f, 1.0f, 0.24f, 1.0f)
+                    addUpdateListener { va ->
+                        val p = safeClamp(va.animatedValue as Float, 0f, 1f)
+                        val curW = (startTermW + (exactCompactW - startTermW) * p).roundToInt()
+                        val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                        lp.width = curW
+                        lp.weight = 0f
+                        lp.marginEnd = (dpF(8f) * p).roundToInt()
+                        termOuterFrame.layoutParams = lp
+
+                        oldRow.alpha = (1f - p * 1.6f).coerceIn(0f, 1f)
+                        oldRow.translationX = -dpF(14f) * p
+
+                        val pNew = safeClamp((p - 0.10f) / 0.90f, 0f, 1f)
+                        newRow.alpha = pNew
+                        newRow.scaleX = 0.94f + 0.06f * pNew
+                        newRow.scaleY = 0.94f + 0.06f * pNew
+
+                        val pTab = safeClamp((p - 0.08f) / 0.92f, 0f, 1f)
+                        hubTabsOuter.alpha = pTab
+                        hubTabsOuter.scaleX = 0.94f + 0.06f * pTab
+                        hubTabsOuter.scaleY = 0.94f + 0.06f * pTab
                         (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
                             syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
                         }
                     }
+                    addListener(object : android.animation.AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                            while (termOuterFrame.childCount > 1) {
+                                termOuterFrame.removeViewAt(0)
+                            }
+                            newRow.alpha = 1f
+                            newRow.scaleX = 1f
+                            newRow.scaleY = 1f
+                            newRow.translationX = 0f
+                            val finalLp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                            finalLp.width = ViewGroup.LayoutParams.WRAP_CONTENT
+                            finalLp.weight = 0f
+                            finalLp.marginEnd = dp(8)
+                            termOuterFrame.layoutParams = finalLp
+                            hubTabsOuter.alpha = 1f
+                            hubTabsOuter.scaleX = 1f
+                            hubTabsOuter.scaleY = 1f
+                            (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
+                                syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
+                            }
+                        }
+                    })
+                    start()
                 }
+            } else if (animateMorph && prevMode == 0 && targetMode > 0 && termOuterFrame.childCount > 0) {
+                // Smooth unfold / expand into full drawer / action bar
+                val oldRow = termOuterFrame.getChildAt(termOuterFrame.childCount - 1)
+                val totalNavW = (topNavRow.width - topNavRow.paddingLeft - topNavRow.paddingRight)
+                    .takeIf { it > 0 } ?: (resources.displayMetrics.widthPixels - dp(28))
+                val newRow = buildContentRow(targetMode)
+                newRow.alpha = 0f
+                newRow.translationX = dpF(12f)
+                termOuterFrame.addView(newRow)
+
+                termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 270L
+                    interpolator = PathInterpolator(0.12f, 1.0f, 0.24f, 1.0f)
+                    addUpdateListener { va ->
+                        val p = safeClamp(va.animatedValue as Float, 0f, 1f)
+                        val curW = (startTermW + (totalNavW - startTermW) * p).roundToInt()
+                        val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                        lp.width = curW
+                        lp.weight = 0f
+                        lp.marginEnd = (dpF(8f) * (1f - p)).roundToInt()
+                        termOuterFrame.layoutParams = lp
+
+                        oldRow.alpha = (1f - p * 1.5f).coerceIn(0f, 1f)
+
+                        val pNew = safeClamp((p - 0.12f) / 0.88f, 0f, 1f)
+                        newRow.alpha = pNew
+                        newRow.translationX = dpF(12f) * (1f - pNew)
+
+                        hubTabsOuter.alpha = (1f - p * 1.45f).coerceIn(0f, 1f)
+                        hubTabsOuter.scaleX = 1f - 0.06f * p
+                        hubTabsOuter.scaleY = 1f - 0.06f * p
+                    }
+                    addListener(object : android.animation.AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                            while (termOuterFrame.childCount > 1) {
+                                termOuterFrame.removeViewAt(0)
+                            }
+                            newRow.alpha = 1f
+                            newRow.translationX = 0f
+                            val finalLp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                            finalLp.width = 0
+                            finalLp.weight = 1f
+                            finalLp.marginEnd = 0
+                            termOuterFrame.layoutParams = finalLp
+                            hubTabsOuter.visibility = View.GONE
+                            hubTabsOuter.alpha = 1f
+                            hubTabsOuter.scaleX = 1f
+                            hubTabsOuter.scaleY = 1f
+                        }
+                    })
+                    start()
+                }
+            } else if (animateMorph && prevMode == 0 && targetMode == 0 && termOuterFrame.childCount > 0) {
+                // Smooth cross-fade between compact modes (e.g. tab switch where accessory changes)
+                val oldRow = termOuterFrame.getChildAt(termOuterFrame.childCount - 1)
+                val newRow = buildContentRow(0)
+                newRow.alpha = 0f
+                termOuterFrame.addView(newRow)
+
+                termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 180L
+                    addUpdateListener { va ->
+                        val p = safeClamp(va.animatedValue as Float, 0f, 1f)
+                        oldRow.alpha = 1f - p
+                        newRow.alpha = p
+                    }
+                    addListener(object : android.animation.AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                            while (termOuterFrame.childCount > 1) {
+                                termOuterFrame.removeViewAt(0)
+                            }
+                            newRow.alpha = 1f
+                            val finalLp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                            finalLp.width = ViewGroup.LayoutParams.WRAP_CONTENT
+                            finalLp.weight = 0f
+                            finalLp.marginEnd = dp(8)
+                            termOuterFrame.layoutParams = finalLp
+                        }
+                    })
+                    start()
+                }
+            } else {
+                // Instant update / initial setup
+                termOuterFrame.removeAllViews()
+                val newRow = buildContentRow(targetMode)
+                termOuterFrame.addView(newRow)
+                val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                if (targetMode != 0) {
+                    lp.width = 0
+                    lp.weight = 1f
+                    lp.marginEnd = 0
+                    hubTabsOuter.visibility = View.GONE
+                } else {
+                    lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
+                    lp.weight = 0f
+                    lp.marginEnd = dp(8)
+                    hubTabsOuter.visibility = View.VISIBLE
+                    hubTabsOuter.alpha = 1f
+                    hubTabsOuter.scaleX = 1f
+                    hubTabsOuter.scaleY = 1f
+                    hubTabsRow.post {
+                        val activeView = hubTabContainers.getOrNull(activeTab)
+                        if (activeView != null) {
+                            (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
+                                syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
+                            }
+                        }
+                    }
+                }
+                termOuterFrame.layoutParams = lp
             }
         }
 
