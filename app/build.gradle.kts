@@ -23,9 +23,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += listOf(
-                    "-DANDROID_STL=c++_static",
-                    "-DCMAKE_CXX_STANDARD=26",
-                    "-DCMAKE_CXX_STANDARD_REQUIRED=ON"
+                    "-DANDROID_STL=c++_static"
                 )
             }
         }

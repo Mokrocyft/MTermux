@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(mtermux-core LANGUAGES C CXX ASM)
 
-# Automatically use ccache when available to cache C++26 object compilation across builds
+# Automatically use ccache when available to cache C++ object compilation across builds
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
     set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
@@ -10,10 +10,7 @@ endif()
 
 include(CheckCXXCompilerFlag)
 
-set(CMAKE_CXX_STANDARD 26)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
+# Prefer C++26 (-std=c++26 / -std=c++2c) with automatic Clang dialect detection
 check_cxx_compiler_flag("-std=c++26" HAS_CXX26)
 check_cxx_compiler_flag("-std=c++2c" HAS_CXX2C)
 if(HAS_CXX26)
