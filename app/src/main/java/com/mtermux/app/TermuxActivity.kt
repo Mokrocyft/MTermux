@@ -1823,11 +1823,17 @@ class TermuxActivity : Activity() {
                 }
                 if (onEnd != null || key != null) {
                     addListener(object : android.animation.AnimatorListenerAdapter() {
+                        private var isCancelled = false
+                        override fun onAnimationCancel(animation: android.animation.Animator) {
+                            isCancelled = true
+                        }
                         override fun onAnimationEnd(animation: android.animation.Animator) {
                             if (key != null && keyedAnimators[key] === animation) {
                                 keyedAnimators.remove(key)
                             }
-                            onEnd?.invoke()
+                            if (!isCancelled) {
+                                onEnd?.invoke()
+                            }
                         }
                     })
                 }
@@ -2189,17 +2195,21 @@ class TermuxActivity : Activity() {
                 morphAnim?.cancel()
                 val startFill = (row.tag as? Int) ?: if (selected) uiSurfaceLow else uiAccentContainer
                 val targetFill = if (selected) uiAccentContainer else uiSurfaceLow
+                val startTextCol = titleTv.currentTextColor
                 val targetTextCol = if (selected) uiOnAccentContainer else COLOR_TEXT_BRIGHT
+                val startDescCol = descTv?.currentTextColor ?: COLOR_TEXT_DIM
                 val targetDescCol = if (selected) withAlpha(uiOnAccentContainer, 200) else COLOR_TEXT_DIM
+                titleTv.typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
 
                 radioView.setCheckedAnimated(selected)
 
-                val outer = dpF(18f)
+                val outer = dpF(20f)
+                val activeOuter = dpF(22f)
                 val inner = dpF(5f)
                 val topR = if (index <= 0) outer else inner
                 val botR = if (index >= items.size - 1) outer else inner
                 val unselectedRadii = floatArrayOf(topR, topR, topR, topR, botR, botR, botR, botR)
-                val selectedRadii = floatArrayOf(outer, outer, outer, outer, outer, outer, outer, outer)
+                val selectedRadii = floatArrayOf(activeOuter, activeOuter, activeOuter, activeOuter, activeOuter, activeOuter, activeOuter, activeOuter)
 
                 val startRadii = FloatArray(8)
                 val curR = bgDrawable.cornerRadii
@@ -2212,10 +2222,10 @@ class TermuxActivity : Activity() {
                 val destRadii = if (selected) selectedRadii else unselectedRadii
 
                 morphAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 230L
+                    duration = 250L
                     interpolator = aosp17SpatialInterpolator
                     addUpdateListener { va ->
-                        val f = va.animatedValue as Float
+                        val f = (va.animatedValue as Float).coerceIn(0f, 1f)
                         val curColor = blendColor(startFill, targetFill, f)
                         row.tag = curColor
                         val curRadii = FloatArray(8) { rIdx ->
@@ -2223,13 +2233,16 @@ class TermuxActivity : Activity() {
                         }
                         bgDrawable.cornerRadii = curRadii
                         bgDrawable.setColor(curColor)
-                        titleTv.setTextColor(blendColor(titleTv.currentTextColor, targetTextCol, f))
-                        descTv?.let { dTv ->
-                            dTv.setTextColor(blendColor(dTv.currentTextColor, targetDescCol, f))
-                        }
+                        titleTv.setTextColor(blendColor(startTextCol, targetTextCol, f))
+                        descTv?.setTextColor(blendColor(startDescCol, targetDescCol, f))
                     }
                     addListener(object : android.animation.AnimatorListenerAdapter() {
+                        private var isCancelled = false
+                        override fun onAnimationCancel(animation: android.animation.Animator) {
+                            isCancelled = true
+                        }
                         override fun onAnimationEnd(animation: android.animation.Animator) {
+                            if (isCancelled) return
                             row.tag = targetFill
                             bgDrawable.cornerRadii = destRadii
                             bgDrawable.setColor(targetFill)
@@ -3236,14 +3249,19 @@ class TermuxActivity : Activity() {
     // Full-Screen AOSP Material 3 Settings Page with Predictive Back Gesture
     // (Two-layer Stage: Home Menu underneath + Sub-page on top for live preview!)
     private fun showCategorizedSettingsDialog() {
-        val dlg = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
+        val dlg = Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dlg.window?.apply {
             setBackgroundDrawable(ColorDrawable(0x00000000))
-            statusBarColor = 0x00000000
-            navigationBarColor = 0x00000000
+            addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+            clearFlags(
+                WindowManager.LayoutParams.FLAG_DIM_BEHIND or
+                    WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS or
+                    WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION
+            )
+            statusBarColor = 0xFF000000.toInt()
+            navigationBarColor = 0xFF000000.toInt()
             setDimAmount(0f)
-            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setWindowAnimations(0)
             if (Build.VERSION.SDK_INT >= 29) {
                 isStatusBarContrastEnforced = false
@@ -6445,15 +6463,25 @@ class TermuxActivity : Activity() {
     private val sftpRemoteDirCache = java.util.concurrent.ConcurrentHashMap<String, List<SftpItemEntry>>()
 
     private fun showWorkspaceHubDialog(initialTab: Int = 0) {
-        val dlg = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
+        val dlg = Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dlg.window?.apply {
             setBackgroundDrawable(ColorDrawable(0x00000000))
-            statusBarColor = 0x00000000
-            navigationBarColor = 0x00000000
+            addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+            clearFlags(
+                WindowManager.LayoutParams.FLAG_DIM_BEHIND or
+                    WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS or
+                    WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION
+            )
+            statusBarColor = 0xFF000000.toInt()
+            navigationBarColor = 0xFF000000.toInt()
             setDimAmount(0f)
-            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setWindowAnimations(0)
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+            if (Build.VERSION.SDK_INT >= 29) {
+                isStatusBarContrastEnforced = false
+                isNavigationBarContrastEnforced = false
+            }
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             attributes = attributes.apply {
                 layoutInDisplayCutoutMode =
@@ -6462,9 +6490,36 @@ class TermuxActivity : Activity() {
             setDecorFitsSystemWindows(false)
         }
 
+        var currentHubImeLiftPx = 0f
+        var activeHubBottomBarUpdater: ((Float, Boolean) -> Unit)? = null
+
         val root = FrameLayout(this).apply {
             setBackgroundColor(COLOR_AMOLED_BG)
         }
+        root.setWindowInsetsAnimationCallback(
+            object : WindowInsetsAnimation.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                override fun onProgress(
+                    insets: WindowInsets,
+                    runningAnimations: MutableList<WindowInsetsAnimation>
+                ): WindowInsets {
+                    val imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom
+                    val navBottom = insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+                    currentHubImeLiftPx = (imeBottom - navBottom).coerceAtLeast(0).toFloat()
+                    activeHubBottomBarUpdater?.invoke(currentHubImeLiftPx, true)
+                    return insets
+                }
+
+                override fun onEnd(animation: WindowInsetsAnimation) {
+                    val rw = root.rootWindowInsets
+                    if (rw != null) {
+                        val imeBottom = rw.getInsets(WindowInsets.Type.ime()).bottom
+                        val navBottom = rw.getInsets(WindowInsets.Type.navigationBars()).bottom
+                        currentHubImeLiftPx = (imeBottom - navBottom).coerceAtLeast(0).toFloat()
+                        activeHubBottomBarUpdater?.invoke(currentHubImeLiftPx, false)
+                    }
+                }
+            }
+        )
         root.setOnApplyWindowInsetsListener { v, insets ->
             val sysBars = insets.getInsets(
                 WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
@@ -6478,6 +6533,10 @@ class TermuxActivity : Activity() {
             val safeTop = max(sysBars.top, fallbackStatusBarPx) + dp(4)
             val safeBottom = sysBars.bottom + dp(6)
             v.setPadding(sysBars.left, safeTop, sysBars.right, safeBottom)
+            val imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom
+            val navBottom = insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+            currentHubImeLiftPx = (imeBottom - navBottom).coerceAtLeast(0).toFloat()
+            activeHubBottomBarUpdater?.invoke(currentHubImeLiftPx, false)
             insets
         }
         root.post { root.requestApplyInsets() }
@@ -6519,7 +6578,15 @@ class TermuxActivity : Activity() {
         val savedSftpPath = prefs.getString(KEY_SFTP_LAST_SAVED_PATH, null)
         var localCurrentDir = if (!savedSftpPath.isNullOrEmpty()) {
             val f = File(savedSftpPath)
-            if (f.exists() && f.isDirectory) f else appRootDir
+            val isRootSys = savedSftpPath == "/" ||
+                savedSftpPath.startsWith("/data") ||
+                savedSftpPath.startsWith("/system") ||
+                savedSftpPath.startsWith("/vendor") ||
+                savedSftpPath.startsWith("/product") ||
+                savedSftpPath.startsWith("/apex") ||
+                savedSftpPath.startsWith("/sdcard") ||
+                savedSftpPath.startsWith("/storage")
+            if ((f.exists() && f.isDirectory) || isRootSys) f else appRootDir
         } else {
             appRootDir
         }
@@ -6538,6 +6605,9 @@ class TermuxActivity : Activity() {
         var batchClipIsMove = false
         var sftpSearchActive = false
         var sftpSearchQuery = ""
+        var sftpSearchFilterType = 0 // 0 = All, 1 = Folders, 2 = Files
+        var sftpSortMode = 0 // 0 = Name, 1 = Size, 2 = Date
+        var activeCloseSftpSearchCallback: (() -> Unit)? = null
         var prevSftpSourceIdx = 0
         var sftpTransitionDir = 0 // -1 = backward/left, 0 = none, +1 = forward/right
         var termDrawerExpanded = false
@@ -7084,7 +7154,6 @@ class TermuxActivity : Activity() {
             val srcCodeNow = currentSftpSourceCode()
 
             // Fast in-place counter update when already in File or Package selection mode!
-            // Completely eliminates top bar twitching when selecting/deselecting items!
             if (
                 (targetMode == 1 || targetMode == 2) &&
                 targetMode == currentTermPillMode &&
@@ -7226,21 +7295,24 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            fun buildContentRow(mode: Int): LinearLayout {
+            fun buildContentRow(mode: Int, fixedInnerW: Int = -1): LinearLayout {
                 val contentRow = LinearLayout(this@TermuxActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     layoutParams = FrameLayout.LayoutParams(
-                        if (mode != 0) FrameLayout.LayoutParams.MATCH_PARENT else FrameLayout.LayoutParams.WRAP_CONTENT,
-                        pillInnerH
+                        when {
+                            fixedInnerW > 0 -> fixedInnerW
+                            mode != 0 -> FrameLayout.LayoutParams.MATCH_PARENT
+                            else -> FrameLayout.LayoutParams.WRAP_CONTENT
+                        },
+                        pillInnerH,
+                        Gravity.START or Gravity.CENTER_VERTICAL
                     )
                 }
 
                 when (mode) {
                     1 -> {
                         val srv = activeSftpServer
-                        val activeDirStr = if (srv == null) localCurrentDir.absolutePath else remoteCurrentPath
-
                         contentRow.addView(
                             makeSegmentPill(
                                 icon = M3Icon.TERMINAL,
@@ -7344,10 +7416,11 @@ class TermuxActivity : Activity() {
                             }
                             addView(
                                 MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
-                                layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
-                                    if (trashConfirmExpanded) marginEnd = dp(5)
+                                    layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                                        if (trashConfirmExpanded) marginEnd = dp(5)
+                                    }
                                 }
-                            })
+                            )
                             if (trashConfirmExpanded) {
                                 addView(TextView(this@TermuxActivity).apply {
                                     text = tr("Уверены?", "Sure?")
@@ -7522,18 +7595,29 @@ class TermuxActivity : Activity() {
                         )
                     }
                     3 -> {
-                        val termDrawerChip = makeSegmentPill(
-                            icon = M3Icon.TERMINAL,
-                            label = null,
-                            leftR = pillOuterR,
-                            rightR = pillInnerR,
-                            fillCol = uiAccentContainer,
-                            tintCol = uiOnAccentContainer,
-                            marginEndDp = 3,
-                            weightVal = 0f,
-                            minW = dp(36)
-                        ) {
-                            exitToTerminalAnimated()
+                        // Left terminal icon chip positioned at exact same x=12dp & size=19dp as compact mode!
+                        val termDrawerChip = LinearLayout(this@TermuxActivity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            minimumWidth = dp(42)
+                            background = makeConnectedSegmentDrawable(uiAccentContainer, pillOuterR, pillInnerR)
+                            setPadding(dp(12), 0, dp(11), 0)
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                pillInnerH
+                            ).apply {
+                                marginEnd = dp(3)
+                            }
+                            addView(
+                                MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiOnAccentContainer, 18f, 2.0f).apply {
+                                    layoutParams = LinearLayout.LayoutParams(dp(19), dp(19))
+                                }
+                            )
+                            attachSmoothPressAnimation(this, 0.93f)
+                            setOnClickListener {
+                                triggerHaptic(0.8f)
+                                exitToTerminalAnimated()
+                            }
                         }
                         contentRow.addView(termDrawerChip)
 
@@ -7734,12 +7818,6 @@ class TermuxActivity : Activity() {
                             srcLabels.add(tv)
                             srcHotbarRow.addView(box)
                         }
-                        srcHotbarRow.post {
-                            val curTargetBox = srcTabViews.getOrNull(curSrc)
-                            if (curTargetBox != null) {
-                                animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, curTargetBox, animate = false)
-                            }
-                        }
                         contentRow.addView(srcHotbarOuter)
 
                         val closeChip = makeSegmentPill(
@@ -7757,6 +7835,17 @@ class TermuxActivity : Activity() {
                             rebuildUniversalTermPill(true)
                         }
                         contentRow.addView(closeChip)
+
+                        val curTargetBox = srcTabViews.getOrNull(curSrc)
+                        if (curTargetBox != null) {
+                            animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, curTargetBox, animate = false)
+                        }
+                        srcHotbarRow.post {
+                            val cb = srcTabViews.getOrNull(curSrc)
+                            if (cb != null) {
+                                animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, cb, animate = false)
+                            }
+                        }
                     }
                     else -> {
                         // Mode 0: Default Compact State
@@ -7837,6 +7926,14 @@ class TermuxActivity : Activity() {
                         }
                     }
                 }
+
+                if (fixedInnerW > 0) {
+                    contentRow.measure(
+                        View.MeasureSpec.makeMeasureSpec(fixedInnerW, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
+                    )
+                    contentRow.layout(0, 0, fixedInnerW, pillInnerH)
+                }
                 return contentRow
             }
 
@@ -7852,29 +7949,48 @@ class TermuxActivity : Activity() {
             termAccessoryAnim?.cancel()
 
             val startTermW = termOuterFrame.width
+            val totalNavW = (topNavRow.width - topNavRow.paddingLeft - topNavRow.paddingRight)
+                .takeIf { it > 0 } ?: (resources.displayMetrics.widthPixels - dp(28))
+            val expandedInnerW = (totalNavW - termOuterFrame.paddingLeft - termOuterFrame.paddingRight).coerceAtLeast(dp(200))
 
             if (animateMorph && prevMode > 0 && targetMode == 0 && termOuterFrame.childCount > 0 && startTermW > dp(140)) {
-                // Smooth collapse / fold into compact capsule
-                val oldRow = termOuterFrame.getChildAt(termOuterFrame.childCount - 1)
+                // Smooth collapse: lock oldRow at its full expandedInnerW so its tabs never squish while closing!
+                while (termOuterFrame.childCount > 1) {
+                    termOuterFrame.removeViewAt(0)
+                }
+                val oldRow = termOuterFrame.getChildAt(0) as? LinearLayout
+                if (oldRow != null) {
+                    val lockedW = oldRow.width.takeIf { it > dp(160) } ?: expandedInnerW
+                    oldRow.layoutParams = FrameLayout.LayoutParams(
+                        lockedW,
+                        pillInnerH,
+                        Gravity.START or Gravity.CENTER_VERTICAL
+                    )
+                }
+
                 val newRow = buildContentRow(0)
                 newRow.measure(
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
                     View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
                 )
-                val exactCompactW = newRow.measuredWidth + termOuterFrame.paddingLeft + termOuterFrame.paddingRight
+                val compactInnerW = newRow.measuredWidth.coerceAtLeast(dp(100))
+                newRow.layoutParams = FrameLayout.LayoutParams(
+                    compactInnerW,
+                    pillInnerH,
+                    Gravity.START or Gravity.CENTER_VERTICAL
+                )
+                val exactCompactW = compactInnerW + termOuterFrame.paddingLeft + termOuterFrame.paddingRight
                 newRow.alpha = 0f
-                newRow.scaleX = 0.94f
-                newRow.scaleY = 0.94f
                 termOuterFrame.addView(newRow)
 
                 hubTabsOuter.visibility = View.VISIBLE
                 hubTabsOuter.alpha = 0f
-                hubTabsOuter.scaleX = 0.94f
-                hubTabsOuter.scaleY = 0.94f
+                hubTabsOuter.scaleX = 0.95f
+                hubTabsOuter.scaleY = 0.95f
 
                 termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 260L
-                    interpolator = PathInterpolator(0.12f, 1.0f, 0.24f, 1.0f)
+                    duration = 250L
+                    interpolator = PathInterpolator(0.18f, 1.0f, 0.24f, 1.0f)
                     addUpdateListener { va ->
                         val p = safeClamp(va.animatedValue as Float, 0f, 1f)
                         val curW = (startTermW + (exactCompactW - startTermW) * p).roundToInt()
@@ -7884,31 +8000,43 @@ class TermuxActivity : Activity() {
                         lp.marginEnd = (dpF(8f) * p).roundToInt()
                         termOuterFrame.layoutParams = lp
 
-                        oldRow.alpha = (1f - p * 1.6f).coerceIn(0f, 1f)
-                        oldRow.translationX = -dpF(14f) * p
+                        if (oldRow != null) {
+                            if (oldRow.childCount > 0) {
+                                oldRow.getChildAt(0).alpha = (1f - p * p).coerceIn(0f, 1f)
+                            }
+                            for (cIdx in 1 until oldRow.childCount) {
+                                val ch = oldRow.getChildAt(cIdx)
+                                ch.alpha = (1f - p * 1.45f).coerceIn(0f, 1f)
+                                ch.translationX = -dpF(10f) * p
+                            }
+                        }
 
-                        val pNew = safeClamp((p - 0.10f) / 0.90f, 0f, 1f)
-                        newRow.alpha = pNew
-                        newRow.scaleX = 0.94f + 0.06f * pNew
-                        newRow.scaleY = 0.94f + 0.06f * pNew
+                        newRow.alpha = safeClamp(p * 1.25f, 0f, 1f)
 
-                        val pTab = safeClamp((p - 0.08f) / 0.92f, 0f, 1f)
+                        val pTab = safeClamp((p - 0.06f) / 0.94f, 0f, 1f)
                         hubTabsOuter.alpha = pTab
-                        hubTabsOuter.scaleX = 0.94f + 0.06f * pTab
-                        hubTabsOuter.scaleY = 0.94f + 0.06f * pTab
+                        hubTabsOuter.scaleX = 0.95f + 0.05f * pTab
+                        hubTabsOuter.scaleY = 0.95f + 0.05f * pTab
                         (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
                             syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
                         }
                     }
                     addListener(object : android.animation.AnimatorListenerAdapter() {
+                        private var isCancelled = false
+                        override fun onAnimationCancel(animation: android.animation.Animator) {
+                            isCancelled = true
+                        }
                         override fun onAnimationEnd(animation: android.animation.Animator) {
+                            if (isCancelled) return
                             while (termOuterFrame.childCount > 1) {
                                 termOuterFrame.removeViewAt(0)
                             }
                             newRow.alpha = 1f
-                            newRow.scaleX = 1f
-                            newRow.scaleY = 1f
-                            newRow.translationX = 0f
+                            newRow.layoutParams = FrameLayout.LayoutParams(
+                                FrameLayout.LayoutParams.WRAP_CONTENT,
+                                pillInnerH,
+                                Gravity.START or Gravity.CENTER_VERTICAL
+                            )
                             val finalLp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
                             finalLp.width = ViewGroup.LayoutParams.WRAP_CONTENT
                             finalLp.weight = 0f
@@ -7925,18 +8053,29 @@ class TermuxActivity : Activity() {
                     start()
                 }
             } else if (animateMorph && prevMode == 0 && targetMode > 0 && termOuterFrame.childCount > 0) {
-                // Smooth unfold / expand into full drawer / action bar
-                val oldRow = termOuterFrame.getChildAt(termOuterFrame.childCount - 1)
-                val totalNavW = (topNavRow.width - topNavRow.paddingLeft - topNavRow.paddingRight)
-                    .takeIf { it > 0 } ?: (resources.displayMetrics.widthPixels - dp(28))
-                val newRow = buildContentRow(targetMode)
-                newRow.alpha = 0f
-                newRow.translationX = dpF(12f)
+                // Smooth expand: lock oldRow at its compact width and pre-layout newRow at expandedInnerW!
+                while (termOuterFrame.childCount > 1) {
+                    termOuterFrame.removeViewAt(0)
+                }
+                val oldRow = termOuterFrame.getChildAt(0) as? LinearLayout
+                if (oldRow != null && oldRow.width > 0) {
+                    oldRow.layoutParams = FrameLayout.LayoutParams(
+                        oldRow.width,
+                        pillInnerH,
+                        Gravity.START or Gravity.CENTER_VERTICAL
+                    )
+                }
+                val newRow = buildContentRow(targetMode, expandedInnerW)
+                for (cIdx in 0 until newRow.childCount) {
+                    val ch = newRow.getChildAt(cIdx)
+                    ch.alpha = if (cIdx == 0) 0.3f else 0f
+                    if (cIdx > 0) ch.translationX = -dpF(8f)
+                }
                 termOuterFrame.addView(newRow)
 
                 termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 270L
-                    interpolator = PathInterpolator(0.12f, 1.0f, 0.24f, 1.0f)
+                    duration = 250L
+                    interpolator = PathInterpolator(0.18f, 1.0f, 0.24f, 1.0f)
                     addUpdateListener { va ->
                         val p = safeClamp(va.animatedValue as Float, 0f, 1f)
                         val curW = (startTermW + (totalNavW - startTermW) * p).roundToInt()
@@ -7946,23 +8085,43 @@ class TermuxActivity : Activity() {
                         lp.marginEnd = (dpF(8f) * (1f - p)).roundToInt()
                         termOuterFrame.layoutParams = lp
 
-                        oldRow.alpha = (1f - p * 1.5f).coerceIn(0f, 1f)
-
-                        val pNew = safeClamp((p - 0.12f) / 0.88f, 0f, 1f)
-                        newRow.alpha = pNew
-                        newRow.translationX = dpF(12f) * (1f - pNew)
+                        if (oldRow != null) {
+                            oldRow.alpha = (1f - p * 1.45f).coerceIn(0f, 1f)
+                        }
+                        if (newRow.childCount > 0) {
+                            newRow.getChildAt(0).alpha = safeClamp(p * 1.6f, 0f, 1f)
+                        }
+                        val pNew = safeClamp((p - 0.08f) / 0.88f, 0f, 1f)
+                        for (cIdx in 1 until newRow.childCount) {
+                            val ch = newRow.getChildAt(cIdx)
+                            ch.alpha = pNew
+                            ch.translationX = -dpF(8f) * (1f - pNew)
+                        }
 
                         hubTabsOuter.alpha = (1f - p * 1.45f).coerceIn(0f, 1f)
-                        hubTabsOuter.scaleX = 1f - 0.06f * p
-                        hubTabsOuter.scaleY = 1f - 0.06f * p
+                        hubTabsOuter.scaleX = 1f - 0.05f * p
+                        hubTabsOuter.scaleY = 1f - 0.05f * p
                     }
                     addListener(object : android.animation.AnimatorListenerAdapter() {
+                        private var isCancelled = false
+                        override fun onAnimationCancel(animation: android.animation.Animator) {
+                            isCancelled = true
+                        }
                         override fun onAnimationEnd(animation: android.animation.Animator) {
+                            if (isCancelled) return
                             while (termOuterFrame.childCount > 1) {
                                 termOuterFrame.removeViewAt(0)
                             }
-                            newRow.alpha = 1f
-                            newRow.translationX = 0f
+                            for (cIdx in 0 until newRow.childCount) {
+                                val ch = newRow.getChildAt(cIdx)
+                                ch.alpha = 1f
+                                ch.translationX = 0f
+                            }
+                            newRow.layoutParams = FrameLayout.LayoutParams(
+                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                pillInnerH,
+                                Gravity.START or Gravity.CENTER_VERTICAL
+                            )
                             val finalLp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
                             finalLp.width = 0
                             finalLp.weight = 1f
@@ -7977,21 +8136,41 @@ class TermuxActivity : Activity() {
                     start()
                 }
             } else if (animateMorph && prevMode == 0 && targetMode == 0 && termOuterFrame.childCount > 0) {
-                // Smooth cross-fade between compact modes (e.g. tab switch where accessory changes)
-                val oldRow = termOuterFrame.getChildAt(termOuterFrame.childCount - 1)
+                while (termOuterFrame.childCount > 1) {
+                    termOuterFrame.removeViewAt(0)
+                }
+                val oldRow = termOuterFrame.getChildAt(0)
                 val newRow = buildContentRow(0)
+                newRow.measure(
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
+                )
+                val endW = newRow.measuredWidth + termOuterFrame.paddingLeft + termOuterFrame.paddingRight
                 newRow.alpha = 0f
                 termOuterFrame.addView(newRow)
 
                 termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 180L
+                    duration = 190L
+                    interpolator = PathInterpolator(0.18f, 1.0f, 0.24f, 1.0f)
                     addUpdateListener { va ->
                         val p = safeClamp(va.animatedValue as Float, 0f, 1f)
+                        if (startTermW > 0 && abs(endW - startTermW) > 2) {
+                            val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                            lp.width = (startTermW + (endW - startTermW) * p).roundToInt()
+                            lp.weight = 0f
+                            lp.marginEnd = dp(8)
+                            termOuterFrame.layoutParams = lp
+                        }
                         oldRow.alpha = 1f - p
                         newRow.alpha = p
                     }
                     addListener(object : android.animation.AnimatorListenerAdapter() {
+                        private var isCancelled = false
+                        override fun onAnimationCancel(animation: android.animation.Animator) {
+                            isCancelled = true
+                        }
                         override fun onAnimationEnd(animation: android.animation.Animator) {
+                            if (isCancelled) return
                             while (termOuterFrame.childCount > 1) {
                                 termOuterFrame.removeViewAt(0)
                             }
@@ -8006,9 +8185,15 @@ class TermuxActivity : Activity() {
                     start()
                 }
             } else {
-                // Instant update / initial setup
                 termOuterFrame.removeAllViews()
-                val newRow = buildContentRow(targetMode)
+                val newRow = buildContentRow(targetMode, if (targetMode != 0) expandedInnerW else -1)
+                if (targetMode != 0) {
+                    newRow.layoutParams = FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        pillInnerH,
+                        Gravity.START or Gravity.CENTER_VERTICAL
+                    )
+                }
                 termOuterFrame.addView(newRow)
                 val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
                 if (targetMode != 0) {
@@ -8146,10 +8331,8 @@ class TermuxActivity : Activity() {
                     cancelPredictiveBackPreview(root, null)
                     rebuildUniversalTermPill(true)
                 } else if (activeTab == 1 && sftpSearchActive) {
-                    sftpSearchActive = false
-                    sftpSearchQuery = ""
                     cancelPredictiveBackPreview(root, null)
-                    renderActiveTab()
+                    activeCloseSftpSearchCallback?.invoke()
                 } else {
                     ensureCenteredPivot(root)
                     animEngine.morph(root, alpha = 0f, sx = 0.88f, sy = 0.88f, durationMs = 180L, interp = predictiveCommitInterpolator) {
@@ -10410,7 +10593,7 @@ class TermuxActivity : Activity() {
             val raw = nativeListLocalDir(
                 dir.absolutePath,
                 sftpShowHidden,
-                if (depth == 0) sftpSearchQuery else ""
+                ""
             )
             if (raw.isEmpty()) return emptyList()
             val out = ArrayList<SftpItemEntry>()
@@ -11663,9 +11846,40 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 }
             }
 
-            populateEntriesIntoRowsCol = { errStr, entries ->
-                // If populateEntriesIntoRowsCol is called with exact same entries & no error just to sync selection,
-                // update selection states in-place without rebuilding rowsCol!
+            populateEntriesIntoRowsCol = { errStr, rawEntries ->
+                val entries = if (errStr != null) {
+                    rawEntries
+                } else {
+                    val q = sftpSearchQuery.trim()
+                    val filtered = if (q.isEmpty() && sftpSearchFilterType == 0) {
+                        rawEntries
+                    } else {
+                        rawEntries.filter { item ->
+                            val typeOk = when (sftpSearchFilterType) {
+                                1 -> item.isDirectory
+                                2 -> !item.isDirectory
+                                else -> true
+                            }
+                            val queryOk = q.isEmpty() || item.name.contains(q, ignoreCase = true)
+                            typeOk && queryOk
+                        }
+                    }
+                    if (sftpSortMode == 0 || sftpTreeMode) {
+                        filtered
+                    } else {
+                        filtered.sortedWith { a, b ->
+                            if (a.isDirectory != b.isDirectory) {
+                                if (a.isDirectory) -1 else 1
+                            } else {
+                                when (sftpSortMode) {
+                                    1 -> b.sizeBytes.compareTo(a.sizeBytes)
+                                    2 -> b.modifiedEpochMs.compareTo(a.modifiedEpochMs)
+                                    else -> a.name.compareTo(b.name, ignoreCase = true)
+                                }
+                            }
+                        }
+                    }
+                }
                 if (errStr == null && entries === lastRenderedEntries && activeRowRefs.isNotEmpty() && activeRowRefs.size == entries.size && sftpTransitionDir == 0 && newlyExpandedTreePath == null && justToggledTreeFolderPath == null && !justRevealedHiddenFiles) {
                     syncAllRowsSelectionInPlace(null)
                 } else {
@@ -12093,30 +12307,30 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                         populateEntriesIntoRowsCol(null, list)
                         onDone?.invoke()
                     } else {
-                        val rootCacheKey = "local_root:$pathStr:$sftpShowHidden:$sftpSearchQuery:$sftpTreeMode"
+                        val rootCacheKey = "local_root:$pathStr:$sftpShowHidden:$sftpTreeMode"
                         val cachedRoot = if (!bypassCache) sftpRemoteDirCache[rootCacheKey]?.takeIf { it.isNotEmpty() } else null
                         if (cachedRoot != null) {
                             populateEntriesIntoRowsCol(null, cachedRoot)
-                        }
-                        Thread {
-                            val entries = listLocalEntriesViaCpp26(targetDir, 0)
-                            if (entries.isNotEmpty()) {
-                                sftpRemoteDirCache[rootCacheKey] = entries
-                            }
-                            runOnUiThread {
-                                if (reqGen == sftpRequestGeneration && activeTab == 1 && activeSftpServer == null && localCurrentDir.absolutePath == pathStr) {
-                                    if (cachedRoot == null || cachedRoot != entries) {
+                            onDone?.invoke()
+                        } else {
+                            Thread {
+                                val entries = listLocalEntriesViaCpp26(targetDir, 0)
+                                if (entries.isNotEmpty()) {
+                                    sftpRemoteDirCache[rootCacheKey] = entries
+                                }
+                                runOnUiThread {
+                                    if (reqGen == sftpRequestGeneration && activeTab == 1 && activeSftpServer == null && localCurrentDir.absolutePath == pathStr) {
                                         populateEntriesIntoRowsCol(null, entries)
                                     }
+                                    onDone?.invoke()
                                 }
-                                onDone?.invoke()
-                            }
-                        }.start()
+                            }.start()
+                        }
                     }
                 } else {
                     val requestedPath = remoteCurrentPath.ifBlank { "/" }
                     val showHiddenSnap = sftpShowHidden
-                    val searchSnap = sftpSearchQuery
+                    val searchSnap = ""
                     val cacheKey = "${srv.id}:$requestedPath:$showHiddenSnap:$searchSnap"
                     val cached = if (!bypassCache) sftpRemoteDirCache[cacheKey]?.takeIf { it.isNotEmpty() } else null
                     if (cached != null) {
@@ -12830,39 +13044,124 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             }
 
             val bottomBarRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
                 clipChildren = false
                 clipToPadding = false
-                setPadding(dp(24), dp(4), dp(24), dp(24))
+                setPadding(dp(12), dp(4), dp(12), dp(20))
+                translationY = -currentHubImeLiftPx
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 )
             }
-            bottomBarRow.setOnApplyWindowInsetsListener { v, insets ->
-                val imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom
-                val navBottom = insets.getInsets(WindowInsets.Type.navigationBars()).bottom
-                val lift = (imeBottom - navBottom).coerceAtLeast(0).toFloat()
-                if (v.translationY != -lift) {
-                    v.animate()
-                        .translationY(-lift)
-                        .setDuration(220L)
+            activeHubBottomBarUpdater = { liftPx, fromImeAnim ->
+                if (fromImeAnim) {
+                    bottomBarRow.animate().cancel()
+                    bottomBarRow.translationY = -liftPx
+                } else if (abs(bottomBarRow.translationY - (-liftPx)) > 1f) {
+                    bottomBarRow.animate()
+                        .translationY(-liftPx)
+                        .setDuration(210L)
                         .setInterpolator(aosp17SpatialInterpolator)
                         .start()
                 }
-                insets
             }
+
+            // Search Filter & Sort Chips Bar (smoothly expands above floatingPill when search is active)
+            val searchFiltersWrap = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = makeM3FloatingSurfaceDrawable(dp(20), tintWithAccent = false)
+                elevation = dpF(8f)
+                setPadding(dp(6), dp(4), dp(6), dp(4))
+                visibility = if (sftpSearchActive) View.VISIBLE else View.GONE
+                alpha = if (sftpSearchActive) 1f else 0f
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    bottomMargin = dp(6)
+                }
+            }
+
+            fun rebuildSearchFilterChips() {
+                searchFiltersWrap.removeAllViews()
+                val filterItems = listOf(
+                    0 to tr("Все", "All"),
+                    1 to tr("Папки", "Dirs"),
+                    2 to tr("Файлы", "Files")
+                )
+                for ((fCode, fTitle) in filterItems) {
+                    val isSel = (sftpSearchFilterType == fCode)
+                    val chip = TextView(this).apply {
+                        text = fTitle
+                        setSingleLine(true)
+                        setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        background = tonalBg(if (isSel) uiAccentContainer else 0x00000000, dp(14))
+                        setPadding(dp(10), dp(5), dp(10), dp(5))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            marginEnd = dp(3)
+                        }
+                        attachSmoothPressAnimation(this, 0.94f)
+                        setOnClickListener {
+                            triggerHaptic(0.85f)
+                            if (sftpSearchFilterType != fCode) {
+                                sftpSearchFilterType = fCode
+                                rebuildSearchFilterChips()
+                                refreshSftpListInPlace(false, null)
+                            }
+                        }
+                    }
+                    searchFiltersWrap.addView(chip)
+                }
+
+                val sortTitle = when (sftpSortMode) {
+                    1 -> tr("⇅ Размер", "⇅ Size")
+                    2 -> tr("⇅ Дата", "⇅ Date")
+                    else -> tr("⇅ Имя", "⇅ Name")
+                }
+                val sortChip = TextView(this).apply {
+                    text = sortTitle
+                    setSingleLine(true)
+                    setTextColor(if (sftpSortMode != 0) uiAccent else COLOR_TEXT_BRIGHT)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    background = tonalBg(uiSurfaceHigh, dp(14))
+                    setPadding(dp(10), dp(5), dp(10), dp(5))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                    attachSmoothPressAnimation(this, 0.94f)
+                    setOnClickListener {
+                        triggerHaptic(0.9f)
+                        sftpSortMode = (sftpSortMode + 1) % 3
+                        rebuildSearchFilterChips()
+                        refreshSftpListInPlace(false, null)
+                    }
+                }
+                searchFiltersWrap.addView(sortChip)
+            }
+            rebuildSearchFilterChips()
+            bottomBarRow.addView(searchFiltersWrap)
 
             val floatingPill = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 background = makeM3FloatingSurfaceDrawable(dp(32), tintWithAccent = false)
                 elevation = dpF(12f)
+                clipChildren = true
+                clipToPadding = true
                 setPadding(dp(6), dp(6), dp(6), dp(6))
                 layoutParams = if (sftpSearchActive) {
-                    LinearLayout.LayoutParams(0, dp(60), 1f)
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(60))
                 } else {
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(60))
                 }
@@ -12879,7 +13178,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
             fun baseBentoWidthPx(idx: Int): Int {
                 val isAct = bentoActiveStates.getOrNull(idx) == true
-                return if (isAct) dp(64) else dp(46)
+                return if (isAct) dp(60) else dp(44)
             }
 
             fun animateBentoHoldState(
@@ -12896,7 +13195,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 bentoActiveStates[pressedIdx] = newActiveState
 
                 val baseSelfW = baseBentoWidthPx(pressedIdx).toFloat()
-                val holdDeltaPx = dpF(14f)
+                val holdDeltaPx = dpF(12f)
                 val curW = btn.layoutParams.width.toFloat().coerceAtLeast(dpF(34f))
                 val targetW = if (holding) (baseSelfW + holdDeltaPx) else baseSelfW
                 val startRad = bg.cornerRadius.takeIf { it > 0f } ?: dpF(23f)
@@ -12920,7 +13219,6 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 val rightIdx = pressedIdx + 1
                 val hasLeft = leftIdx >= 0
                 val hasRight = rightIdx < bentoButtons.size
-                // Exact zero-sum neighbor length compression so outer buttons never shift sideways!
                 val leftShrink = if (!holding) 0f else if (hasLeft && hasRight) holdDeltaPx * 0.5f else if (hasLeft) holdDeltaPx else 0f
                 val rightShrink = if (!holding) 0f else if (hasLeft && hasRight) holdDeltaPx * 0.5f else if (hasRight) holdDeltaPx else 0f
                 val leftStartW = if (hasLeft) bentoButtons[leftIdx].layoutParams.width.toFloat() else 0f
@@ -12939,7 +13237,6 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                         val prog = if (holding) {
                             1f - (1f - t) * (1f - t)
                         } else {
-                            // Bouncy underdamped spring for lively rebound on tap & release!
                             1f - kotlin.math.exp(-3.3f * t) * kotlin.math.cos(6.4f * t)
                         }
                         val radProg = if (holding) {
@@ -13016,10 +13313,10 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 val frame = FrameLayout(this).apply {
                     background = bgDrawable
                     layoutParams = LinearLayout.LayoutParams(
-                        if (initialActive) dp(64) else dp(46),
+                        if (initialActive) dp(60) else dp(44),
                         dp(46)
                     ).apply {
-                        setMargins(dp(3), 0, dp(3), 0)
+                        setMargins(dp(2), 0, dp(2), 0)
                     }
                     addView(icView)
                     setOnTouchListener { v, ev ->
@@ -13038,7 +13335,6 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                             }
                             MotionEvent.ACTION_UP -> {
                                 val heldMs = SystemClock.uptimeMillis() - downMs
-                                // Ensure quick taps finish expanding to peak squircle before springing back with full bounce!
                                 if (heldMs < 130L) {
                                     v.postDelayed(releaseTask, (130L - heldMs).coerceIn(45L, 120L))
                                 } else {
@@ -13060,6 +13356,21 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             }
 
             lateinit var populateBottomFloatingPill: (Boolean) -> Unit
+            activeCloseSftpSearchCallback = {
+                if (sftpSearchActive) {
+                    sftpSearchActive = false
+                    if (sftpSearchQuery.isNotEmpty() || sftpSearchFilterType != 0) {
+                        sftpSearchQuery = ""
+                        sftpSearchFilterType = 0
+                        rebuildSearchFilterChips()
+                        refreshSftpListInPlace(false, null)
+                    }
+                    val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+                    imm?.hideSoftInputFromWindow(floatingPill.windowToken, 0)
+                    populateBottomFloatingPill(true)
+                }
+            }
+
             populateBottomFloatingPill = { animateMorph ->
                 (floatingPill.tag as? ValueAnimator)?.cancel()
                 val oldW = floatingPill.width
@@ -13070,15 +13381,19 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 bentoActiveStates.clear()
 
                 if (sftpSearchActive) {
+                    rebuildSearchFilterChips()
+                    searchFiltersWrap.visibility = View.VISIBLE
+                    if (animateMorph) {
+                        searchFiltersWrap.alpha = 0f
+                        searchFiltersWrap.translationY = dpF(8f)
+                        animEngine.morph(searchFiltersWrap, alpha = 1f, ty = 0f, durationMs = 220L, interp = aosp17SpatialInterpolator)
+                    } else {
+                        searchFiltersWrap.alpha = 1f
+                        searchFiltersWrap.translationY = 0f
+                    }
+
                     floatingPill.addView(makeBentoPillBtn(M3Icon.ARROW_BACK, initialActive = false) { _ ->
-                        sftpSearchActive = false
-                        if (sftpSearchQuery.isNotEmpty()) {
-                            sftpSearchQuery = ""
-                            refreshSftpListInPlace(false, null)
-                        }
-                        val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
-                        imm?.hideSoftInputFromWindow(floatingPill.windowToken, 0)
-                        populateBottomFloatingPill(true)
+                        activeCloseSftpSearchCallback?.invoke()
                     })
                     val searchEt = EditText(this).apply {
                         setText(sftpSearchQuery)
@@ -13088,19 +13403,35 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                         typeface = Typeface.MONOSPACE
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                         setSingleLine(true)
+                        minWidth = 0
+                        minimumWidth = 0
                         background = null
                         setPadding(dp(8), 0, dp(8), 0)
                         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                        addTextChangedListener(object : android.text.TextWatcher {
-                            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                            override fun afterTextChanged(s: Editable?) {
-                                sftpSearchQuery = s?.toString() ?: ""
-                                refreshSftpListInPlace(false, null)
-                            }
-                        })
                     }
+                    val clearBtn = FrameLayout(this).apply {
+                        visibility = if (sftpSearchQuery.isNotEmpty()) View.VISIBLE else View.GONE
+                        layoutParams = LinearLayout.LayoutParams(dp(30), dp(30)).apply {
+                            marginEnd = dp(2)
+                        }
+                        addView(MaterialIconView(this@TermuxActivity, M3Icon.CLOSE, COLOR_TEXT_DIM, 16f, 2.0f))
+                        attachSmoothPressAnimation(this, 0.90f)
+                        setOnClickListener {
+                            triggerHaptic(0.75f)
+                            searchEt.setText("")
+                        }
+                    }
+                    searchEt.addTextChangedListener(object : android.text.TextWatcher {
+                        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                        override fun afterTextChanged(s: Editable?) {
+                            sftpSearchQuery = s?.toString() ?: ""
+                            clearBtn.visibility = if (sftpSearchQuery.isNotEmpty()) View.VISIBLE else View.GONE
+                            refreshSftpListInPlace(false, null)
+                        }
+                    })
                     floatingPill.addView(searchEt)
+                    floatingPill.addView(clearBtn)
                     floatingPill.addView(makeBentoPillBtn(M3Icon.SEARCH, initialActive = true) { idx ->
                         bentoActiveStates[idx] = true
                         sftpSearchQuery = searchEt.text.toString()
@@ -13112,6 +13443,14 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                         imm?.showSoftInput(searchEt, 0)
                     }
                 } else {
+                    if (animateMorph && searchFiltersWrap.visibility == View.VISIBLE) {
+                        animEngine.morph(searchFiltersWrap, alpha = 0f, ty = dpF(8f), durationMs = 180L, interp = aosp17SpatialInterpolator) {
+                            if (!sftpSearchActive) searchFiltersWrap.visibility = View.GONE
+                        }
+                    } else {
+                        searchFiltersWrap.visibility = View.GONE
+                    }
+
                     floatingPill.addView(makeBentoPillBtn(M3Icon.SEARCH, initialActive = false) { _ ->
                         sftpSearchActive = true
                         populateBottomFloatingPill(true)
@@ -13189,21 +13528,23 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
                 if (animateMorph && oldW > 0) {
                     val targetFullW = (bottomBarRow.width - bottomBarRow.paddingLeft - bottomBarRow.paddingRight)
-                        .coerceAtLeast(dp(300))
-                    // Measure exact compact width of all 5 Bento buttons so the right button is never clipped!
-                    floatingPill.measure(
-                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-                        View.MeasureSpec.makeMeasureSpec(dp(60), View.MeasureSpec.EXACTLY)
-                    )
-                    val targetCompactW = floatingPill.measuredWidth.coerceAtLeast(dp(290))
-                    val endW = if (sftpSearchActive) targetFullW else targetCompactW
-                    floatingPill.alpha = 0.88f
+                        .takeIf { it > 0 } ?: (resources.displayMetrics.widthPixels - dp(24))
+                    val endW = if (sftpSearchActive) {
+                        targetFullW
+                    } else {
+                        floatingPill.measure(
+                            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                            View.MeasureSpec.makeMeasureSpec(dp(60), View.MeasureSpec.EXACTLY)
+                        )
+                        floatingPill.measuredWidth.coerceAtLeast(dp(260))
+                    }
+                    floatingPill.alpha = 0.90f
                     val morphAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                        duration = 280L
+                        duration = 250L
                         interpolator = aosp17SpatialInterpolator
                         addUpdateListener { va ->
                             val f = (va.animatedValue as Float).coerceIn(0f, 1f)
-                            floatingPill.alpha = 0.88f + 0.12f * f
+                            floatingPill.alpha = 0.90f + 0.10f * f
                             val lp = LinearLayout.LayoutParams(
                                 (oldW + (endW - oldW) * f).roundToInt(),
                                 dp(60)
@@ -13211,10 +13552,15 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                             floatingPill.layoutParams = lp
                         }
                         addListener(object : android.animation.AnimatorListenerAdapter() {
+                            private var isCancelled = false
+                            override fun onAnimationCancel(animation: android.animation.Animator) {
+                                isCancelled = true
+                            }
                             override fun onAnimationEnd(animation: android.animation.Animator) {
+                                if (isCancelled) return
                                 floatingPill.alpha = 1f
                                 floatingPill.layoutParams = if (sftpSearchActive) {
-                                    LinearLayout.LayoutParams(0, dp(60), 1f)
+                                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(60))
                                 } else {
                                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(60))
                                 }
@@ -13227,7 +13573,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 } else {
                     floatingPill.alpha = 1f
                     floatingPill.layoutParams = if (sftpSearchActive) {
-                        LinearLayout.LayoutParams(0, dp(60), 1f)
+                        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(60))
                     } else {
                         LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(60))
                     }
@@ -15219,6 +15565,10 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     isDraggingSelectionHandle = false
                     isAutoScrollRunning = false
                     removeCallbacks(selectionAutoScrollRunnable)
+                    if (copyOnSelect) {
+                        val selTxt = nativeGetSelectedText()
+                        if (selTxt.isNotEmpty()) copyToClipboard(selTxt, false)
+                    }
                     actionMode?.hide(0)
                     actionMode?.invalidateContentRect()
                     invalidateAllRows()
@@ -15739,6 +16089,8 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             return super.onKeyPreIme(keyCode, event)
         }
 
+        private var lastKeyRepeatDispatchUptimeMs = 0L
+
         override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
             if (nativeIsSelectingText()) {
                 if (keyCode == KeyEvent.KEYCODE_BACK) {
@@ -15753,14 +16105,32 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 return true
             }
             if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                val mask = nativeDispatchCustomKey("CTRL")
-                syncModifierButtons(mask)
+                if (event.repeatCount == 0) {
+                    val mask = nativeDispatchCustomKey("CTRL")
+                    syncModifierButtons(mask)
+                }
                 return true
             }
             if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-                val mask = nativeDispatchCustomKey("ALT")
-                syncModifierButtons(mask)
+                if (event.repeatCount == 0) {
+                    val mask = nativeDispatchCustomKey("ALT")
+                    syncModifierButtons(mask)
+                }
                 return true
+            }
+
+            if (event.repeatCount > 0) {
+                val heldMs = event.eventTime - event.downTime
+                if (heldMs < keyRepeatDelayMs) {
+                    return true
+                }
+                val nowMs = SystemClock.uptimeMillis()
+                if (nowMs - lastKeyRepeatDispatchUptimeMs < keyRepeatIntervalMs) {
+                    return true
+                }
+                lastKeyRepeatDispatchUptimeMs = nowMs
+            } else {
+                lastKeyRepeatDispatchUptimeMs = SystemClock.uptimeMillis()
             }
 
             val unicode = event.getUnicodeChar(event.metaState and KeyEvent.META_CTRL_MASK.inv())
