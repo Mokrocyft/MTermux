@@ -7775,33 +7775,31 @@ class TermuxActivity : Activity() {
                                             }
                                         }
                                         3 -> {
-                                            val saved = loadSavedSftpServers()
+                                            val saved = loadSshServers()
                                             if (saved.isEmpty()) {
-                                                showSftpServerConfigModal(null) { srvNew ->
-                                                    selectSourceAnimated(3, this) {
-                                                        activeSftpServer = srvNew
-                                                        remoteCurrentPath = srvNew.remotePath
-                                                        termDrawerExpanded = false
-                                                        rebuildUniversalTermPill(true)
-                                                        activeSftpBreadcrumbsCallback?.invoke(true)
-                                                        activeSftpRefreshCallback?.invoke(false, null)
-                                                    }
-                                                }
+                                                Toast.makeText(this@TermuxActivity, tr("Сначала добавьте SSH-сервер во вкладке SSH", "Add an SSH server in the SSH tab first"), Toast.LENGTH_SHORT).show()
                                             } else if (saved.size == 1 && activeSftpServer == null) {
-                                                val onlySrv = saved[0]
+                                                val srv = saved[0]
                                                 selectSourceAnimated(3, this) {
-                                                    activeSftpServer = onlySrv
-                                                    remoteCurrentPath = onlySrv.remotePath
+                                                    activeSftpServer = srv
+                                                    remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
                                                     termDrawerExpanded = false
                                                     rebuildUniversalTermPill(true)
                                                     activeSftpBreadcrumbsCallback?.invoke(true)
                                                     activeSftpRefreshCallback?.invoke(false, null)
                                                 }
                                             } else {
-                                                showSftpServersListModal { chosenSrv ->
+                                                val curIdx = saved.indexOfFirst { it.id == activeSftpServer?.id }.coerceAtLeast(0)
+                                                showBakaSuChooseDialog(
+                                                    title = tr("Выберите SSH-сервер", "Select SSH Server"),
+                                                    items = saved.map { it.label },
+                                                    descriptions = saved.map { "${it.username}@${it.host}:${it.port}" },
+                                                    selectedIndex = curIdx
+                                                ) { chosen ->
+                                                    val srv = saved[chosen]
                                                     selectSourceAnimated(3, this) {
-                                                        activeSftpServer = chosenSrv
-                                                        remoteCurrentPath = chosenSrv.remotePath
+                                                        activeSftpServer = srv
+                                                        remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
                                                         termDrawerExpanded = false
                                                         rebuildUniversalTermPill(true)
                                                         activeSftpBreadcrumbsCallback?.invoke(true)
