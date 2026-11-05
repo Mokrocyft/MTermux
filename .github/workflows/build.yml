@@ -112,7 +112,7 @@ jobs:
           APKSIGNER=$(find ${ANDROID_HOME}/build-tools -name apksigner | sort -V | tail -n 1)
           if [ -n "$APKSIGNER" ]; then
             if [ ! -f dist/MTermux-release.apk.idsig ]; then
-              "$APKSIGNER" sign \
+              JAVA_OPTS="--enable-native-access=ALL-UNNAMED" "$APKSIGNER" sign \
                 --ks app/testkey_untrusted.jks \
                 --ks-key-alias alias \
                 --ks-pass pass:xrj45yWGLbsO7W0v \
@@ -124,7 +124,7 @@ jobs:
                 --out dist/MTermux-release.apk \
                 dist/MTermux-release.apk
             fi
-            "$APKSIGNER" verify --verbose --v4-signature-file dist/MTermux-release.apk.idsig dist/MTermux-release.apk
+            JAVA_OPTS="--enable-native-access=ALL-UNNAMED" "$APKSIGNER" verify --verbose --v4-signature-file dist/MTermux-release.apk.idsig dist/MTermux-release.apk
           fi
           ls -lh dist/
 

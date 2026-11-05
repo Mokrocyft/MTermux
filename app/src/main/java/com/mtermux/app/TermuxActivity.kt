@@ -13354,7 +13354,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             }
 
             lateinit var populateBottomFloatingPill: (Boolean) -> Unit
-            activeCloseSftpSearchCallback = {
+            val closeSftpSearchFn: () -> Unit = {
                 if (sftpSearchActive) {
                     sftpSearchActive = false
                     if (sftpSearchQuery.isNotEmpty() || sftpSearchFilterType != 0) {
@@ -13368,6 +13368,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     populateBottomFloatingPill(true)
                 }
             }
+            activeCloseSftpSearchCallback = closeSftpSearchFn
 
             populateBottomFloatingPill = { animateMorph ->
                 (floatingPill.tag as? ValueAnimator)?.cancel()
@@ -13391,7 +13392,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     }
 
                     floatingPill.addView(makeBentoPillBtn(M3Icon.ARROW_BACK, initialActive = false) { _ ->
-                        activeCloseSftpSearchCallback?.invoke()
+                        closeSftpSearchFn()
                     })
                     val searchEt = EditText(this).apply {
                         setText(sftpSearchQuery)
@@ -13849,7 +13850,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     }
                 }
                 if (allowDelete && trashBtnRef != null) {
-                    userPkgCardRefs.add(PkgCardRef(pkg.name, idx, total, cardLayout, trashBtnRef!!))
+                    userPkgCardRefs.add(PkgCardRef(pkg.name, idx, total, cardLayout, trashBtnRef))
                 }
                 return cardLayout
             }
