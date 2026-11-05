@@ -23,8 +23,9 @@ endif()
 
 set(COMMON_CXX_FLAGS
     ${CXX_STD_FLAG}
-    -Wall -Wextra -Werror -Wno-unused-command-line-argument -O3
-    -fno-math-errno -fomit-frame-pointer -fno-exceptions -fno-rtti
+    -Wall -Wextra -Werror -Wno-unused-command-line-argument
+    -Wno-null-character -Wno-unused-parameter -Wno-unused-variable -Wno-unused-function
+    -O3 -fno-math-errno -fomit-frame-pointer -fno-exceptions -fno-rtti
     -fvisibility=hidden -fdata-sections -ffunction-sections
 )
 

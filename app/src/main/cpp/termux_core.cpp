@@ -5535,7 +5535,7 @@ Java_com_mtermux_app_TermuxActivity_nativeConvertChmodInfo(
         static_cast<char>('0' + u),
         static_cast<char>('0' + g),
         static_cast<char>('0' + o),
-        ' '
+        '\0'
     };
     char sym[11];
     sym[0] = isDir ? 'd' : '-';
@@ -5545,7 +5545,7 @@ Java_com_mtermux_app_TermuxActivity_nativeConvertChmodInfo(
         sym[i * 3 + 2] = (groups[i] & 2) ? 'w' : '-';
         sym[i * 3 + 3] = (groups[i] & 1) ? 'x' : '-';
     }
-    sym[10] = ' ';
+    sym[10] = '\0';
     std::string out = std::string(octal) + "	" + std::string(sym) + "	" + std::to_string(mask);
     return env->NewStringUTF(out.c_str());
 }
