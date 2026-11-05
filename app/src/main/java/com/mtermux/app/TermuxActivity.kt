@@ -7446,7 +7446,7 @@ class TermuxActivity : Activity() {
                                         if (srv != null) {
                                             for (p in targets) {
                                                 try {
-                                                    sftpDeletePathRecursive(srv, p)
+                                                    runRemoteSftpViaCpp26(srv, "rm -rf -- ${shellEscapeSingle(p)}")
                                                 } catch (_: Throwable) {}
                                             }
                                         } else {
