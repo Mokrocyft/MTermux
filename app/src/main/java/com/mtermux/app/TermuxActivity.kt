@@ -558,15 +558,14 @@ class TermuxActivity : Activity() {
             )
         )
 
-        // 1.5. Deep Vignette Overlays (Full-bleed dark gradients at absolute top and bottom of screen)
+        // 1.5. Subtle Vignette Overlays (Gentle soft gradients at top and bottom of screen)
         topVignetteView = View(this).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(
-                    0xF8000000.toInt(),
-                    0xE0000000.toInt(),
-                    0x88000000.toInt(),
-                    0x33000000.toInt(),
+                    0x55000000.toInt(),
+                    0x2A000000.toInt(),
+                    0x0E000000.toInt(),
                     0x00000000
                 )
             )
@@ -577,7 +576,7 @@ class TermuxActivity : Activity() {
             topVignetteView,
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(120),
+                dp(68),
                 Gravity.TOP
             )
         )
@@ -586,10 +585,9 @@ class TermuxActivity : Activity() {
             background = GradientDrawable(
                 GradientDrawable.Orientation.BOTTOM_TOP,
                 intArrayOf(
-                    0xB8000000.toInt(),
-                    0x7A000000.toInt(),
-                    0x3C000000.toInt(),
-                    0x14000000.toInt(),
+                    0x70000000.toInt(),
+                    0x38000000.toInt(),
+                    0x12000000.toInt(),
                     0x00000000
                 )
             )
@@ -600,7 +598,7 @@ class TermuxActivity : Activity() {
             bottomVignetteView,
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(96),
+                dp(76),
                 Gravity.BOTTOM
             )
         )
@@ -6473,7 +6471,7 @@ class TermuxActivity : Activity() {
         }
 
         val root = FrameLayout(this).apply {
-            setBackgroundColor(COLOR_AMOLED_BG)
+            setBackgroundColor(0x00000000)
         }
         root.setOnApplyWindowInsetsListener { v, insets ->
             val sysBars = insets.getInsets(
@@ -7106,100 +7104,6 @@ class TermuxActivity : Activity() {
                 return@rebuildPillLambda
             }
 
-            val prevMode = currentTermPillMode
-            val prevExpandedRight = (prevMode > 0)
-            val isExpandedRight = (targetMode != 0)
-            val startTermW = termOuterFrame.width
-
-            // If collapsing the expanded "Терминал" menu back to compact mode with animation,
-            // smoothly fold the live expanded segments leftward into "Терминал" FIRST while
-            // hubTabsOuter expands in from the right, and then swap in the compact chip!
-            if (animateMorph && prevExpandedRight && !isExpandedRight && termOuterFrame.childCount > 1 && startTermW > dp(150)) {
-                currentTermPillMode = 0
-                lastTermPillTrashConfirm = false
-                termPillCountTv = null
-                termExpandAnim?.cancel()
-                termAccessoryAnim?.cancel()
-
-                val targetCompactW = if (activeTab == 1) dp(154) else dp(112)
-                hubTabsOuter.visibility = View.VISIBLE
-                hubTabsOuter.alpha = 0f
-                hubTabsOuter.scaleX = 0.94f
-                hubTabsOuter.scaleY = 0.94f
-
-                termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 250L
-                    interpolator = aosp17SpatialInterpolator
-                    addUpdateListener { va ->
-                        val p = safeClamp(va.animatedValue as Float, 0f, 1f)
-                        val inv = 1f - p
-                        val curW = (startTermW + (targetCompactW - startTermW) * p).roundToInt()
-                        val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                        lp.width = curW
-                        lp.weight = 0f
-                        lp.marginEnd = (dpF(8f) * p).roundToInt()
-                        termOuterFrame.layoutParams = lp
-
-                        if (prevMode == 3 && termOuterFrame.childCount > 0) {
-                            val firstChip = termOuterFrame.getChildAt(0) as? LinearLayout
-                            if (firstChip != null && firstChip.childCount >= 2) {
-                                val icV = firstChip.getChildAt(0)
-                                val lblV = firstChip.getChildAt(1) as? TextView
-                                val expandP = safeClamp((p - 0.10f) / 0.90f, 0f, 1f)
-                                if (lblV != null) {
-                                    lblV.visibility = View.VISIBLE
-                                    lblV.alpha = expandP
-                                    val lblLp = lblV.layoutParams as LinearLayout.LayoutParams
-                                    lblLp.width = (dpF(62f) * expandP).roundToInt()
-                                    lblV.layoutParams = lblLp
-                                }
-                                val icLp = icV.layoutParams as LinearLayout.LayoutParams
-                                icLp.marginEnd = (dpF(5f) * expandP).roundToInt()
-                                icV.layoutParams = icLp
-                                val hPad = (dpF(8f) + dpF(4f) * expandP).roundToInt()
-                                firstChip.setPadding(hPad, 0, hPad, 0)
-                            }
-                        }
-
-                        for (cIdx in 1 until termOuterFrame.childCount) {
-                            val ch = termOuterFrame.getChildAt(cIdx)
-                            ch.alpha = (inv * inv).coerceIn(0f, 1f)
-                            ch.translationX = -dpF(12f) * p
-                        }
-
-                        val fadeP = safeClamp((p - 0.08f) / 0.92f, 0f, 1f)
-                        hubTabsOuter.alpha = fadeP
-                        hubTabsOuter.scaleX = 0.94f + 0.06f * fadeP
-                        hubTabsOuter.scaleY = 0.94f + 0.06f * fadeP
-                        (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
-                            syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
-                        }
-                    }
-                    addListener(object : android.animation.AnimatorListenerAdapter() {
-                        override fun onAnimationEnd(animation: android.animation.Animator) {
-                            if (!termDrawerExpanded && selectedSftpPaths.isEmpty() && selectedPackageNames.isEmpty()) {
-                                currentTermPillMode = -1
-                                termAccessoryProg = if (activeTab == 1) 1f else 0f
-                                rebuildUniversalTermPill(false)
-                            }
-                        }
-                    })
-                    start()
-                }
-                return@rebuildPillLambda
-            }
-
-            currentTermPillMode = targetMode
-            lastTermPillTrashConfirm = trashConfirmExpanded
-            lastTermPillHasClip = hasPasteClipboard
-            lastTermPillSrvNull = srvNull
-            lastTermPillSrcCode = srcCodeNow
-            termPillCountTv = null
-
-            termExpandAnim?.cancel()
-            termAccessoryAnim?.cancel()
-            termOuterFrame.removeAllViews()
-
             fun makeSegmentPill(
                 icon: M3Icon?,
                 label: String?,
@@ -7256,6 +7160,194 @@ class TermuxActivity : Activity() {
                     }
                 }
             }
+
+            fun createAccessoryPillView(): LinearLayout {
+                return if (hasPasteClipboard) {
+                    val countClip = if (batchClipSources.isNotEmpty()) batchClipSources.size else 1
+                    makeSegmentPill(
+                        icon = M3Icon.COPY,
+                        label = tr("Вставить ($countClip)", "Paste ($countClip)"),
+                        leftR = pillInnerR,
+                        rightR = pillOuterR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = uiAccent,
+                        marginEndDp = 0
+                    ) {
+                        val sources = if (batchClipSources.isNotEmpty()) {
+                            batchClipSources.map { File(it) }
+                        } else {
+                            listOfNotNull(fileClipSource)
+                        }
+                        val isMove = if (batchClipSources.isNotEmpty()) batchClipIsMove else fileClipIsMove
+                        Thread {
+                            for (srcFile in sources) {
+                                val dst = File(localCurrentDir, srcFile.name)
+                                var handledDirect = false
+                                try {
+                                    if (srcFile.exists() && localCurrentDir.canWrite()) {
+                                        if (srcFile.isDirectory) srcFile.copyRecursively(dst, overwrite = true)
+                                        else srcFile.copyTo(dst, overwrite = true)
+                                        if (isMove) srcFile.deleteRecursively()
+                                        handledDirect = true
+                                    }
+                                } catch (_: Throwable) {}
+                                if (!handledDirect) {
+                                    val op = if (isMove) "mv -f" else "cp -rf"
+                                    nativeExecLocalRootCmd("$op -- ${shellEscapeSingle(srcFile.absolutePath)} ${shellEscapeSingle(dst.absolutePath)}")
+                                }
+                            }
+                            runOnUiThread {
+                                fileClipSource = null
+                                batchClipSources.clear()
+                                rebuildUniversalTermPill(true)
+                                activeSftpRefreshCallback?.invoke(true, null)
+                            }
+                        }.start()
+                    }
+                } else {
+                    val srcIcon = when (srcCodeNow) {
+                        0 -> M3Icon.FOLDER
+                        1 -> M3Icon.STORAGE
+                        2 -> M3Icon.ROOT_HASH
+                        else -> M3Icon.SERVER
+                    }
+                    makeSegmentPill(
+                        icon = srcIcon,
+                        label = "▸",
+                        leftR = pillInnerR,
+                        rightR = pillOuterR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = uiAccent,
+                        marginEndDp = 0,
+                        minW = 0
+                    ) {
+                        if (activeTab == 1) {
+                            termDrawerExpanded = true
+                            rebuildUniversalTermPill(true)
+                        }
+                    }
+                }
+            }
+
+            val prevMode = currentTermPillMode
+            val prevExpandedRight = (prevMode > 0)
+            val isExpandedRight = (targetMode != 0)
+            val startTermW = termOuterFrame.width
+
+            // If collapsing the expanded "Терминал" menu back to compact mode with animation,
+            // smoothly fold the live expanded segments leftward into "Терминал" FIRST while
+            // hubTabsOuter expands in from the right, and then swap in the compact chip!
+            if (animateMorph && prevExpandedRight && !isExpandedRight && termOuterFrame.childCount > 1 && startTermW > dp(150)) {
+                currentTermPillMode = 0
+                lastTermPillTrashConfirm = false
+                termPillCountTv = null
+                termExpandAnim?.cancel()
+                termAccessoryAnim?.cancel()
+
+                val accPill = if (activeTab == 1) createAccessoryPillView() else null
+                var accW = 0
+                if (accPill != null) {
+                    accPill.measure(
+                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                        View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
+                    )
+                    accW = accPill.measuredWidth.coerceAtLeast(dp(36))
+                    accPill.alpha = 0f
+                    accPill.scaleX = 0.70f
+                    accPill.scaleY = 0.70f
+                    accPill.translationX = -dpF(6f)
+                    termOuterFrame.addView(accPill, 1, LinearLayout.LayoutParams(accW, pillInnerH).apply {
+                        marginEnd = 0
+                    })
+                }
+
+                val targetCompactW = if (activeTab == 1) (dp(112) + accW + dp(4)) else dp(112)
+                hubTabsOuter.visibility = View.VISIBLE
+                hubTabsOuter.alpha = 0f
+                hubTabsOuter.scaleX = 0.94f
+                hubTabsOuter.scaleY = 0.94f
+
+                termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 250L
+                    interpolator = aosp17SpatialInterpolator
+                    addUpdateListener { va ->
+                        val p = safeClamp(va.animatedValue as Float, 0f, 1f)
+                        val inv = 1f - p
+                        val curW = (startTermW + (targetCompactW - startTermW) * p).roundToInt()
+                        val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                        lp.width = curW
+                        lp.weight = 0f
+                        lp.marginEnd = (dpF(8f) * p).roundToInt()
+                        termOuterFrame.layoutParams = lp
+
+                        if (prevMode == 3 && termOuterFrame.childCount > 0) {
+                            val firstChip = termOuterFrame.getChildAt(0) as? LinearLayout
+                            if (firstChip != null && firstChip.childCount >= 2) {
+                                val icV = firstChip.getChildAt(0)
+                                val lblV = firstChip.getChildAt(1) as? TextView
+                                val expandP = safeClamp((p - 0.08f) / 0.92f, 0f, 1f)
+                                if (lblV != null) {
+                                    lblV.visibility = View.VISIBLE
+                                    lblV.alpha = expandP
+                                    val lblLp = lblV.layoutParams as LinearLayout.LayoutParams
+                                    lblLp.width = (dpF(62f) * expandP).roundToInt()
+                                    lblV.layoutParams = lblLp
+                                }
+                                val icLp = icV.layoutParams as LinearLayout.LayoutParams
+                                icLp.marginEnd = (dpF(5f) * expandP).roundToInt()
+                                icV.layoutParams = icLp
+                                val hPad = (dpF(8f) + dpF(4f) * expandP).roundToInt()
+                                firstChip.setPadding(hPad, 0, hPad, 0)
+                            }
+                        }
+
+                        if (accPill != null) {
+                            val accFade = safeClamp((p - 0.12f) / 0.88f, 0f, 1f)
+                            accPill.alpha = accFade
+                            accPill.scaleX = 0.70f + 0.30f * accFade
+                            accPill.scaleY = 0.70f + 0.30f * accFade
+                            accPill.translationX = -dpF(6f) * (1f - accFade)
+                        }
+
+                        val startIndex = if (accPill != null) 2 else 1
+                        for (cIdx in startIndex until termOuterFrame.childCount) {
+                            val ch = termOuterFrame.getChildAt(cIdx)
+                            ch.alpha = (inv * inv).coerceIn(0f, 1f)
+                            ch.translationX = -dpF(12f) * p
+                        }
+
+                        val fadeP = safeClamp((p - 0.08f) / 0.92f, 0f, 1f)
+                        hubTabsOuter.alpha = fadeP
+                        hubTabsOuter.scaleX = 0.94f + 0.06f * fadeP
+                        hubTabsOuter.scaleY = 0.94f + 0.06f * fadeP
+                        (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
+                            syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
+                        }
+                    }
+                    addListener(object : android.animation.AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                            if (!termDrawerExpanded && selectedSftpPaths.isEmpty() && selectedPackageNames.isEmpty()) {
+                                currentTermPillMode = -1
+                                termAccessoryProg = if (activeTab == 1) 1f else 0f
+                                rebuildUniversalTermPill(false)
+                            }
+                        }
+                    })
+                    start()
+                }
+                return@rebuildPillLambda
+            }
+
+            currentTermPillMode = targetMode
+            lastTermPillTrashConfirm = trashConfirmExpanded
+            lastTermPillHasClip = hasPasteClipboard
+            lastTermPillSrvNull = srvNull
+            lastTermPillSrcCode = srcCodeNow
+            termPillCountTv = null
+
+            termExpandAnim?.cancel()
+            termAccessoryAnim?.cancel()
+            termOuterFrame.removeAllViews()
 
             if (isFileSelectionMode) {
                 val srv = activeSftpServer
@@ -7925,71 +8017,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 }
                 termOuterFrame.addView(termBackChip)
 
-                val accessoryPill: LinearLayout = if (hasPasteClipboard) {
-                    val countClip = if (batchClipSources.isNotEmpty()) batchClipSources.size else 1
-                    makeSegmentPill(
-                        icon = M3Icon.COPY,
-                        label = tr("Вставить ($countClip)", "Paste ($countClip)"),
-                        leftR = pillInnerR,
-                        rightR = pillOuterR,
-                        fillCol = uiSurfaceHigh,
-                        tintCol = uiAccent,
-                        marginEndDp = 0
-                    ) {
-                        val sources = if (batchClipSources.isNotEmpty()) {
-                            batchClipSources.map { File(it) }
-                        } else {
-                            listOfNotNull(fileClipSource)
-                        }
-                        val isMove = if (batchClipSources.isNotEmpty()) batchClipIsMove else fileClipIsMove
-                        Thread {
-                            for (srcFile in sources) {
-                                val dst = File(localCurrentDir, srcFile.name)
-                                var handledDirect = false
-                                try {
-                                    if (srcFile.exists() && localCurrentDir.canWrite()) {
-                                        if (srcFile.isDirectory) srcFile.copyRecursively(dst, overwrite = true)
-                                        else srcFile.copyTo(dst, overwrite = true)
-                                        if (isMove) srcFile.deleteRecursively()
-                                        handledDirect = true
-                                    }
-                                } catch (_: Throwable) {}
-                                if (!handledDirect) {
-                                    val op = if (isMove) "mv -f" else "cp -rf"
-                                    nativeExecLocalRootCmd("$op -- ${shellEscapeSingle(srcFile.absolutePath)} ${shellEscapeSingle(dst.absolutePath)}")
-                                }
-                            }
-                            runOnUiThread {
-                                fileClipSource = null
-                                batchClipSources.clear()
-                                rebuildUniversalTermPill(true)
-                                activeSftpRefreshCallback?.invoke(true, null)
-                            }
-                        }.start()
-                    }
-                } else {
-                    val srcIcon = when (srcCodeNow) {
-                        0 -> M3Icon.FOLDER
-                        1 -> M3Icon.STORAGE
-                        2 -> M3Icon.ROOT_HASH
-                        else -> M3Icon.SERVER
-                    }
-                    makeSegmentPill(
-                        icon = srcIcon,
-                        label = "▸",
-                        leftR = pillInnerR,
-                        rightR = pillOuterR,
-                        fillCol = uiSurfaceHigh,
-                        tintCol = uiAccent,
-                        marginEndDp = 0,
-                        minW = 0
-                    ) {
-                        if (activeTab == 1) {
-                            termDrawerExpanded = true
-                            rebuildUniversalTermPill(true)
-                        }
-                    }
-                }
+                val accessoryPill: LinearLayout = createAccessoryPillView()
                 accessoryPill.measure(
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
                     View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
