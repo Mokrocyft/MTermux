@@ -6560,7 +6560,7 @@ class TermuxActivity : Activity() {
         var lastTermPillSrcCode = -1
         var termPillCountTv: TextView? = null
 
-        rebuildUniversalTermPill = { animateMorph ->
+        rebuildUniversalTermPill = rebuildPillLambda@ { animateMorph ->
             if (activeTab != 1) {
                 termDrawerExpanded = false
             }
@@ -6598,7 +6598,7 @@ class TermuxActivity : Activity() {
                         .setInterpolator(OvershootInterpolator(2.0f))
                         .start()
                 }
-                return@rebuildUniversalTermPill
+                return@rebuildPillLambda
             }
 
             val modeChanged = (targetMode != currentTermPillMode) || (trashConfirmExpanded != lastTermPillTrashConfirm)
