@@ -7376,7 +7376,7 @@ class TermuxActivity : Activity() {
                             )
                             contentRow.addView(
                                 makeSegmentPill(
-                                    icon = M3Icon.CHMOD,
+                                    icon = M3Icon.CUT,
                                     label = null,
                                     leftR = pillInnerR,
                                     rightR = pillInnerR,
