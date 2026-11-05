@@ -729,10 +729,10 @@ class TermuxActivity : Activity() {
                         return
                     }
                     scale > 1.10f -> {
-                        if (vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_HEAVY_CLICK)) {
+                        if (vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_THUD)) {
                             vib.vibrate(
                                 VibrationEffect.startComposition()
-                                    .addPrimitive(VibrationEffect.Composition.PRIMITIVE_HEAVY_CLICK, 1.0f, 0)
+                                    .addPrimitive(VibrationEffect.Composition.PRIMITIVE_THUD, 1.0f, 0)
                                     .compose()
                             )
                             return
