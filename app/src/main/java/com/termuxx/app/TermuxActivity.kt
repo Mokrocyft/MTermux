@@ -11798,8 +11798,8 @@ class TermuxActivity : Activity() {
                                                 newlyExpandedTreePath = null
                                                 itemIconView.icon = M3Icon.FOLDER
                                                 itemIconView.invalidate()
-                                                for (chIdx in 0 until row.childCount) {
-                                                    val ch = row.getChildAt(chIdx)
+                                                for (chIdx in 0 until this@apply.childCount) {
+                                                    val ch = this@apply.getChildAt(chIdx)
                                                     if (ch is MaterialIconView && ch !== itemIconView) {
                                                         ch.animate()
                                                             .rotation(-90f)
