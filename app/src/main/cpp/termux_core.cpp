@@ -1159,8 +1159,9 @@ public:
     void startSelectionAt(int scrollOffset, int screenCol, int screenRow) noexcept {
         lock();
         int modes = mModes.load(std::memory_order_relaxed);
-        int clampedOffset = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, mScrollbackCount);
-        int logicalY = std::clamp(screenRow, 0, mRows - 1) - clampedOffset;
+        int maxSb = (modes & MODE_ALT_SCREEN) ? 0 : mScrollbackCount;
+        int clampedOffset = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp(scrollOffset, 0, maxSb);
+        int logicalY = std::clamp(screenRow - clampedOffset, -maxSb, mRows - 1);
         int col = std::clamp(screenCol, 0, mCols - 1);
 
         const Row& row = getRowByLogicalY(logicalY);
@@ -1336,9 +1337,10 @@ public:
             float targetX = touchX - mDragOffsetX;
             float targetY = touchY - mDragOffsetY;
 
+            int maxSb = (modes & MODE_ALT_SCREEN) ? 0 : mScrollbackCount;
             int screenCol = std::clamp(static_cast<int>(targetX / cellW), 0, mCols - 1);
-            int screenRow = std::clamp(static_cast<int>(targetY / cellH), 0, mRows - 1);
-            int logicalY = screenRow - clampedOffset;
+            int screenRow = static_cast<int>(std::floor(targetY / cellH));
+            int logicalY = std::clamp(screenRow - clampedOffset, -maxSb, mRows - 1);
 
             updateSelectionHandleLocked(mDragHandle == 1, screenCol, logicalY);
             return 1;

@@ -385,7 +385,11 @@ class TermuxActivity : Activity() {
             addUpdateListener { va ->
                 val t = safeClamp(va.animatedValue as Float, 0f, 1f)
                 currentExtraKeysScrollHidePx = startOffset + (targetOffset - startOffset) * t
-                extraKeysRoot.alpha = safeClamp(startAlpha + (targetAlpha - startAlpha) * t, 0f, 1f)
+                val curAlpha = safeClamp(startAlpha + (targetAlpha - startAlpha) * t, 0f, 1f)
+                extraKeysRoot.alpha = curAlpha
+                if (::bottomVignetteView.isInitialized) {
+                    bottomVignetteView.alpha = curAlpha
+                }
                 updateExtraKeysTranslationY()
             }
             start()
@@ -509,6 +513,12 @@ class TermuxActivity : Activity() {
         keyRepeatIntervalMs = prefs.getInt(KEY_KEY_REPEAT_INTERVAL_MS, 90).coerceIn(30, 250)
 
         window.apply {
+            statusBarColor = 0x00000000
+            navigationBarColor = 0x00000000
+            if (Build.VERSION.SDK_INT >= 29) {
+                isStatusBarContrastEnforced = false
+                isNavigationBarContrastEnforced = false
+            }
             attributes = attributes.apply {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -576,10 +586,10 @@ class TermuxActivity : Activity() {
             background = GradientDrawable(
                 GradientDrawable.Orientation.BOTTOM_TOP,
                 intArrayOf(
-                    0xF8000000.toInt(),
-                    0xEE000000.toInt(),
-                    0xA0000000.toInt(),
-                    0x44000000.toInt(),
+                    0xB8000000.toInt(),
+                    0x7A000000.toInt(),
+                    0x3C000000.toInt(),
+                    0x14000000.toInt(),
                     0x00000000
                 )
             )
@@ -590,7 +600,7 @@ class TermuxActivity : Activity() {
             bottomVignetteView,
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(140),
+                dp(96),
                 Gravity.BOTTOM
             )
         )
@@ -1956,15 +1966,15 @@ class TermuxActivity : Activity() {
         target.pivotY = h * 0.5f
     }
 
-    private fun applyRoundedCornersProgress(target: View, radiusPx: Float) {
-        if (radiusPx <= 0.5f) {
+    private fun applyRoundedCornersProgress(target: View, radiusPx: Float, topInsetPx: Int = 0) {
+        if (radiusPx <= 0.5f && topInsetPx <= 0) {
             target.clipToOutline = false
         } else {
             target.outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(view: View, outline: Outline) {
                     val vw = if (view.width > 0) view.width else resources.displayMetrics.widthPixels
                     val vh = if (view.height > 0) view.height else resources.displayMetrics.heightPixels
-                    outline.setRoundRect(0, 0, vw, vh, radiusPx)
+                    outline.setRoundRect(0, topInsetPx.coerceAtLeast(0), vw, vh, radiusPx)
                 }
             }
             target.clipToOutline = true
@@ -1994,8 +2004,13 @@ class TermuxActivity : Activity() {
         foregroundView.scaleY = scale
         foregroundView.translationX = dir * maxShiftX * ep
         foregroundView.translationY = 0f
-        foregroundView.alpha = 1f - (0.50f * ep)
-        applyRoundedCornersProgress(foregroundView, dpF(28f) * ep)
+        foregroundView.alpha = 1f - (0.55f * ep)
+        val topClip = if (backgroundView == null) {
+            ((foregroundView.paddingTop - dp(6)).coerceAtLeast(0) * ep).roundToInt()
+        } else {
+            0
+        }
+        applyRoundedCornersProgress(foregroundView, dpF(28f) * ep, topClip)
 
         if (backgroundView != null) {
             backgroundView.visibility = View.VISIBLE
@@ -3235,6 +3250,19 @@ class TermuxActivity : Activity() {
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dlg.window?.apply {
             setBackgroundDrawable(ColorDrawable(0x00000000))
+            statusBarColor = 0x00000000
+            navigationBarColor = 0x00000000
+            setDimAmount(0f)
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setWindowAnimations(0)
+            if (Build.VERSION.SDK_INT >= 29) {
+                isStatusBarContrastEnforced = false
+                isNavigationBarContrastEnforced = false
+            }
+            if (Build.VERSION.SDK_INT >= 29) {
+                isStatusBarContrastEnforced = false
+                isNavigationBarContrastEnforced = false
+            }
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             attributes = attributes.apply {
                 layoutInDisplayCutoutMode =
@@ -5172,6 +5200,9 @@ class TermuxActivity : Activity() {
                                 extraKeysScrollHideAnimator?.cancel()
                                 currentExtraKeysScrollHidePx = 0f
                                 extraKeysRoot.alpha = 1f
+                                if (::bottomVignetteView.isInitialized) {
+                                    bottomVignetteView.alpha = 1f
+                                }
                                 updateExtraKeysTranslationY()
                             }
                         }
@@ -7097,7 +7128,7 @@ class TermuxActivity : Activity() {
                 hubTabsOuter.scaleY = 0.94f
 
                 termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 240L
+                    duration = 250L
                     interpolator = aosp17SpatialInterpolator
                     addUpdateListener { va ->
                         val p = safeClamp(va.animatedValue as Float, 0f, 1f)
@@ -7109,9 +7140,30 @@ class TermuxActivity : Activity() {
                         lp.marginEnd = (dpF(8f) * p).roundToInt()
                         termOuterFrame.layoutParams = lp
 
+                        if (prevMode == 3 && termOuterFrame.childCount > 0) {
+                            val firstChip = termOuterFrame.getChildAt(0) as? LinearLayout
+                            if (firstChip != null && firstChip.childCount >= 2) {
+                                val icV = firstChip.getChildAt(0)
+                                val lblV = firstChip.getChildAt(1) as? TextView
+                                val expandP = safeClamp((p - 0.10f) / 0.90f, 0f, 1f)
+                                if (lblV != null) {
+                                    lblV.visibility = View.VISIBLE
+                                    lblV.alpha = expandP
+                                    val lblLp = lblV.layoutParams as LinearLayout.LayoutParams
+                                    lblLp.width = (dpF(62f) * expandP).roundToInt()
+                                    lblV.layoutParams = lblLp
+                                }
+                                val icLp = icV.layoutParams as LinearLayout.LayoutParams
+                                icLp.marginEnd = (dpF(5f) * expandP).roundToInt()
+                                icV.layoutParams = icLp
+                                val hPad = (dpF(8f) + dpF(4f) * expandP).roundToInt()
+                                firstChip.setPadding(hPad, 0, hPad, 0)
+                            }
+                        }
+
                         for (cIdx in 1 until termOuterFrame.childCount) {
                             val ch = termOuterFrame.getChildAt(cIdx)
-                            ch.alpha = inv.coerceIn(0f, 1f)
+                            ch.alpha = (inv * inv).coerceIn(0f, 1f)
                             ch.translationX = -dpF(12f) * p
                         }
 
@@ -7524,23 +7576,52 @@ class TermuxActivity : Activity() {
                 )
             } else if (activeTab == 1 && termDrawerExpanded) {
                 // Файлы Source Switcher Hotbar inside "Терминал" capsule:
-                // Uses a Liquid Sliding Pill where ONLY the active source shows its icon + label,
-                // while inactive sources show clean text ("Termux", "SD", "Root", "SSH") so "Termux" NEVER clips!
-                termOuterFrame.addView(
-                    makeSegmentPill(
-                        icon = M3Icon.TERMINAL,
-                        label = null,
-                        leftR = pillOuterR,
-                        rightR = pillInnerR,
-                        fillCol = uiAccentContainer,
-                        tintCol = uiOnAccentContainer,
-                        marginEndDp = 3,
-                        weightVal = 0f,
-                        minW = dp(36)
-                    ) {
+                // Smoothly compresses "Терминал" into a compact icon chip [ >_ ] while unfolding [ Termux | SD | Root | SSH ]!
+                val startChipFromMorph = animateMorph && !prevExpandedRight
+                val termDrawerIcon = MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiOnAccentContainer, 18f, 2.0f).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(19), dp(19)).apply {
+                        marginEnd = if (startChipFromMorph) dp(5) else 0
+                    }
+                }
+                val termDrawerLabel = TextView(this@TermuxActivity).apply {
+                    text = tr("Терминал", "Terminal")
+                    setSingleLine(true)
+                    setTextColor(uiOnAccentContainer)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    alpha = if (startChipFromMorph) 1f else 0f
+                    visibility = if (startChipFromMorph) View.VISIBLE else View.GONE
+                }
+                termDrawerLabel.measure(
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
+                )
+                val fullTermLabelW = termDrawerLabel.measuredWidth.coerceAtLeast(dp(58))
+                termDrawerLabel.layoutParams = LinearLayout.LayoutParams(
+                    if (startChipFromMorph) fullTermLabelW else 0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                val termDrawerChip = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    minimumWidth = dp(36)
+                    background = makeConnectedSegmentDrawable(uiAccentContainer, pillOuterR, pillInnerR)
+                    val initHPad = if (startChipFromMorph) dp(12) else dp(8)
+                    setPadding(initHPad, 0, initHPad, 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        pillInnerH
+                    ).apply {
+                        marginEnd = dp(3)
+                    }
+                    addView(termDrawerIcon)
+                    addView(termDrawerLabel)
+                    attachSmoothPressAnimation(this, 0.94f)
+                    setOnClickListener {
                         exitToTerminalAnimated()
                     }
-                )
+                }
+                termOuterFrame.addView(termDrawerChip)
 
                 val curSrc = currentSftpSourceCode()
                 val srcHotbarOuter = FrameLayout(this).apply {
@@ -7996,6 +8077,26 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                             hubTabsOuter.scaleX = 1f - 0.08f * t
                             hubTabsOuter.scaleY = 1f - 0.08f * t
 
+                            if (currentTermPillMode == 3 && termOuterFrame.childCount > 0) {
+                                val firstChip = termOuterFrame.getChildAt(0) as? LinearLayout
+                                if (firstChip != null && firstChip.childCount >= 2) {
+                                    val icV = firstChip.getChildAt(0)
+                                    val lblV = firstChip.getChildAt(1) as? TextView
+                                    val invT = (1f - t * 1.25f).coerceIn(0f, 1f)
+                                    if (lblV != null) {
+                                        lblV.visibility = if (invT > 0.02f) View.VISIBLE else View.GONE
+                                        lblV.alpha = invT
+                                        val lblLp = lblV.layoutParams as LinearLayout.LayoutParams
+                                        lblLp.width = (dpF(62f) * invT).roundToInt()
+                                        lblV.layoutParams = lblLp
+                                    }
+                                    val icLp = icV.layoutParams as LinearLayout.LayoutParams
+                                    icLp.marginEnd = (dpF(5f) * invT).roundToInt()
+                                    icV.layoutParams = icLp
+                                    val hPad = (dpF(8f) + dpF(4f) * invT).roundToInt()
+                                    firstChip.setPadding(hPad, 0, hPad, 0)
+                                }
+                            }
                             for (cIdx in 1 until termOuterFrame.childCount) {
                                 val ch = termOuterFrame.getChildAt(cIdx)
                                 val delay = (cIdx - 1) * 0.05f
@@ -14373,15 +14474,16 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     val maxSb = nativeGetActiveScrollback()
                     val newOffset = safeClampInt(scrollOffset + delta, 0, max(0, maxSb))
                     scrollOffset = newOffset
+                    val effTopY = computeEffectiveRow0Y()
                     nativeOnSelectionTouchPx(
                         MotionEvent.ACTION_MOVE,
                         scrollOffset,
                         lastDragTouchX,
-                        lastDragTouchY.coerceIn(0f, max(1f, height.toFloat() - 1f)),
+                        lastDragTouchY.coerceIn(0f, max(1f, height.toFloat() - 1f)) - effTopY,
                         cellWidth,
                         cellHeight,
                         width.toFloat(),
-                        height.toFloat(),
+                        (height.toFloat() - effTopY).coerceAtLeast(cellHeight * 2f),
                         handleRadiusPx
                     )
                     invalidateAllRows()
@@ -14433,8 +14535,9 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     override fun onLongPress(e: MotionEvent) {
                         if (scaleDetector.isInProgress) return
                         triggerHaptic(1.35f)
+                        val effTopY = computeEffectiveRow0Y()
                         val col = (e.x / cellWidth).toInt().coerceIn(0, max(0, cols - 1))
-                        val row = ((e.y - computeGridTopOffsetPx()) / cellHeight).toInt().coerceIn(0, max(0, rows - 1))
+                        val row = kotlin.math.floor(((e.y - effTopY) / cellHeight).toDouble()).toInt()
                         nativeStartTextSelection(scrollOffset, col, row)
                         if (copyOnSelect) {
                             val selTxt = nativeGetSelectedText()
@@ -14660,21 +14763,22 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 override fun onDestroyActionMode(mode: ActionMode) {}
 
                 override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
+                    val effTopY = computeEffectiveRow0Y()
                     if (nativeGetSelectionGeometryPx(
                             scrollOffset,
                             cellWidth,
                             cellHeight,
                             width.toFloat(),
-                            height.toFloat(),
+                            (height.toFloat() - effTopY).coerceAtLeast(cellHeight * 2f),
                             handleRadiusPx,
                             selGeomBuf
                         )
                     ) {
                         outRect.set(
                             selGeomBuf[10].roundToInt(),
-                            selGeomBuf[11].roundToInt(),
+                            (selGeomBuf[11] + effTopY).roundToInt().coerceIn(0, max(1, height)),
                             selGeomBuf[12].roundToInt(),
-                            selGeomBuf[13].roundToInt()
+                            (selGeomBuf[13] + effTopY).roundToInt().coerceIn(1, max(1, height))
                         )
                     } else {
                         outRect.set(0, 0, width, height)
@@ -14742,6 +14846,21 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 statusTop + dp(46)
             }
             return hdrBottom.toFloat()
+        }
+
+        internal fun computeEffectiveRow0Y(): Float {
+            val gridTopOffPx = computeGridTopOffsetPx()
+            val cursorStateForPan = nativeGetCursorState()
+            val curCursorRow = if (cursorStateForPan >= 0) (cursorStateForPan ushr 16) and 0x1FFF else 0
+            val overscrollUpPx = if (scrollOffset < 0) (-scrollOffset) * cellHeight else 0f
+            val activeBottomLimitY = (height - max(currentSysNavBottomPx, currentImeBottomPx)).toFloat()
+            val cursorBottomY = gridTopOffPx + (curCursorRow + 1) * cellHeight
+            val imeOccludedPanPx = if (scrollOffset == 0 && height > 0 && cursorBottomY > activeBottomLimitY) {
+                cursorBottomY - activeBottomLimitY
+            } else {
+                0f
+            }
+            return gridTopOffPx - (overscrollUpPx + imeOccludedPanPx)
         }
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -15093,13 +15212,13 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 }
             }
 
-            // Draw Selection Handles
+            // Draw Selection Handles (aligned with effectiveRow0Y viewport offset!)
             if (selecting && nativeGetSelectionGeometryPx(
                     scrollOffset,
                     cellWidth,
                     cellHeight,
                     width.toFloat(),
-                    height.toFloat(),
+                    (height.toFloat() - effectiveRow0Y).coerceAtLeast(cellHeight * 2f),
                     handleRadiusPx,
                     selGeomBuf
                 )
@@ -15107,18 +15226,18 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 drawColorOs17Handle(
                     canvas,
                     selGeomBuf[0],
-                    selGeomBuf[1],
-                    selGeomBuf[2],
+                    selGeomBuf[1] + effectiveRow0Y,
+                    selGeomBuf[2] + effectiveRow0Y,
                     selGeomBuf[3],
-                    selGeomBuf[4]
+                    selGeomBuf[4] + effectiveRow0Y
                 )
                 drawColorOs17Handle(
                     canvas,
                     selGeomBuf[5],
-                    selGeomBuf[6],
-                    selGeomBuf[7],
+                    selGeomBuf[6] + effectiveRow0Y,
+                    selGeomBuf[7] + effectiveRow0Y,
                     selGeomBuf[8],
-                    selGeomBuf[9]
+                    selGeomBuf[9] + effectiveRow0Y
                 )
             }
         }
@@ -15240,15 +15359,16 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             if (nativeIsSelectingText() && event.pointerCount == 1) {
                 lastDragTouchX = event.x
                 lastDragTouchY = event.y
+                val effTopY = computeEffectiveRow0Y()
                 val dragRes = nativeOnSelectionTouchPx(
                     event.actionMasked,
                     scrollOffset,
                     event.x,
-                    event.y,
+                    event.y - effTopY,
                     cellWidth,
                     cellHeight,
                     width.toFloat(),
-                    height.toFloat(),
+                    (height.toFloat() - effTopY).coerceAtLeast(cellHeight * 2f),
                     handleRadiusPx
                 )
                 if (dragRes == 1) {
@@ -15379,7 +15499,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             }
 
             internal fun syncWithTerminalGrid(notifyIme: Boolean) {
-                if (preDeleteCount > 0 || batchDepth > 0) return
+                if (preDeleteCount > 0 || batchDepth > 0 || nativeIsSelectingText()) return
                 val now = SystemClock.uptimeMillis()
                 val gridLine = nativeGetInputLineBeforeCursor()
                 if (gridLine.length >= localBuffer.length || (now - lastLocalEditUptimeMs) > 45L) {
@@ -15401,6 +15521,14 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
              */
             private fun applyLocalBufferDiffToPty() {
                 if (batchDepth > 0) return
+                if (nativeIsSelectingText()) {
+                    val gridLine = nativeGetInputLineBeforeCursor()
+                    localBuffer.clear()
+                    localBuffer.append(gridLine)
+                    terminalSentLine = gridLine
+                    Selection.setSelection(localBuffer, localBuffer.length)
+                    return
+                }
                 val currentStr = localBuffer.toString()
                 val lastNl = max(currentStr.lastIndexOf('\n'), currentStr.lastIndexOf('\r'))
                 if (lastNl >= 0) {
@@ -15546,6 +15674,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             }
 
             override fun setSelection(start: Int, end: Int): Boolean {
+                if (nativeIsSelectingText()) return true
                 if (preDeleteCount == 0 && batchDepth == 0) {
                     syncWithTerminalGrid(false)
                 }
