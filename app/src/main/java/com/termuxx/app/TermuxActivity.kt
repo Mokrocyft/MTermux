@@ -2373,45 +2373,217 @@ class TermuxActivity : Activity() {
         }
         private val rect = RectF()
         private val tickPath = Path()
+        private var selProgress: Float = if (isSwatchSelected) 1f else 0f
+        private var selAnim: ValueAnimator? = null
+        private var tokenAnim: ValueAnimator? = null
+        private var drawColBg: Int = tokens.getOrElse(13) { uiPreviewSquare }
+        private var drawCol0: Int = tokens.getOrElse(0) { uiAccent }
+        private var drawCol4: Int = tokens.getOrElse(4) { uiSecondary }
+        private var drawCol6: Int = tokens.getOrElse(6) { uiTertiary }
+
+        fun updateStateAnimated(newTokens: IntArray, selected: Boolean = isSwatchSelected, animate: Boolean = true) {
+            val prevTokens = tokens
+            tokens = newTokens
+            val targetBg = newTokens.getOrElse(13) { uiPreviewSquare }
+            val target0 = newTokens.getOrElse(0) { uiAccent }
+            val target4 = newTokens.getOrElse(4) { uiSecondary }
+            val target6 = newTokens.getOrElse(6) { uiTertiary }
+
+            if (!animate || !isLaidOut) {
+                isSwatchSelected = selected
+                selProgress = if (selected) 1f else 0f
+                drawColBg = targetBg
+                drawCol0 = target0
+                drawCol4 = target4
+                drawCol6 = target6
+                invalidate()
+                return
+            }
+
+            if (selected != isSwatchSelected) {
+                isSwatchSelected = selected
+                selAnim?.cancel()
+                val startS = selProgress
+                val endS = if (selected) 1f else 0f
+                selAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 250L
+                    interpolator = if (selected) OvershootInterpolator(1.9f) else PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                    addUpdateListener { va ->
+                        val t = va.animatedValue as Float
+                        selProgress = startS + (endS - startS) * t
+                        invalidate()
+                    }
+                    start()
+                }
+            }
+
+            if (!prevTokens.contentEquals(newTokens)) {
+                tokenAnim?.cancel()
+                val sBg = drawColBg
+                val s0 = drawCol0
+                val s4 = drawCol4
+                val s6 = drawCol6
+                tokenAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 280L
+                    interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                    addUpdateListener { va ->
+                        val p = safeClamp(va.animatedValue as Float, 0f, 1f)
+                        drawColBg = blendColor(sBg, targetBg, p)
+                        drawCol0 = blendColor(s0, target0, p)
+                        drawCol4 = blendColor(s4, target4, p)
+                        drawCol6 = blendColor(s6, target6, p)
+                        invalidate()
+                    }
+                    start()
+                }
+            } else {
+                invalidate()
+            }
+        }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val w = width.toFloat()
             val h = height.toFloat()
-            val r = dpF(12f)
+            val sp = safeClamp(selProgress, 0f, 1.15f)
+            val spClamped = safeClamp(selProgress, 0f, 1f)
+            val r = dpF(12f + 3.5f * spClamped)
             rect.set(0f, 0f, w, h)
-            paint.color = tokens.getOrElse(13) { uiPreviewSquare }
+            paint.color = drawColBg
             canvas.drawRoundRect(rect, r, r, paint)
 
-            val pad = if (isSwatchWithCenter) dpF(6f) else dpF(9f)
+            val pad = if (isSwatchWithCenter) dpF(6f - 0.8f * spClamped) else dpF(9f)
             rect.set(pad, pad, w - pad, h - pad)
 
-            paint.color = tokens.getOrElse(0) { uiAccent }
+            paint.color = drawCol0
             canvas.drawArc(rect, 180f, 180f, true, paint)
 
-            paint.color = tokens.getOrElse(4) { uiSecondary }
+            paint.color = drawCol4
             canvas.drawArc(rect, 90f, 90f, true, paint)
 
-            paint.color = tokens.getOrElse(6) { uiTertiary }
+            paint.color = drawCol6
             canvas.drawArc(rect, 0f, 90f, true, paint)
 
             if (isSwatchWithCenter) {
                 val cx = w * 0.5f
                 val cy = h * 0.5f
-                val cr = dpF(10f)
+                val cr = dpF(9.5f + 1.4f * sp)
                 paint.color = seedCenterColor
                 canvas.drawCircle(cx, cy, cr, paint)
 
-                if (isSwatchSelected) {
+                if (spClamped > 0.02f) {
+                    val tickScale = 0.45f + 0.55f * sp
+                    val trRadius = cr * tickScale
                     tickPaint.strokeWidth = dpF(2.2f)
-                    tickPaint.color = 0xFFFFFFFF.toInt()
+                    tickPaint.color = withAlpha(0xFFFFFFFF.toInt(), (255f * spClamped).roundToInt().coerceIn(0, 255))
                     tickPath.reset()
-                    tickPath.moveTo(cx - cr * 0.45f, cy)
-                    tickPath.lineTo(cx - cr * 0.12f, cy + cr * 0.34f)
-                    tickPath.lineTo(cx + cr * 0.48f, cy - cr * 0.32f)
+                    tickPath.moveTo(cx - trRadius * 0.45f, cy)
+                    tickPath.lineTo(cx - trRadius * 0.12f, cy + trRadius * 0.34f)
+                    tickPath.lineTo(cx + trRadius * 0.48f, cy - trRadius * 0.32f)
                     canvas.drawPath(tickPath, tickPaint)
                 }
             }
+        }
+    }
+
+    private fun animateSectionExpandCollapse(sectionView: View, expand: Boolean, durationMs: Long = 280L) {
+        (sectionView.tag as? ValueAnimator)?.cancel()
+        sectionView.animate().cancel()
+        if (expand) {
+            val wasVisible = (sectionView.visibility == View.VISIBLE && sectionView.height > dp(4))
+            val startH = if (wasVisible) sectionView.height else 0
+            val startAlpha = if (wasVisible) sectionView.alpha.coerceIn(0f, 1f) else 0f
+            sectionView.visibility = View.VISIBLE
+            val parentView = sectionView.parent as? View
+            val availW = if (parentView != null && parentView.width > 0) {
+                parentView.width - parentView.paddingLeft - parentView.paddingRight
+            } else {
+                resources.displayMetrics.widthPixels - dp(36)
+            }
+            sectionView.measure(
+                View.MeasureSpec.makeMeasureSpec(availW.coerceAtLeast(dp(120)), View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+            )
+            val targetH = sectionView.measuredHeight.coerceAtLeast(dp(44))
+            sectionView.pivotY = 0f
+            if (!wasVisible) {
+                sectionView.alpha = 0f
+                sectionView.scaleY = 0.88f
+                sectionView.translationY = -dpF(10f)
+                val initLp = sectionView.layoutParams ?: LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    1
+                )
+                initLp.height = 1
+                sectionView.layoutParams = initLp
+            }
+            val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = durationMs
+                interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                addUpdateListener { va ->
+                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                    val lp = sectionView.layoutParams
+                    if (lp != null) {
+                        lp.height = (startH + (targetH - startH) * t).roundToInt().coerceAtLeast(1)
+                        sectionView.layoutParams = lp
+                    }
+                    sectionView.alpha = safeClamp(startAlpha + (1f - startAlpha) * ((t - 0.06f) / 0.94f).coerceIn(0f, 1f), 0f, 1f)
+                    sectionView.scaleY = 0.88f + 0.12f * t
+                    sectionView.translationY = -dpF(10f) * (1f - t)
+                }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        val lp = sectionView.layoutParams
+                        if (lp != null) {
+                            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+                            sectionView.layoutParams = lp
+                        }
+                        sectionView.alpha = 1f
+                        sectionView.scaleY = 1f
+                        sectionView.translationY = 0f
+                        sectionView.tag = null
+                    }
+                })
+            }
+            sectionView.tag = anim
+            anim.start()
+        } else {
+            if (sectionView.visibility != View.VISIBLE) return
+            val startH = sectionView.height.takeIf { it > 0 } ?: dp(110)
+            val startAlpha = sectionView.alpha.coerceIn(0.08f, 1f)
+            sectionView.pivotY = 0f
+            val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = (durationMs * 0.88f).toLong().coerceAtLeast(180L)
+                interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                addUpdateListener { va ->
+                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                    val inv = 1f - t
+                    val lp = sectionView.layoutParams
+                    if (lp != null) {
+                        lp.height = (startH * inv).roundToInt()
+                        sectionView.layoutParams = lp
+                    }
+                    sectionView.alpha = startAlpha * (inv * inv)
+                    sectionView.scaleY = 0.88f + 0.12f * inv
+                    sectionView.translationY = -dpF(8f) * t
+                }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        sectionView.visibility = View.GONE
+                        val lp = sectionView.layoutParams
+                        if (lp != null) {
+                            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+                            sectionView.layoutParams = lp
+                        }
+                        sectionView.alpha = 1f
+                        sectionView.scaleY = 1f
+                        sectionView.translationY = 0f
+                        sectionView.tag = null
+                    }
+                })
+            }
+            sectionView.tag = anim
+            anim.start()
         }
     }
 
@@ -3096,10 +3268,7 @@ class TermuxActivity : Activity() {
                     for ((idx, styleOpt) in MONET_STYLES_2026.withIndex()) {
                         val sel = (monetStyleIndex == styleOpt.index)
                         val toks = nativeGenerateColorSpec2026Palette(effSeed, styleOpt.index)
-                        styleCardCanvases.getOrNull(idx)?.let { cv ->
-                            cv.tokens = toks
-                            cv.invalidate()
-                        }
+                        styleCardCanvases.getOrNull(idx)?.updateStateAnimated(toks, animate = true)
                         targetFills[idx] = if (sel) toks[2] else uiSurfaceLow
                         targetTitles[idx] = if (sel) toks[3] else COLOR_TEXT_BRIGHT
                         targetSubs[idx] = if (sel) withAlpha(toks[3], 205) else COLOR_TEXT_DIM
@@ -3141,35 +3310,15 @@ class TermuxActivity : Activity() {
                         val nextLow = uiSurfaceLow
                         swatchCardBg.setColor(nextLow)
                         for ((sArgb, cv) in swatchCanvases) {
-                            cv.isSwatchSelected = (sArgb == colorSeedArgb)
-                            cv.tokens = nativeGenerateColorSpec2026Palette(sArgb, monetStyleIndex)
-                            cv.invalidate()
+                            cv.updateStateAnimated(
+                                nativeGenerateColorSpec2026Palette(sArgb, monetStyleIndex),
+                                selected = (sArgb == colorSeedArgb),
+                                animate = true
+                            )
                         }
-                        // Smoothly reveal or hide the Seed Color section in place without destroying the switch card!
-                        seedSectionWrap.animate().cancel()
-                        if (!enabled) {
-                            seedSectionWrap.visibility = View.VISIBLE
-                            seedSectionWrap.alpha = 0f
-                            seedSectionWrap.translationY = -dpF(10f)
-                            seedSectionWrap.animate()
-                                .alpha(1f)
-                                .translationY(0f)
-                                .setDuration(280L)
-                                .setInterpolator(PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f))
-                                .start()
-                        } else {
-                            seedSectionWrap.animate()
-                                .alpha(0f)
-                                .translationY(-dpF(8f))
-                                .setDuration(220L)
-                                .setInterpolator(PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f))
-                                .withEndAction {
-                                    if (useSystemDynamicColor) {
-                                        seedSectionWrap.visibility = View.GONE
-                                    }
-                                }
-                                .start()
-                        }
+                        // Smoothly expand or collapse the "Базовый оттенок" section height & alpha
+                        // so "Стиль палитры" below glides up/down smoothly with zero jump!
+                        animateSectionExpandCollapse(seedSectionWrap, expand = !enabled, durationMs = 290L)
                         ValueAnimator.ofFloat(0f, 1f).apply {
                             duration = 320L
                             addUpdateListener { va ->
@@ -3224,9 +3373,11 @@ class TermuxActivity : Activity() {
                                 start()
                             }
                             for ((sArgb, cv) in swatchCanvases) {
-                                cv.isSwatchSelected = (sArgb == colorSeedArgb)
-                                cv.tokens = nativeGenerateColorSpec2026Palette(sArgb, monetStyleIndex)
-                                cv.invalidate()
+                                cv.updateStateAnimated(
+                                    nativeGenerateColorSpec2026Palette(sArgb, monetStyleIndex),
+                                    selected = (sArgb == colorSeedArgb),
+                                    animate = true
+                                )
                             }
                             animateStyleCardsInPlace()
                         }
@@ -6238,94 +6389,181 @@ class TermuxActivity : Activity() {
             }
         }
 
-        // Liquid Glass Capsule Animator (shared by top tabs, source hotbar, hero icon hotbar, breadcrumbs & chmod):
-        // Leading edge races ahead while trailing edge lags and snaps with a liquid spring,
-        // dynamically tracking targetTab bounds even if targetTab resizes during the animation!
+        // Liquid Glass Capsule Tracker & Animator (shared by top tabs, source hotbar, hero icon hotbar, breadcrumbs & chmod):
+        // Tracks live bounds of both `prevFromTab` and `currentTargetTab` on every frame and every layout pass
+        // via OnLayoutChangeListener so the pill NEVER desyncs when adjacent views (like `termOuterFrame`) resize!
+        class LiquidPillTrackerState(
+            var currentTargetTab: View? = null,
+            var prevFromTab: View? = null,
+            var fallbackStartLeft: Float = 0f,
+            var fallbackStartRight: Float = 0f,
+            var movingRight: Boolean = true,
+            var animProgress: Float = 1f,
+            var animator: ValueAnimator? = null,
+            var observedParent: View? = null,
+            var observedRow: View? = null
+        )
+
+        fun syncLiquidPillGeometryNow(pillView: View, parentOuter: View, state: LiquidPillTrackerState) {
+            val targetTab = state.currentTargetTab ?: return
+            if (targetTab.width <= 0 || targetTab.height <= 0) return
+
+            val liveOuterW = (parentOuter.width - parentOuter.paddingLeft - parentOuter.paddingRight)
+                .toFloat().coerceAtLeast(dpF(24f))
+            val liveTabW = targetTab.width.toFloat().coerceAtLeast(1f)
+            val liveTabH = targetTab.height.coerceAtLeast(1)
+            val endLeft = safeClamp(targetTab.left.toFloat(), 0f, max(0f, liveOuterW - liveTabW))
+            val endRight = safeClamp(endLeft + liveTabW, endLeft + 1f, max(endLeft + 1f, liveOuterW))
+
+            val t = safeClamp(state.animProgress, 0f, 1f)
+            val curLeft: Float
+            val curRight: Float
+            if (t >= 0.999f) {
+                curLeft = endLeft
+                curRight = endRight
+                pillView.scaleY = 1f
+            } else {
+                val fromView = state.prevFromTab
+                val sLeft: Float
+                val sRight: Float
+                if (fromView != null && fromView !== targetTab && fromView.parent === targetTab.parent && fromView.width > 0) {
+                    sLeft = safeClamp(fromView.left.toFloat(), 0f, max(0f, liveOuterW - 1f))
+                    sRight = safeClamp(fromView.right.toFloat(), sLeft + 1f, max(sLeft + 1f, liveOuterW))
+                } else {
+                    sLeft = state.fallbackStartLeft
+                    sRight = state.fallbackStartRight
+                }
+                val inv = 1f - t
+                val leadT = 1f - inv * inv * inv * inv
+                val trailT = if (t < 0.26f) {
+                    (t / 0.26f) * (t / 0.26f) * 0.16f
+                } else {
+                    val p = (t - 0.26f) / 0.74f
+                    val spring = 1f - kotlin.math.exp(-4.8f * p) * kotlin.math.cos(4.6f * p)
+                    safeClamp(0.16f + 0.84f * spring, 0f, 1.03f)
+                }
+                if (state.movingRight) {
+                    curLeft = sLeft + (endLeft - sLeft) * trailT
+                    curRight = sRight + (endRight - sRight) * leadT
+                } else {
+                    curLeft = sLeft + (endLeft - sLeft) * leadT
+                    curRight = sRight + (endRight - sRight) * trailT
+                }
+                val rawW = (curRight - curLeft).coerceAtLeast(1f)
+                val stretchRatio = safeClamp(rawW / liveTabW, 0.86f, 1.75f)
+                val settleBounce = if (t > 0.65f) {
+                    val sp = (t - 0.65f) / 0.35f
+                    0.03f * kotlin.math.sin(sp * Math.PI.toFloat())
+                } else 0f
+                pillView.scaleY = safeClamp(
+                    safeClamp(1f / kotlin.math.sqrt(stretchRatio), 0.90f, 1.02f) + settleBounce,
+                    0.90f,
+                    1.04f
+                )
+            }
+
+            val clampedLeft = safeClamp(curLeft, 0f, max(0f, liveOuterW - 1f))
+            val minRight = min(clampedLeft + dpF(12f), liveOuterW)
+            val clampedRight = safeClamp(curRight, minRight, max(minRight, liveOuterW))
+            val curW = (clampedRight - clampedLeft).roundToInt().coerceAtLeast(1)
+
+            pillView.translationX = clampedLeft
+            val lp = pillView.layoutParams as? FrameLayout.LayoutParams
+                ?: FrameLayout.LayoutParams(curW, liveTabH)
+            if (lp.width != curW || lp.height != liveTabH) {
+                lp.width = curW
+                lp.height = liveTabH
+                pillView.layoutParams = lp
+            }
+            if (parentOuter.isLaidOut) {
+                val pLeft = parentOuter.paddingLeft
+                val pTop = pillView.top.takeIf { it > 0 } ?: parentOuter.paddingTop
+                pillView.layout(pLeft, pTop, pLeft + curW, pTop + liveTabH)
+                pillView.invalidateOutline()
+                pillView.invalidate()
+            }
+        }
+
         fun animateLiquidSegmentedPill(
             pillView: View,
             parentOuter: View,
             targetTab: View,
             animate: Boolean
         ) {
-            (pillView.tag as? ValueAnimator)?.cancel()
+            val state = (pillView.tag as? LiquidPillTrackerState) ?: LiquidPillTrackerState().also {
+                pillView.tag = it
+            }
+            state.animator?.cancel()
             pillView.scaleX = 1f
-            if (targetTab.width <= 0) return
 
-            val curLpW = pillView.layoutParams?.width ?: 0
-            val curLpH = pillView.layoutParams?.height ?: 0
-            val initTargetLeft = targetTab.left.toFloat()
-            val initTargetW = targetTab.width.toFloat().coerceAtLeast(1f)
-            val initTargetH = targetTab.height.coerceAtLeast(1)
-
-            if (!animate || curLpW <= 0) {
-                pillView.scaleY = 1f
-                pillView.layoutParams = FrameLayout.LayoutParams(targetTab.width, initTargetH)
-                pillView.translationX = initTargetLeft
-                return
-            }
-
-            val startLeft = pillView.translationX
-            val startW = curLpW.toFloat().coerceAtLeast(dpF(16f))
-            val startRight = startLeft + startW
-
-            if (abs(initTargetLeft - startLeft) < 0.5f && abs(initTargetW - startW) < 0.5f && curLpH == initTargetH) {
-                pillView.scaleY = 1f
-                pillView.layoutParams = FrameLayout.LayoutParams(targetTab.width, initTargetH)
-                pillView.translationX = initTargetLeft
-                return
-            }
-
-            val movingRight = initTargetLeft >= startLeft
-            val anim = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 310L
-                interpolator = LinearInterpolator()
-                addUpdateListener { va ->
-                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                    val liveOuterW = (parentOuter.width - parentOuter.paddingLeft - parentOuter.paddingRight)
-                        .toFloat().coerceAtLeast(dpF(24f))
-                    val liveTabW = targetTab.width.toFloat().coerceAtLeast(1f)
-                    val liveTabH = targetTab.height.coerceAtLeast(1)
-                    val endLeft = safeClamp(targetTab.left.toFloat(), 0f, max(0f, liveOuterW - liveTabW))
-                    val endRight = safeClamp(endLeft + liveTabW, endLeft + 1f, max(endLeft + 1f, liveOuterW))
-
-                    val inv = 1f - t
-                    val leadT = 1f - inv * inv * inv * inv
-                    val trailT = if (t < 0.26f) {
-                        (t / 0.26f) * (t / 0.26f) * 0.16f
-                    } else {
-                        val p = (t - 0.26f) / 0.74f
-                        val spring = 1f - kotlin.math.exp(-4.8f * p) * kotlin.math.cos(4.6f * p)
-                        safeClamp(0.16f + 0.84f * spring, 0f, 1.03f)
-                    }
-                    val curLeft: Float
-                    val curRight: Float
-                    if (movingRight) {
-                        curLeft = startLeft + (endLeft - startLeft) * trailT
-                        curRight = startRight + (endRight - startRight) * leadT
-                    } else {
-                        curLeft = startLeft + (endLeft - startLeft) * leadT
-                        curRight = startRight + (endRight - startRight) * trailT
-                    }
-                    val clampedLeft = safeClamp(curLeft, 0f, max(0f, liveOuterW - 1f))
-                    val minRight = min(clampedLeft + dpF(12f), liveOuterW)
-                    val clampedRight = safeClamp(curRight, minRight, max(minRight, liveOuterW))
-                    val curW = (clampedRight - clampedLeft).coerceAtLeast(1f)
-
-                    val stretchRatio = safeClamp(curW / liveTabW, 0.86f, 1.75f)
-                    val settleBounce = if (t > 0.65f) {
-                        val sp = (t - 0.65f) / 0.35f
-                        0.03f * kotlin.math.sin(sp * Math.PI.toFloat())
-                    } else 0f
-                    pillView.scaleY = safeClamp(
-                        safeClamp(1f / kotlin.math.sqrt(stretchRatio), 0.90f, 1.02f) + settleBounce,
-                        0.90f,
-                        1.04f
-                    )
-                    pillView.translationX = clampedLeft
-                    pillView.layoutParams = FrameLayout.LayoutParams(curW.roundToInt(), liveTabH)
+            if (state.observedParent !== parentOuter) {
+                state.observedParent = parentOuter
+                parentOuter.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                    syncLiquidPillGeometryNow(pillView, parentOuter, state)
                 }
             }
-            pillView.tag = anim
+            val rowParent = targetTab.parent as? View
+            if (rowParent != null && rowParent !== parentOuter && state.observedRow !== rowParent) {
+                state.observedRow = rowParent
+                rowParent.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                    syncLiquidPillGeometryNow(pillView, parentOuter, state)
+                }
+            }
+
+            val prevTab = state.currentTargetTab
+            val curLpW = pillView.layoutParams?.width ?: 0
+            val curLeftNow = pillView.translationX
+            val curRightNow = curLeftNow + curLpW.toFloat().coerceAtLeast(dpF(16f))
+
+            state.currentTargetTab = targetTab
+            if (targetTab.width <= 0) {
+                state.animProgress = 1f
+                state.prevFromTab = targetTab
+                return
+            }
+
+            if (!animate || curLpW <= 0) {
+                state.animProgress = 1f
+                state.prevFromTab = targetTab
+                syncLiquidPillGeometryNow(pillView, parentOuter, state)
+                return
+            }
+
+            val initTargetLeft = targetTab.left.toFloat()
+            val initTargetW = targetTab.width.toFloat().coerceAtLeast(1f)
+            if (prevTab === targetTab && abs(initTargetLeft - curLeftNow) < 1f && abs(initTargetW - curLpW) < 1f) {
+                state.animProgress = 1f
+                syncLiquidPillGeometryNow(pillView, parentOuter, state)
+                return
+            }
+
+            state.prevFromTab = if (prevTab != null && prevTab !== targetTab) prevTab else null
+            state.fallbackStartLeft = curLeftNow
+            state.fallbackStartRight = curRightNow
+            val refStartLeft = if (prevTab != null && prevTab !== targetTab && prevTab.width > 0) {
+                prevTab.left.toFloat()
+            } else {
+                curLeftNow
+            }
+            state.movingRight = initTargetLeft >= refStartLeft
+            state.animProgress = 0f
+
+            val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 300L
+                interpolator = LinearInterpolator()
+                addUpdateListener { va ->
+                    state.animProgress = safeClamp(va.animatedValue as Float, 0f, 1f)
+                    syncLiquidPillGeometryNow(pillView, parentOuter, state)
+                }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        state.animProgress = 1f
+                        state.prevFromTab = state.currentTargetTab
+                        syncLiquidPillGeometryNow(pillView, parentOuter, state)
+                    }
+                })
+            }
+            state.animator = anim
             anim.start()
         }
 
@@ -6380,18 +6618,14 @@ class TermuxActivity : Activity() {
                 val icLp = ic.layoutParams as LinearLayout.LayoutParams
                 val targetIcW = (dpF(16f) * selF).roundToInt()
                 val targetIcMargin = (dpF(5f) * selF).roundToInt()
-                if (targetIcW <= 1) {
-                    ic.visibility = View.GONE
-                } else {
-                    ic.visibility = View.VISIBLE
-                    ic.alpha = selF
-                    ic.scaleX = 0.65f + 0.35f * selF
-                    ic.scaleY = 0.65f + 0.35f * selF
-                    if (icLp.width != targetIcW || icLp.marginEnd != targetIcMargin) {
-                        icLp.width = targetIcW
-                        icLp.marginEnd = targetIcMargin
-                        ic.layoutParams = icLp
-                    }
+                ic.visibility = View.VISIBLE
+                ic.alpha = selF
+                ic.scaleX = 0.65f + 0.35f * selF
+                ic.scaleY = 0.65f + 0.35f * selF
+                if (icLp.width != targetIcW || icLp.marginEnd != targetIcMargin) {
+                    icLp.width = targetIcW
+                    icLp.marginEnd = targetIcMargin
+                    ic.layoutParams = icLp
                 }
                 ic.tintColor = blendColor(COLOR_TEXT_DIM, uiOnAccentContainer, selF)
                 ic.invalidate()
@@ -6403,11 +6637,14 @@ class TermuxActivity : Activity() {
                 box.scaleX = 1f - 0.03f * pF
                 box.scaleY = 1f - 0.03f * pF
                 val lp = box.layoutParams as LinearLayout.LayoutParams
-                val targetWeight = 0.90f + 0.32f * selF
-                if (abs(lp.weight - targetWeight) > 0.005f) {
+                val targetWeight = 0.86f + 0.42f * selF
+                if (abs(lp.weight - targetWeight) > 0.004f) {
                     lp.weight = targetWeight
                     box.layoutParams = lp
                 }
+            }
+            (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
+                syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
             }
         }
 
@@ -6439,7 +6676,7 @@ class TermuxActivity : Activity() {
                 ).apply {
                     marginEnd = if (i == activeTab) dp(5) else 0
                 }
-                if (i != activeTab) visibility = View.GONE
+                alpha = if (i == activeTab) 1f else 0f
             }
             val tv = TextView(this).apply {
                 text = tabTitle
@@ -6451,8 +6688,8 @@ class TermuxActivity : Activity() {
             val tabBox = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
-                setPadding(dp(6), 0, dp(6), 0)
-                layoutParams = LinearLayout.LayoutParams(0, pillInnerH, if (i == activeTab) 1.22f else 0.90f)
+                setPadding(dp(4), 0, dp(4), 0)
+                layoutParams = LinearLayout.LayoutParams(0, pillInnerH, if (i == activeTab) 1.28f else 0.86f)
                 addView(icView)
                 addView(tv)
                 setOnTouchListener { v, ev ->
@@ -6559,6 +6796,9 @@ class TermuxActivity : Activity() {
         var lastTermPillSrvNull = true
         var lastTermPillSrcCode = -1
         var termPillCountTv: TextView? = null
+        var termAccessoryProg = if (activeTab == 1) 1f else 0f
+        var termAccessoryAnim: ValueAnimator? = null
+        var termExpandAnim: ValueAnimator? = null
 
         rebuildUniversalTermPill = rebuildPillLambda@ { animateMorph ->
             if (activeTab != 1) {
@@ -6601,7 +6841,10 @@ class TermuxActivity : Activity() {
                 return@rebuildPillLambda
             }
 
-            val modeChanged = (targetMode != currentTermPillMode) || (trashConfirmExpanded != lastTermPillTrashConfirm)
+            val prevMode = currentTermPillMode
+            val prevExpandedRight = (prevMode > 0)
+            val isExpandedRight = (targetMode != 0)
+            val startTermW = termOuterFrame.width
             currentTermPillMode = targetMode
             lastTermPillTrashConfirm = trashConfirmExpanded
             lastTermPillHasClip = hasPasteClipboard
@@ -6609,24 +6852,9 @@ class TermuxActivity : Activity() {
             lastTermPillSrcCode = srcCodeNow
             termPillCountTv = null
 
-            if (animateMorph && modeChanged) {
-                try {
-                    val tSet = android.transition.TransitionSet().apply {
-                        ordering = android.transition.TransitionSet.ORDERING_TOGETHER
-                        addTransition(android.transition.ChangeBounds().apply {
-                            duration = 250L
-                            interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
-                        })
-                        addTransition(android.transition.Fade().apply {
-                            duration = 190L
-                        })
-                    }
-                    android.transition.TransitionManager.beginDelayedTransition(topNavRow, tSet)
-                } catch (_: Throwable) {}
-            }
-
+            termExpandAnim?.cancel()
+            termAccessoryAnim?.cancel()
             termOuterFrame.removeAllViews()
-            val isExpandedRight = (targetMode != 0)
 
             fun makeSegmentPill(
                 icon: M3Icon?,
@@ -6801,45 +7029,65 @@ class TermuxActivity : Activity() {
                         }
                     }
                 )
-                // 6. Expandable Trash Icon -> on 1st tap smoothly unfolds to the right with "Уверены?"!
+                // 6. Expandable Trash Icon -> on 1st tap smoothly unfolds in-place with "Уверены?"!
+                val trashBg = makeConnectedSegmentDrawable(
+                    COLOR_ROOT_CONTAINER,
+                    if (trashConfirmExpanded) pillOuterR else pillInnerR,
+                    if (trashConfirmExpanded) pillOuterR else pillInnerR
+                )
+                val trashIconView = MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                        marginEnd = if (trashConfirmExpanded) dp(5) else 0
+                    }
+                }
+                val trashSureTv = TextView(this@TermuxActivity).apply {
+                    text = tr("Уверены?", "Sure?")
+                    setSingleLine(true)
+                    setTextColor(COLOR_ROOT)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
+                    alpha = if (trashConfirmExpanded) 1f else 0f
+                    visibility = if (trashConfirmExpanded) View.VISIBLE else View.GONE
+                }
                 val trashBtn = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER
-                    background = makeConnectedSegmentDrawable(
-                        COLOR_ROOT_CONTAINER,
-                        if (trashConfirmExpanded) pillOuterR else pillInnerR,
-                        if (trashConfirmExpanded) pillOuterR else pillInnerR
-                    )
+                    background = trashBg
                     setPadding(dp(10), 0, dp(10), 0)
                     layoutParams = LinearLayout.LayoutParams(
                         0,
                         pillInnerH,
-                        if (trashConfirmExpanded) 2.15f else 0.9f
+                        if (trashConfirmExpanded) 2.15f else 0.90f
                     ).apply {
                         marginEnd = dp(2)
                     }
-                    addView(
-                        MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
-                            layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
-                                if (trashConfirmExpanded) marginEnd = dp(5)
-                            }
-                        }
-                    )
-                    if (trashConfirmExpanded) {
-                        addView(TextView(this@TermuxActivity).apply {
-                            text = tr("Уверены?", "Sure?")
-                            setSingleLine(true)
-                            setTextColor(COLOR_ROOT)
-                            typeface = Typeface.DEFAULT_BOLD
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
-                        })
-                    }
+                    addView(trashIconView)
+                    addView(trashSureTv)
                     attachSmoothPressAnimation(this, 0.93f)
                     setOnClickListener {
                         if (!trashConfirmExpanded) {
                             triggerHaptic(1.1f)
                             trashConfirmExpanded = true
-                            rebuildUniversalTermPill(true)
+                            lastTermPillTrashConfirm = true
+                            trashSureTv.visibility = View.VISIBLE
+                            trashSureTv.alpha = 0f
+                            ValueAnimator.ofFloat(0f, 1f).apply {
+                                duration = 240L
+                                interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                                addUpdateListener { va ->
+                                    val p = safeClamp(va.animatedValue as Float, 0f, 1f)
+                                    val curR = pillInnerR + (pillOuterR - pillInnerR) * p
+                                    trashBg.cornerRadii = floatArrayOf(curR, curR, curR, curR, curR, curR, curR, curR)
+                                    val lp = layoutParams as LinearLayout.LayoutParams
+                                    lp.weight = 0.90f + (2.15f - 0.90f) * p
+                                    layoutParams = lp
+                                    val icLp = trashIconView.layoutParams as LinearLayout.LayoutParams
+                                    icLp.marginEnd = (dpF(5f) * p).roundToInt()
+                                    trashIconView.layoutParams = icLp
+                                    trashSureTv.alpha = safeClamp((p - 0.18f) / 0.82f, 0f, 1f)
+                                }
+                                start()
+                            }
                         } else {
                             triggerHaptic(1.35f)
                             trashConfirmExpanded = false
@@ -7040,47 +7288,84 @@ class TermuxActivity : Activity() {
                 val srcTabViews = ArrayList<LinearLayout>(4)
                 val srcIcons = ArrayList<MaterialIconView>(4)
                 val srcLabels = ArrayList<TextView>(4)
+                val srcSelProgs = FloatArray(4) { idx -> if (idx == curSrc) 1f else 0f }
+                var srcSwitchAnim: ValueAnimator? = null
+
+                fun updateSrcHotbarGeometry() {
+                    for (idx in 0 until 4) {
+                        val sf = safeClamp(srcSelProgs[idx], 0f, 1f)
+                        val ic = srcIcons[idx]
+                        val icLp = ic.layoutParams as LinearLayout.LayoutParams
+                        val icW = (dpF(15f) * sf).roundToInt()
+                        val icM = (dpF(4f) * sf).roundToInt()
+                        ic.visibility = View.VISIBLE
+                        ic.alpha = sf
+                        ic.scaleX = 0.65f + 0.35f * sf
+                        ic.scaleY = 0.65f + 0.35f * sf
+                        if (icLp.width != icW || icLp.marginEnd != icM) {
+                            icLp.width = icW
+                            icLp.marginEnd = icM
+                            ic.layoutParams = icLp
+                        }
+                        val box = srcTabViews[idx]
+                        val lp = box.layoutParams as LinearLayout.LayoutParams
+                        val targetW = 0.86f + 0.50f * sf
+                        if (abs(lp.weight - targetW) > 0.004f) {
+                            lp.weight = targetW
+                            box.layoutParams = lp
+                        }
+                        srcLabels[idx].setTextColor(blendColor(COLOR_TEXT_DIM, COLOR_TEXT_BRIGHT, sf))
+                    }
+                    (srcSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
+                        syncLiquidPillGeometryNow(srcSlidingPill, srcHotbarOuter, st)
+                    }
+                }
 
                 fun selectSourceAnimated(sCode: Int, targetBox: LinearLayout, onSwitched: () -> Unit) {
-                    for ((idx, ic) in srcIcons.withIndex()) {
-                        val sel = (idx == sCode)
-                        ic.visibility = if (sel) View.VISIBLE else View.GONE
-                        val lp = srcTabViews[idx].layoutParams as LinearLayout.LayoutParams
-                        lp.weight = if (sel) 1.35f else 0.88f
-                        srcTabViews[idx].layoutParams = lp
-                        srcLabels[idx].setTextColor(if (sel) COLOR_TEXT_BRIGHT else COLOR_TEXT_DIM)
+                    srcSwitchAnim?.cancel()
+                    val startProgs = FloatArray(4) { srcSelProgs[it] }
+                    srcSwitchAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 230L
+                        interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                        addUpdateListener { va ->
+                            val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                            for (i in 0 until 4) {
+                                val goal = if (i == sCode) 1f else 0f
+                                srcSelProgs[i] = startProgs[i] + (goal - startProgs[i]) * t
+                            }
+                            updateSrcHotbarGeometry()
+                        }
+                        start()
                     }
-                    srcHotbarRow.post {
-                        animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, targetBox, animate = true)
-                    }
+                    animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, targetBox, animate = true)
                     srcHotbarRow.postDelayed({
                         onSwitched()
-                    }, 180L)
+                    }, 210L)
                 }
 
                 for ((sCode, sIcon, sLbl) in sources) {
                     val isSel = (curSrc == sCode)
-                    val ic = MaterialIconView(this, sIcon, uiOnAccentContainer, 15.5f, 2.0f).apply {
-                        layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply {
-                            marginEnd = dp(4)
+                    val ic = MaterialIconView(this, sIcon, uiOnAccentContainer, 15f, 2.0f).apply {
+                        layoutParams = LinearLayout.LayoutParams(if (isSel) dp(15) else 0, dp(15)).apply {
+                            marginEnd = if (isSel) dp(4) else 0
                         }
-                        visibility = if (isSel) View.VISIBLE else View.GONE
+                        alpha = if (isSel) 1f else 0f
                     }
                     val tv = TextView(this).apply {
                         text = sLbl
                         setSingleLine(true)
                         setTextColor(if (isSel) COLOR_TEXT_BRIGHT else COLOR_TEXT_DIM)
                         typeface = Typeface.DEFAULT_BOLD
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
                     }
                     val box = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER
-                        setPadding(dp(6), 0, dp(6), 0)
+                        setPadding(dp(4), 0, dp(4), 0)
                         layoutParams = LinearLayout.LayoutParams(
                             0,
                             pillInnerH,
-                            if (isSel) 1.35f else 0.88f
+                            if (isSel) 1.36f else 0.86f
                         )
                         addView(ic)
                         addView(tv)
@@ -7199,9 +7484,15 @@ class TermuxActivity : Activity() {
                 )
             } else {
                 // Collapsed Default State:
+                // Smoothly animates the right accessory button [ 📁 ▸ ] or [ 📋 Вставить ]
+                // sliding & scaling in/out when entering or leaving the Файлы tab!
                 val showSourceAccessory = (activeTab == 1)
+                val wantAccessory = hasPasteClipboard || showSourceAccessory
+                val targetAccProg = if (wantAccessory) 1f else 0f
+                val initAccProg = if (animateMorph && prevMode == 0) termAccessoryProg else targetAccProg
                 val mainLeftR = pillOuterR
-                val mainRightR = if (hasPasteClipboard || showSourceAccessory) pillInnerR else pillOuterR
+                val initRightR = pillOuterR + (pillInnerR - pillOuterR) * initAccProg
+                val termBackChipBg = makeConnectedSegmentDrawable(uiAccentContainer, mainLeftR, initRightR)
 
                 val termBackIcon = MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiOnAccentContainer, 18f, 2.0f).apply {
                     layoutParams = LinearLayout.LayoutParams(dp(19), dp(19)).apply {
@@ -7220,13 +7511,13 @@ class TermuxActivity : Activity() {
                 val termBackChip = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER
-                    background = makeConnectedSegmentDrawable(uiAccentContainer, mainLeftR, mainRightR)
+                    background = termBackChipBg
                     setPadding(dp(12), 0, dp(13), 0)
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         pillInnerH
                     ).apply {
-                        if (hasPasteClipboard || showSourceAccessory) marginEnd = dp(2)
+                        marginEnd = (dpF(2f) * initAccProg).roundToInt()
                     }
                     addView(termBackIcon)
                     addView(termBackLabel)
@@ -7268,94 +7559,272 @@ class TermuxActivity : Activity() {
                 }
                 termOuterFrame.addView(termBackChip)
 
-                if (hasPasteClipboard) {
+                val accessoryPill: LinearLayout = if (hasPasteClipboard) {
                     val countClip = if (batchClipSources.isNotEmpty()) batchClipSources.size else 1
-                    termOuterFrame.addView(
-                        makeSegmentPill(
-                            icon = M3Icon.COPY,
-                            label = tr("Вставить ($countClip)", "Paste ($countClip)"),
-                            leftR = pillInnerR,
-                            rightR = pillOuterR,
-                            fillCol = uiSurfaceHigh,
-                            tintCol = uiAccent,
-                            marginEndDp = 0
-                        ) {
-                            val sources = if (batchClipSources.isNotEmpty()) {
-                                batchClipSources.map { File(it) }
-                            } else {
-                                listOfNotNull(fileClipSource)
-                            }
-                            val isMove = if (batchClipSources.isNotEmpty()) batchClipIsMove else fileClipIsMove
-                            Thread {
-                                for (srcFile in sources) {
-                                    val dst = File(localCurrentDir, srcFile.name)
-                                    var handledDirect = false
-                                    try {
-                                        if (srcFile.exists() && localCurrentDir.canWrite()) {
-                                            if (srcFile.isDirectory) srcFile.copyRecursively(dst, overwrite = true)
-                                            else srcFile.copyTo(dst, overwrite = true)
-                                            if (isMove) srcFile.deleteRecursively()
-                                            handledDirect = true
-                                        }
-                                    } catch (_: Throwable) {}
-                                    if (!handledDirect) {
-                                        val op = if (isMove) "mv -f" else "cp -rf"
-                                        nativeExecLocalRootCmd("$op -- ${shellEscapeSingle(srcFile.absolutePath)} ${shellEscapeSingle(dst.absolutePath)}")
-                                    }
-                                }
-                                runOnUiThread {
-                                    fileClipSource = null
-                                    batchClipSources.clear()
-                                    rebuildUniversalTermPill(true)
-                                    activeSftpRefreshCallback?.invoke(true, null)
-                                }
-                            }.start()
+                    makeSegmentPill(
+                        icon = M3Icon.COPY,
+                        label = tr("Вставить ($countClip)", "Paste ($countClip)"),
+                        leftR = pillInnerR,
+                        rightR = pillOuterR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = uiAccent,
+                        marginEndDp = 0
+                    ) {
+                        val sources = if (batchClipSources.isNotEmpty()) {
+                            batchClipSources.map { File(it) }
+                        } else {
+                            listOfNotNull(fileClipSource)
                         }
-                    )
-                } else if (showSourceAccessory) {
+                        val isMove = if (batchClipSources.isNotEmpty()) batchClipIsMove else fileClipIsMove
+                        Thread {
+                            for (srcFile in sources) {
+                                val dst = File(localCurrentDir, srcFile.name)
+                                var handledDirect = false
+                                try {
+                                    if (srcFile.exists() && localCurrentDir.canWrite()) {
+                                        if (srcFile.isDirectory) srcFile.copyRecursively(dst, overwrite = true)
+                                        else srcFile.copyTo(dst, overwrite = true)
+                                        if (isMove) srcFile.deleteRecursively()
+                                        handledDirect = true
+                                    }
+                                } catch (_: Throwable) {}
+                                if (!handledDirect) {
+                                    val op = if (isMove) "mv -f" else "cp -rf"
+                                    nativeExecLocalRootCmd("$op -- ${shellEscapeSingle(srcFile.absolutePath)} ${shellEscapeSingle(dst.absolutePath)}")
+                                }
+                            }
+                            runOnUiThread {
+                                fileClipSource = null
+                                batchClipSources.clear()
+                                rebuildUniversalTermPill(true)
+                                activeSftpRefreshCallback?.invoke(true, null)
+                            }
+                        }.start()
+                    }
+                } else {
                     val srcIcon = when (srcCodeNow) {
                         0 -> M3Icon.FOLDER
                         1 -> M3Icon.STORAGE
                         2 -> M3Icon.ROOT_HASH
                         else -> M3Icon.SERVER
                     }
-                    termOuterFrame.addView(
-                        makeSegmentPill(
-                            icon = srcIcon,
-                            label = "▸",
-                            leftR = pillInnerR,
-                            rightR = pillOuterR,
-                            fillCol = uiSurfaceHigh,
-                            tintCol = uiAccent,
-                            marginEndDp = 0,
-                            minW = dp(38)
-                        ) {
+                    makeSegmentPill(
+                        icon = srcIcon,
+                        label = "▸",
+                        leftR = pillInnerR,
+                        rightR = pillOuterR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = uiAccent,
+                        marginEndDp = 0,
+                        minW = 0
+                    ) {
+                        if (activeTab == 1) {
                             termDrawerExpanded = true
                             rebuildUniversalTermPill(true)
                         }
+                    }
+                }
+                accessoryPill.measure(
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
+                )
+                val fullAccW = accessoryPill.measuredWidth.coerceAtLeast(dp(40))
+                termOuterFrame.addView(accessoryPill)
+
+                fun applyAccessoryMorph(prog: Float) {
+                    val p = safeClamp(prog, 0f, 1f)
+                    val curRightR = pillOuterR + (pillInnerR - pillOuterR) * p
+                    termBackChipBg.cornerRadii = floatArrayOf(
+                        mainLeftR, mainLeftR,
+                        curRightR, curRightR,
+                        curRightR, curRightR,
+                        mainLeftR, mainLeftR
                     )
+                    val backLp = termBackChip.layoutParams as LinearLayout.LayoutParams
+                    val nextMargin = (dpF(2f) * p).roundToInt()
+                    if (backLp.marginEnd != nextMargin) {
+                        backLp.marginEnd = nextMargin
+                        termBackChip.layoutParams = backLp
+                    }
+                    val curAccW = (fullAccW * p).roundToInt()
+                    val accLp = accessoryPill.layoutParams as LinearLayout.LayoutParams
+                    if (curAccW <= 1) {
+                        accessoryPill.visibility = View.GONE
+                        accLp.width = 0
+                        accessoryPill.layoutParams = accLp
+                    } else {
+                        accessoryPill.visibility = View.VISIBLE
+                        accLp.width = curAccW
+                        accessoryPill.layoutParams = accLp
+                        accessoryPill.alpha = safeClamp((p - 0.12f) / 0.88f, 0f, 1f)
+                        accessoryPill.scaleX = 0.72f + 0.28f * p
+                        accessoryPill.scaleY = 0.72f + 0.28f * p
+                        accessoryPill.translationX = -dpF(6f) * (1f - p)
+                    }
+                }
+
+                if (animateMorph && prevMode == 0 && abs(targetAccProg - initAccProg) > 0.01f) {
+                    applyAccessoryMorph(initAccProg)
+                    val startP = initAccProg
+                    termAccessoryAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 265L
+                        interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                        addUpdateListener { va ->
+                            val f = safeClamp(va.animatedValue as Float, 0f, 1f)
+                            termAccessoryProg = startP + (targetAccProg - startP) * f
+                            applyAccessoryMorph(termAccessoryProg)
+                        }
+                        addListener(object : android.animation.AnimatorListenerAdapter() {
+                            override fun onAnimationEnd(animation: android.animation.Animator) {
+                                termAccessoryProg = targetAccProg
+                                applyAccessoryMorph(targetAccProg)
+                            }
+                        })
+                        start()
+                    }
+                } else {
+                    termAccessoryProg = targetAccProg
+                    applyAccessoryMorph(targetAccProg)
                 }
             }
 
-            // Smooth horizontal expansion/collapse of termOuterFrame to the right!
+            // Smooth horizontal unfolding & folding of "Терминал" (`termOuterFrame`) to the right!
+            val totalNavW = (topNavRow.width - topNavRow.paddingLeft - topNavRow.paddingRight)
+                .takeIf { it > 0 } ?: (resources.displayMetrics.widthPixels - dp(28))
+
             if (isExpandedRight) {
-                hubTabsOuter.visibility = View.GONE
-                val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                lp.width = 0
-                lp.weight = 1f
-                lp.marginEnd = 0
-                termOuterFrame.layoutParams = lp
+                if (animateMorph && !prevExpandedRight && startTermW > 0 && totalNavW > startTermW + dp(12)) {
+                    // Smoothly unfold "Терминал" from startTermW -> totalNavW while compressing & fading hubTabsOuter!
+                    hubTabsOuter.visibility = View.VISIBLE
+                    for (cIdx in 1 until termOuterFrame.childCount) {
+                        val ch = termOuterFrame.getChildAt(cIdx)
+                        ch.alpha = 0f
+                        ch.translationX = -dpF(12f)
+                        ch.scaleX = 0.90f
+                        ch.scaleY = 0.90f
+                    }
+                    termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 285L
+                        interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                        addUpdateListener { va ->
+                            val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                            val curW = (startTermW + (totalNavW - startTermW) * t).roundToInt()
+                            val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                            lp.width = curW
+                            lp.weight = 0f
+                            lp.marginEnd = (dpF(8f) * (1f - t)).roundToInt()
+                            termOuterFrame.layoutParams = lp
+
+                            hubTabsOuter.alpha = (1f - t * 1.45f).coerceIn(0f, 1f)
+                            hubTabsOuter.scaleX = 1f - 0.08f * t
+                            hubTabsOuter.scaleY = 1f - 0.08f * t
+
+                            for (cIdx in 1 until termOuterFrame.childCount) {
+                                val ch = termOuterFrame.getChildAt(cIdx)
+                                val delay = (cIdx - 1) * 0.05f
+                                val cp = safeClamp((t - delay) / (1f - delay).coerceAtLeast(0.4f), 0f, 1f)
+                                ch.alpha = cp
+                                ch.translationX = -dpF(12f) * (1f - cp)
+                                ch.scaleX = 0.90f + 0.10f * cp
+                                ch.scaleY = 0.90f + 0.10f * cp
+                            }
+                        }
+                        addListener(object : android.animation.AnimatorListenerAdapter() {
+                            override fun onAnimationEnd(animation: android.animation.Animator) {
+                                if (currentTermPillMode != 0) {
+                                    hubTabsOuter.visibility = View.GONE
+                                    hubTabsOuter.alpha = 1f
+                                    hubTabsOuter.scaleX = 1f
+                                    hubTabsOuter.scaleY = 1f
+                                    val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                                    lp.width = 0
+                                    lp.weight = 1f
+                                    lp.marginEnd = 0
+                                    termOuterFrame.layoutParams = lp
+                                    for (cIdx in 1 until termOuterFrame.childCount) {
+                                        val ch = termOuterFrame.getChildAt(cIdx)
+                                        ch.alpha = 1f
+                                        ch.translationX = 0f
+                                        ch.scaleX = 1f
+                                        ch.scaleY = 1f
+                                    }
+                                }
+                            }
+                        })
+                        start()
+                    }
+                } else {
+                    hubTabsOuter.visibility = View.GONE
+                    hubTabsOuter.alpha = 1f
+                    hubTabsOuter.scaleX = 1f
+                    hubTabsOuter.scaleY = 1f
+                    val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                    lp.width = 0
+                    lp.weight = 1f
+                    lp.marginEnd = 0
+                    termOuterFrame.layoutParams = lp
+                }
             } else {
                 hubTabsOuter.visibility = View.VISIBLE
-                val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
-                lp.weight = 0f
-                lp.marginEnd = dp(8)
-                termOuterFrame.layoutParams = lp
+                if (animateMorph && prevExpandedRight && startTermW > dp(160)) {
+                    // Smoothly fold "Терминал" from full width back to compact width while expanding hubTabsOuter!
+                    termOuterFrame.measure(
+                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                        View.MeasureSpec.makeMeasureSpec(pillInnerH + dp(8), View.MeasureSpec.EXACTLY)
+                    )
+                    val targetCompactW = termOuterFrame.measuredWidth.coerceAtLeast(dp(116))
+                    hubTabsOuter.alpha = 0f
+                    hubTabsOuter.scaleX = 0.92f
+                    hubTabsOuter.scaleY = 0.92f
+                    termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 275L
+                        interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                        addUpdateListener { va ->
+                            val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                            val curW = (startTermW + (targetCompactW - startTermW) * t).roundToInt()
+                            val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                            lp.width = curW
+                            lp.weight = 0f
+                            lp.marginEnd = (dpF(8f) * t).roundToInt()
+                            termOuterFrame.layoutParams = lp
+
+                            val fadeP = safeClamp((t - 0.10f) / 0.90f, 0f, 1f)
+                            hubTabsOuter.alpha = fadeP
+                            hubTabsOuter.scaleX = 0.92f + 0.08f * fadeP
+                            hubTabsOuter.scaleY = 0.92f + 0.08f * fadeP
+                        }
+                        addListener(object : android.animation.AnimatorListenerAdapter() {
+                            override fun onAnimationEnd(animation: android.animation.Animator) {
+                                if (currentTermPillMode == 0) {
+                                    val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                                    lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
+                                    lp.weight = 0f
+                                    lp.marginEnd = dp(8)
+                                    termOuterFrame.layoutParams = lp
+                                    hubTabsOuter.alpha = 1f
+                                    hubTabsOuter.scaleX = 1f
+                                    hubTabsOuter.scaleY = 1f
+                                }
+                            }
+                        })
+                        start()
+                    }
+                } else {
+                    hubTabsOuter.alpha = 1f
+                    hubTabsOuter.scaleX = 1f
+                    hubTabsOuter.scaleY = 1f
+                    val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                    lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
+                    lp.weight = 0f
+                    lp.marginEnd = dp(8)
+                    termOuterFrame.layoutParams = lp
+                }
                 hubTabsRow.post {
                     val activeView = hubTabContainers.getOrNull(activeTab)
                     if (activeView != null) {
-                        animateLiquidSegmentedPill(hubSlidingPill, hubTabsOuter, activeView, animate = false)
+                        (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
+                            syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
+                        }
                     }
                 }
             }
@@ -8647,8 +9116,11 @@ class TermuxActivity : Activity() {
                     6
                 )
 
+                var authCardBuiltOnce = false
                 lateinit var rebuildAuthCard: () -> Unit
                 rebuildAuthCard = {
+                    val animateAuth = authCardBuiltOnce
+                    authCardBuiltOnce = true
                     val totalAuthCards = if (selectedAuth == 2) 5 else 6
                     authCardHolder.removeAllViews()
                     authCardHolder.addView(
@@ -8677,16 +9149,26 @@ class TermuxActivity : Activity() {
                     // When SSH Key is selected (selectedAuth == 1), hide the password input field (`secretCard`)
                     // and show only the SSH Key Vault selector card!
                     // When Password is selected (selectedAuth == 0), show `secretCard` and hide `vaultKeySelectorHolder`!
-                    vaultKeySelectorHolder.removeAllViews()
                     when (selectedAuth) {
                         0 -> {
-                            vaultKeySelectorHolder.visibility = View.GONE
-                            secretCard.visibility = View.VISIBLE
+                            if (animateAuth) {
+                                animateSectionExpandCollapse(vaultKeySelectorHolder, expand = false, durationMs = 230L)
+                                animateSectionExpandCollapse(secretCard, expand = true, durationMs = 250L)
+                            } else {
+                                vaultKeySelectorHolder.removeAllViews()
+                                vaultKeySelectorHolder.visibility = View.GONE
+                                secretCard.visibility = View.VISIBLE
+                            }
                             secretCard.background = segmentedCardBg(5, 6, uiSurfaceLow, 0, 20f, 5f)
                         }
                         1 -> {
-                            secretCard.visibility = View.GONE
-                            vaultKeySelectorHolder.visibility = View.VISIBLE
+                            vaultKeySelectorHolder.removeAllViews()
+                            if (animateAuth) {
+                                animateSectionExpandCollapse(secretCard, expand = false, durationMs = 230L)
+                            } else {
+                                secretCard.visibility = View.GONE
+                                vaultKeySelectorHolder.visibility = View.VISIBLE
+                            }
                             val vaultKeys = listSshVaultPrivateKeys()
                             val curPath = secretEt.text.toString().trim()
                             val matchedKey = vaultKeys.firstOrNull { it.absolutePath == curPath }
@@ -8801,10 +9283,19 @@ class TermuxActivity : Activity() {
                                 }
                             )
                             vaultKeySelectorHolder.addView(vaultCard)
+                            if (animateAuth) {
+                                animateSectionExpandCollapse(vaultKeySelectorHolder, expand = true, durationMs = 250L)
+                            }
                         }
                         else -> {
-                            vaultKeySelectorHolder.visibility = View.GONE
-                            secretCard.visibility = View.GONE
+                            if (animateAuth) {
+                                animateSectionExpandCollapse(vaultKeySelectorHolder, expand = false, durationMs = 230L)
+                                animateSectionExpandCollapse(secretCard, expand = false, durationMs = 230L)
+                            } else {
+                                vaultKeySelectorHolder.removeAllViews()
+                                vaultKeySelectorHolder.visibility = View.GONE
+                                secretCard.visibility = View.GONE
+                            }
                         }
                     }
                 }
@@ -11217,6 +11708,7 @@ class TermuxActivity : Activity() {
                         })
                     } else {
                         var animatedFolderCount = 0
+                        val newlyExpandedChildRows = ArrayList<LinearLayout>()
                         for (item in entries) {
                             val isItemSelected = selectedSftpPaths.contains(item.path)
                             val iconType = when {
@@ -11297,15 +11789,65 @@ class TermuxActivity : Activity() {
                                     if (item.isDirectory) {
                                         triggerFolderShakeAnimation(itemIconBadge, 1)
                                         if (srv == null && sftpTreeMode) {
-                                            justToggledTreeFolderPath = item.path
                                             if (expandedTreePaths.contains(item.path)) {
+                                                // Smoothly collapse all child rows under this folder upward before removing them!
+                                                val collapsePrefix = if (item.path == "/") "/" else "${item.path}/"
+                                                val childRefs = activeRowRefs.filter { it.item.path.startsWith(collapsePrefix) }
                                                 expandedTreePaths.remove(item.path)
+                                                expandedTreePaths.removeAll { it.startsWith(collapsePrefix) }
                                                 newlyExpandedTreePath = null
+                                                itemIconView.icon = M3Icon.FOLDER
+                                                itemIconView.invalidate()
+                                                for (chIdx in 0 until row.childCount) {
+                                                    val ch = row.getChildAt(chIdx)
+                                                    if (ch is MaterialIconView && ch !== itemIconView) {
+                                                        ch.animate()
+                                                            .rotation(-90f)
+                                                            .setDuration(210L)
+                                                            .setInterpolator(PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f))
+                                                            .start()
+                                                        break
+                                                    }
+                                                }
+                                                if (childRefs.isEmpty()) {
+                                                    justToggledTreeFolderPath = item.path
+                                                    refreshSftpListInPlace(false, null)
+                                                } else {
+                                                    val initHeights = IntArray(childRefs.size) {
+                                                        childRefs[it].row.height.coerceAtLeast(dp(50))
+                                                    }
+                                                    ValueAnimator.ofFloat(0f, 1f).apply {
+                                                        duration = 225L
+                                                        interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                                                        addUpdateListener { va ->
+                                                            val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                                                            val inv = 1f - t
+                                                            for ((cIdx, ref) in childRefs.withIndex()) {
+                                                                ref.row.pivotY = 0f
+                                                                ref.row.alpha = (inv * inv).coerceIn(0f, 1f)
+                                                                ref.row.scaleY = 0.82f + 0.18f * inv
+                                                                ref.row.translationY = -dpF(8f) * t
+                                                                val lp = ref.row.layoutParams as LinearLayout.LayoutParams
+                                                                lp.height = (initHeights[cIdx] * inv).roundToInt()
+                                                                lp.bottomMargin = (dpF(2f) * inv).roundToInt()
+                                                                ref.row.layoutParams = lp
+                                                            }
+                                                        }
+                                                        addListener(object : android.animation.AnimatorListenerAdapter() {
+                                                            override fun onAnimationEnd(animation: android.animation.Animator) {
+                                                                justToggledTreeFolderPath = null
+                                                                refreshSftpListInPlace(false, null)
+                                                            }
+                                                        })
+                                                        start()
+                                                    }
+                                                }
                                             } else {
+                                                justToggledTreeFolderPath = item.path
                                                 expandedTreePaths.add(item.path)
                                                 newlyExpandedTreePath = item.path
+                                                refreshSftpListInPlace(false, null)
                                             }
-                                            refreshSftpListInPlace(false, null)
                                         } else if (srv == null) {
                                             sftpTransitionDir = 1
                                             localCurrentDir = File(item.path)
@@ -11425,7 +11967,63 @@ class TermuxActivity : Activity() {
                                     }
                                 }
                             )
+                            if (isExpandedChild) {
+                                newlyExpandedChildRows.add(row)
+                            }
                             rowsCol.addView(row)
+                        }
+                        if (newlyExpandedChildRows.isNotEmpty()) {
+                            val rowW = (rowsCol.width - rowsCol.paddingLeft - rowsCol.paddingRight)
+                                .takeIf { it > 0 } ?: (resources.displayMetrics.widthPixels - dp(28))
+                            val wSpec = View.MeasureSpec.makeMeasureSpec(rowW, View.MeasureSpec.EXACTLY)
+                            val hSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+                            val targetHeights = IntArray(newlyExpandedChildRows.size) { idx ->
+                                val r = newlyExpandedChildRows[idx]
+                                r.measure(wSpec, hSpec)
+                                r.measuredHeight.coerceAtLeast(dp(54))
+                            }
+                            for (r in newlyExpandedChildRows) {
+                                r.pivotY = 0f
+                                r.alpha = 0f
+                                r.scaleY = 0.82f
+                                r.translationY = -dpF(10f)
+                                val lp = r.layoutParams as LinearLayout.LayoutParams
+                                lp.height = 1
+                                lp.bottomMargin = 0
+                                r.layoutParams = lp
+                            }
+                            ValueAnimator.ofFloat(0f, 1f).apply {
+                                duration = 265L
+                                interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                                addUpdateListener { va ->
+                                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                                    for ((idx, r) in newlyExpandedChildRows.withIndex()) {
+                                        val stagger = (idx * 0.04f).coerceAtMost(0.26f)
+                                        val localT = safeClamp((t - stagger) / (1f - stagger).coerceAtLeast(0.4f), 0f, 1f)
+                                        r.alpha = safeClamp((localT - 0.08f) / 0.92f, 0f, 1f)
+                                        r.scaleY = 0.82f + 0.18f * localT
+                                        r.translationY = -dpF(10f) * (1f - localT)
+                                        val lp = r.layoutParams as LinearLayout.LayoutParams
+                                        lp.height = (targetHeights[idx] * t).roundToInt().coerceAtLeast(1)
+                                        lp.bottomMargin = (dpF(2f) * t).roundToInt()
+                                        r.layoutParams = lp
+                                    }
+                                }
+                                addListener(object : android.animation.AnimatorListenerAdapter() {
+                                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                                        for (r in newlyExpandedChildRows) {
+                                            r.alpha = 1f
+                                            r.scaleY = 1f
+                                            r.translationY = 0f
+                                            val lp = r.layoutParams as LinearLayout.LayoutParams
+                                            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+                                            lp.bottomMargin = dp(2)
+                                            r.layoutParams = lp
+                                        }
+                                    }
+                                })
+                                start()
+                            }
                         }
                     }
                 }
@@ -11804,32 +12402,11 @@ class TermuxActivity : Activity() {
                     }
                     nameEt.hint = if (isFolder) "scripts" else "config.json"
 
-                    contentBox.animate().cancel()
-                    val wasVisible = (contentBox.visibility == View.VISIBLE)
-                    if (isFolder) {
-                        contentBox.visibility = View.GONE
-                        contentBox.alpha = 1f
-                        contentBox.translationY = 0f
-                        if (animate && wasVisible) {
-                            chmodBarOuter.translationY = -dpF(10f)
-                            btnRow.translationY = -dpF(10f)
-                            chmodBarOuter.animate().translationY(0f).setDuration(200L).setInterpolator(aosp17SpatialInterpolator).start()
-                            btnRow.animate().translationY(0f).setDuration(200L).setInterpolator(aosp17SpatialInterpolator).start()
-                        }
+                    if (animate) {
+                        animateSectionExpandCollapse(contentBox, expand = !isFolder, durationMs = 240L)
                     } else {
-                        contentBox.visibility = View.VISIBLE
-                        if (animate && !wasVisible) {
-                            contentBox.alpha = 0f
-                            contentBox.translationY = -dpF(10f)
-                            contentBox.animate()
-                                .alpha(1f)
-                                .translationY(0f)
-                                .setDuration(210L)
-                                .setInterpolator(aosp17SpatialInterpolator)
-                                .start()
-                        }
+                        contentBox.visibility = if (isFolder) View.GONE else View.VISIBLE
                     }
-                    cSheet.requestLayout()
                 }
 
                 for ((mCode, icEnum) in heroSpecs) {
@@ -12499,12 +13076,41 @@ class TermuxActivity : Activity() {
                         bentoActiveStates[idx] = nextTree
                         sftpTransitionDir = 0
                         if (!nextTree && expandedTreePaths.isNotEmpty()) {
+                            val nestedRefs = activeRowRefs.filter { it.item.depth > 0 }
                             expandedTreePaths.clear()
-                            // Keep chevrons visible briefly during flat list rebuild, then slide them away smoothly!
-                            sftpTreeMode = true
-                            refreshSftpListInPlace(false) {
+                            animateTreeChevronsInPlace(false)
+                            if (nestedRefs.isEmpty()) {
                                 sftpTreeMode = false
-                                animateTreeChevronsInPlace(false)
+                                refreshSftpListInPlace(false, null)
+                            } else {
+                                val initHeights = IntArray(nestedRefs.size) {
+                                    nestedRefs[it].row.height.coerceAtLeast(dp(50))
+                                }
+                                ValueAnimator.ofFloat(0f, 1f).apply {
+                                    duration = 230L
+                                    interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                                    addUpdateListener { va ->
+                                        val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                                        val inv = 1f - t
+                                        for ((nIdx, ref) in nestedRefs.withIndex()) {
+                                            ref.row.pivotY = 0f
+                                            ref.row.alpha = (inv * inv).coerceIn(0f, 1f)
+                                            ref.row.scaleY = 0.82f + 0.18f * inv
+                                            ref.row.translationY = -dpF(8f) * t
+                                            val lp = ref.row.layoutParams as LinearLayout.LayoutParams
+                                            lp.height = (initHeights[nIdx] * inv).roundToInt()
+                                            lp.bottomMargin = (dpF(2f) * inv).roundToInt()
+                                            ref.row.layoutParams = lp
+                                        }
+                                    }
+                                    addListener(object : android.animation.AnimatorListenerAdapter() {
+                                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                                            sftpTreeMode = false
+                                            refreshSftpListInPlace(false, null)
+                                        }
+                                    })
+                                    start()
+                                }
                             }
                         } else {
                             sftpTreeMode = nextTree
@@ -12696,13 +13302,20 @@ class TermuxActivity : Activity() {
             )
             val userPkgCardRefs = ArrayList<PkgCardRef>()
 
+            var prevAnyPkgSelected = selectedPackageNames.isNotEmpty()
+            var pkgTrashAnim: ValueAnimator? = null
+
             fun syncPkgSelectionInPlace(changedPkg: String? = null) {
                 val anySelected = selectedPackageNames.isNotEmpty()
+                val modeFlipped = (anySelected != prevAnyPkgSelected)
+                prevAnyPkgSelected = anySelected
                 for (ref in userPkgCardRefs) {
                     val isSel = selectedPackageNames.contains(ref.pkgName)
                     val rowFill = if (isSel) blendColor(uiSurfaceLow, uiAccentContainer, 0.55f) else uiSurfaceLow
                     ref.card.background = segmentedCardBg(ref.idx, ref.total, rowFill, 0, 20f, 5f)
-                    ref.trashBtn.visibility = if (anySelected) View.GONE else View.VISIBLE
+                    if (!modeFlipped) {
+                        ref.trashBtn.visibility = if (anySelected) View.GONE else View.VISIBLE
+                    }
                     if (changedPkg != null && ref.pkgName == changedPkg) {
                         ref.card.scaleX = 0.97f
                         ref.card.scaleY = 0.97f
@@ -12712,6 +13325,47 @@ class TermuxActivity : Activity() {
                             .setDuration(190L)
                             .setInterpolator(OvershootInterpolator(1.8f))
                             .start()
+                    }
+                }
+                if (modeFlipped && userPkgCardRefs.isNotEmpty()) {
+                    pkgTrashAnim?.cancel()
+                    val showTrash = !anySelected
+                    val startW = if (showTrash) 0f else dpF(38f)
+                    val endW = if (showTrash) dpF(38f) else 0f
+                    for (ref in userPkgCardRefs) {
+                        ref.trashBtn.visibility = View.VISIBLE
+                    }
+                    pkgTrashAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 220L
+                        interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                        addUpdateListener { va ->
+                            val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                            val curW = (startW + (endW - startW) * t).roundToInt()
+                            val curAlpha = if (showTrash) t else (1f - t)
+                            val curScale = 0.65f + 0.35f * curAlpha
+                            for (ref in userPkgCardRefs) {
+                                ref.trashBtn.alpha = curAlpha
+                                ref.trashBtn.scaleX = curScale
+                                ref.trashBtn.scaleY = curScale
+                                val lp = ref.trashBtn.layoutParams as LinearLayout.LayoutParams
+                                lp.width = curW
+                                ref.trashBtn.layoutParams = lp
+                            }
+                        }
+                        addListener(object : android.animation.AnimatorListenerAdapter() {
+                            override fun onAnimationEnd(animation: android.animation.Animator) {
+                                for (ref in userPkgCardRefs) {
+                                    ref.trashBtn.visibility = if (showTrash) View.VISIBLE else View.GONE
+                                    ref.trashBtn.alpha = 1f
+                                    ref.trashBtn.scaleX = 1f
+                                    ref.trashBtn.scaleY = 1f
+                                    val lp = ref.trashBtn.layoutParams as LinearLayout.LayoutParams
+                                    lp.width = dp(38)
+                                    ref.trashBtn.layoutParams = lp
+                                }
+                            }
+                        })
+                        start()
                     }
                 }
             }
