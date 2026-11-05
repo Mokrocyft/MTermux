@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
 Build-Time Bootstrap Downloader, Cache-Aware Updater, OpenSSH Pre-Installer,
-APT Lists Pre-Populator & Binary Relocator for Termuxx (com.termuxx).
+APT Lists Pre-Populator & Binary Relocator for MTermux — Material Termux (com.mtermux).
 Runs during APK build to:
 1. Download JetBrainsMono.ttf and bootstrap-aarch64.zip directly if not already present.
-2. If `.bootstrap_patched_v4.stamp` is already present (restored from CI cache), skip redundant
+2. If `.bootstrap_patched_mtermux_v5.stamp` is already present (restored from CI cache), skip redundant
    network downloads and .deb slipstreaming for instant cached builds.
 3. Otherwise fetch the live Termux aarch64 package index & InRelease, pre-populate var/lib/apt/lists/,
    slipstream updated core .deb packages AND pre-install `openssh` (with all transitive dependencies)
    so `ssh`, `sftp`, `scp`, and `ssh-keygen` work 100% out of the box immediately on first launch!
 4. Pre-select default mirror (`etc/termux/chosen_mirrors`) and pre-patch 16-byte tokens
-   ("com.termux/files" -> "com.termuxx/file", "com.termux/cache" -> "com.termuxx/cach").
+   ("com.termux/files" -> "com.mtermux/file", "com.termux/cache" -> "com.mtermux/cach").
 """
 
 import os
@@ -25,7 +25,7 @@ INRELEASE_URL = f"{REPO_BASE}/dists/stable/InRelease"
 PACKAGES_URL = f"{REPO_BASE}/dists/stable/main/binary-aarch64/Packages"
 
 BOOTSTRAP_ZIP = "app/src/main/cpp/bootstrap-aarch64.zip"
-STAMP_FILE = "app/src/main/cpp/.bootstrap_patched_v4.stamp"
+STAMP_FILE = "app/src/main/cpp/.bootstrap_patched_mtermux_v5.stamp"
 FONT_FILE = "app/src/main/assets/fonts/JetBrainsMono.ttf"
 
 BOOTSTRAP_URLS = [
@@ -39,9 +39,11 @@ EXTRA_PREINSTALLED_PKGS = ["openssh"]
 
 PREFIX_IN_DEB = "data/data/com.termux/files/usr/"
 OLD_FILES_16 = b"com.termux/files"
-NEW_FILES_16 = b"com.termuxx/file"
+LEG_FILES_16 = b"com.mtermux/file"
+NEW_FILES_16 = b"com.mtermux/file"
 OLD_CACHE_16 = b"com.termux/cache"
-NEW_CACHE_16 = b"com.termuxx/cach"
+LEG_CACHE_16 = b"com.mtermux/cach"
+NEW_CACHE_16 = b"com.mtermux/cach"
 
 
 def ensure_font_downloaded():
@@ -50,7 +52,7 @@ def ensure_font_downloaded():
         return
     os.makedirs(os.path.dirname(FONT_FILE), exist_ok=True)
     print(f"[update_bootstrap] Downloading JetBrainsMono.ttf from {FONT_URL} ...")
-    req = urllib.request.Request(FONT_URL, headers={"User-Agent": "termux-pkg/2.0"})
+    req = urllib.request.Request(FONT_URL, headers={"User-Agent": "mtermux-pkg/7.0"})
     with urllib.request.urlopen(req, timeout=45) as resp, open(FONT_FILE, "wb") as out:
         shutil.copyfileobj(resp, out)
     print(f"[update_bootstrap] Downloaded {FONT_FILE} ({os.path.getsize(FONT_FILE):,} bytes).")
@@ -63,7 +65,7 @@ def ensure_raw_bootstrap_downloaded():
     for url in BOOTSTRAP_URLS:
         try:
             print(f"[update_bootstrap] Downloading bootstrap-aarch64.zip from {url} ...")
-            req = urllib.request.Request(url, headers={"User-Agent": "termux-pkg/2.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "mtermux-pkg/7.0"})
             with urllib.request.urlopen(req, timeout=60) as resp, open(BOOTSTRAP_ZIP, "wb") as out:
                 shutil.copyfileobj(resp, out)
             if os.path.getsize(BOOTSTRAP_ZIP) > 10_000_000:
@@ -135,7 +137,7 @@ def main():
     ensure_raw_bootstrap_downloaded()
 
     print(f"[update_bootstrap] Inspecting {BOOTSTRAP_ZIP} ...")
-    work_dir = tempfile.mkdtemp(prefix="termuxx_bs_")
+    work_dir = tempfile.mkdtemp(prefix="mtermux_bs_")
     extract_dir = os.path.join(work_dir, "root")
     os.makedirs(extract_dir, exist_ok=True)
 
@@ -157,7 +159,7 @@ def main():
         if os.path.exists(status_path):
             try:
                 print(f"[update_bootstrap] Fetching live package index from {PACKAGES_URL} ...")
-                req = urllib.request.Request(PACKAGES_URL, headers={"User-Agent": "termux-pkg/2.0"})
+                req = urllib.request.Request(PACKAGES_URL, headers={"User-Agent": "mtermux-pkg/7.0"})
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     repo_bytes = resp.read()
                     repo_text = repo_bytes.decode("utf-8", errors="replace")
@@ -172,7 +174,7 @@ def main():
                     f.write(repo_bytes)
 
                 try:
-                    inrel_req = urllib.request.Request(INRELEASE_URL, headers={"User-Agent": "termux-pkg/2.0"})
+                    inrel_req = urllib.request.Request(INRELEASE_URL, headers={"User-Agent": "mtermux-pkg/7.0"})
                     with urllib.request.urlopen(inrel_req, timeout=30) as inrel_resp:
                         inrel_bytes = inrel_resp.read()
                     inrel_file = os.path.join(
@@ -253,20 +255,47 @@ def main():
 
         apt_conf_dir = os.path.join(extract_dir, "etc/apt/apt.conf.d")
         os.makedirs(apt_conf_dir, exist_ok=True)
-        with open(os.path.join(apt_conf_dir, "00termuxx"), "w", encoding="utf-8") as f:
+        for old_conf in ("00mtermux", "00mtermux"):
+            p = os.path.join(apt_conf_dir, old_conf)
+            if os.path.exists(p):
+                os.remove(p)
+        with open(os.path.join(apt_conf_dir, "00mtermux"), "w", encoding="utf-8") as f:
             f.write(
-                'Dir::Cache "/data/data/com.termuxx/cach/apt";\n'
-                'Dir::Cache::archives "/data/data/com.termuxx/cach/apt/archives";\n'
+                'Dir "/data/data/com.mtermux/file/usr";\n'
+                'Dir::State "/data/data/com.mtermux/file/usr/var/lib/apt";\n'
+                'Dir::State::status "/data/data/com.mtermux/file/usr/var/lib/dpkg/status";\n'
+                'Dir::Cache "/data/data/com.mtermux/cach/apt";\n'
+                'Dir::Cache::archives "/data/data/com.mtermux/cach/apt/archives";\n'
+                'Dir::Etc "/data/data/com.mtermux/file/usr/etc/apt";\n'
+                'Dir::Bin::dpkg "/data/data/com.mtermux/file/usr/bin/dpkg";\n'
+                'Dir::Bin::Methods "/data/data/com.mtermux/file/usr/lib/apt/methods";\n'
+                'Dir::Bin::gpg "/data/data/com.mtermux/file/usr/bin/gpgv";\n'
+                'Acquire::Sandbox::User "root";\n'
+                'Dpkg::Options {\n'
+                '   "--force-not-root";\n'
+                '   "--force-bad-path";\n'
+                '   "--force-overwrite";\n'
+                '};\n'
             )
 
         if "etc/termux/chosen_mirrors" not in symlinks_map:
-            symlinks_map["etc/termux/chosen_mirrors"] = "/data/data/com.termuxx/file/usr/etc/termux/mirrors/default"
+            symlinks_map["etc/termux/chosen_mirrors"] = "/data/data/com.mtermux/file/usr/etc/termux/mirrors/default"
 
         if symlinks_map:
             with open(symlinks_path, "w", encoding="utf-8") as f:
                 for rel_link, target in sorted(symlinks_map.items()):
-                    patched_target = target.replace("com.termux/files", "com.termuxx/file").replace("com.termux/cache", "com.termuxx/cach")
-                    patched_link = rel_link.replace("com.termux/files", "com.termuxx/file").replace("com.termux/cache", "com.termuxx/cach")
+                    patched_target = (
+                        target.replace("com.termux/files", "com.mtermux/file")
+                        .replace("com.mtermux/file", "com.mtermux/file")
+                        .replace("com.termux/cache", "com.mtermux/cach")
+                        .replace("com.mtermux/cach", "com.mtermux/cach")
+                    )
+                    patched_link = (
+                        rel_link.replace("com.termux/files", "com.mtermux/file")
+                        .replace("com.mtermux/file", "com.mtermux/file")
+                        .replace("com.termux/cache", "com.mtermux/cach")
+                        .replace("com.mtermux/cach", "com.mtermux/cach")
+                    )
                     f.write(f"{patched_target}←{patched_link}\n")
 
         patched_files = 0
@@ -279,12 +308,22 @@ def main():
                     continue
                 with open(fpath, "rb") as f:
                     data = f.read()
-                if OLD_FILES_16 in data or OLD_CACHE_16 in data:
-                    data = data.replace(OLD_FILES_16, NEW_FILES_16).replace(OLD_CACHE_16, NEW_CACHE_16)
+                if (
+                    OLD_FILES_16 in data
+                    or LEG_FILES_16 in data
+                    or OLD_CACHE_16 in data
+                    or LEG_CACHE_16 in data
+                ):
+                    data = (
+                        data.replace(OLD_FILES_16, NEW_FILES_16)
+                        .replace(LEG_FILES_16, NEW_FILES_16)
+                        .replace(OLD_CACHE_16, NEW_CACHE_16)
+                        .replace(LEG_CACHE_16, NEW_CACHE_16)
+                    )
                     with open(fpath, "wb") as f:
                         f.write(data)
                     patched_files += 1
-        print(f"[update_bootstrap] Pre-patched {patched_files} files for com.termuxx.")
+        print(f"[update_bootstrap] Pre-patched {patched_files} files for com.mtermux.")
 
         tmp_zip = BOOTSTRAP_ZIP + ".new"
         with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
@@ -305,7 +344,7 @@ def main():
 
         os.replace(tmp_zip, BOOTSTRAP_ZIP)
         with open(STAMP_FILE, "w", encoding="utf-8") as sf:
-            sf.write("patched_v3_with_openssh\n")
+            sf.write("patched_mtermux_v5_with_openssh\n")
         print(f"[update_bootstrap] Repacked {BOOTSTRAP_ZIP} ({os.path.getsize(BOOTSTRAP_ZIP):,} bytes).")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -314,7 +353,7 @@ def main():
 def slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, deb_url):
     deb_dir = tempfile.mkdtemp(dir=work_dir, prefix=f"deb_{pkg_name}_")
     deb_file = os.path.join(deb_dir, f"{pkg_name}.deb")
-    req = urllib.request.Request(deb_url, headers={"User-Agent": "termux-pkg/2.0"})
+    req = urllib.request.Request(deb_url, headers={"User-Agent": "mtermux-pkg/7.0"})
     with urllib.request.urlopen(req, timeout=30) as resp, open(deb_file, "wb") as out:
         shutil.copyfileobj(resp, out)
 
@@ -336,7 +375,11 @@ def slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, deb_url):
         with open(old_list_file, "r", encoding="utf-8", errors="ignore") as olf:
             for line in olf:
                 p = line.strip()
-                for pref in ("/data/data/com.termux/files/usr/", "/data/data/com.termuxx/file/usr/"):
+                for pref in (
+                    "/data/data/com.termux/files/usr/",
+                    "/data/data/com.mtermux/file/usr/",
+                    "/data/data/com.mtermux/file/usr/",
+                ):
                     if p.startswith(pref):
                         rel_old = p[len(pref):]
                         if not rel_old:
@@ -365,7 +408,7 @@ def slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, deb_url):
         for d in list(dirs):
             src_d = os.path.join(root, d)
             rel_d = f"{rel_root}/{d}" if rel_root else d
-            list_entries.append(f"/data/data/com.termuxx/file/usr/{rel_d}")
+            list_entries.append(f"/data/data/com.mtermux/file/usr/{rel_d}")
             dst_d = os.path.join(extract_dir, rel_d)
             if os.path.islink(src_d):
                 target = os.readlink(src_d)
@@ -381,7 +424,7 @@ def slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, deb_url):
         for fname in files:
             src_f = os.path.join(root, fname)
             rel_f = f"{rel_root}/{fname}" if rel_root else fname
-            list_entries.append(f"/data/data/com.termuxx/file/usr/{rel_f}")
+            list_entries.append(f"/data/data/com.mtermux/file/usr/{rel_f}")
             dst_f = os.path.join(extract_dir, rel_f)
             os.makedirs(os.path.dirname(dst_f), exist_ok=True)
             if os.path.islink(src_f):
@@ -399,7 +442,7 @@ def slipstream_deb(work_dir, extract_dir, symlinks_map, pkg_name, deb_url):
     info_dir = os.path.join(extract_dir, "var/lib/dpkg/info")
     os.makedirs(info_dir, exist_ok=True)
     with open(os.path.join(info_dir, f"{pkg_name}.list"), "w", encoding="utf-8") as f:
-        f.write("/.\n/data\n/data/data\n/data/data/com.termuxx\n/data/data/com.termuxx/file\n/data/data/com.termuxx/file/usr\n")
+        f.write("/.\n/data\n/data/data\n/data/data/com.mtermux\n/data/data/com.mtermux/file\n/data/data/com.mtermux/file/usr\n")
         for item in sorted(list_entries):
             f.write(item + "\n")
 

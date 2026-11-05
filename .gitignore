@@ -1,10 +1,27 @@
+# Gradle & Android Studio build outputs
 .gradle/
-build/
-app/build/
+**/build/
+!src/**/build/
 .cxx/
 app/.cxx/
 local.properties
 *.iml
 .idea/
+.vscode/
 
-app/src/main/cpp/.bootstrap_patched.stamp
+# Native & Bootstrap Cache
+*.o
+*.so
+*.a
+app/src/main/assets/bootstrap-aarch64.zip
+dist/
+*.jks
+*.keystore
+*.idsig
+
+# OS & Temp files
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*~

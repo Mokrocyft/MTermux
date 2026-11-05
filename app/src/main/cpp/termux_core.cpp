@@ -1,4 +1,4 @@
-// Termux Native Core
+// MTermux (Material Termux — com.mtermux) C++26 Native Core Engine
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -55,22 +55,24 @@ extern const int32_t blob_size;
 
 namespace {
 
-constexpr const char APP_ROOT_PATH[]   = "/data/data/com.termuxx";
-constexpr const char FILES_REAL_PATH[] = "/data/data/com.termuxx/file";
-constexpr const char FILES_LINK_PATH[] = "/data/data/com.termuxx/files";
-constexpr const char PREFIX_PATH[]     = "/data/data/com.termuxx/file/usr";
-constexpr const char STAGING_PATH[]    = "/data/data/com.termuxx/file/usr-staging";
-constexpr const char BIN_PATH[]        = "/data/data/com.termuxx/file/usr/bin";
-constexpr const char LIB_PATH[]        = "/data/data/com.termuxx/file/usr/lib";
-constexpr const char TMP_PATH[]        = "/data/data/com.termuxx/file/usr/tmp";
-constexpr const char HOME_PATH[]       = "/data/data/com.termuxx/file/home";
-constexpr const char APT_ARCHIVES_PARTIAL[] = "/data/data/com.termuxx/cach/apt/archives/partial";
-constexpr const char SECOND_STAGE_MARKER[]  = "/data/data/com.termuxx/file/usr/etc/termux/.termuxx_stage2_done";
+constexpr const char APP_ROOT_PATH[]   = "/data/data/com.mtermux";
+constexpr const char FILES_REAL_PATH[] = "/data/data/com.mtermux/file";
+constexpr const char FILES_LINK_PATH[] = "/data/data/com.mtermux/files";
+constexpr const char PREFIX_PATH[]     = "/data/data/com.mtermux/file/usr";
+constexpr const char STAGING_PATH[]    = "/data/data/com.mtermux/file/usr-staging";
+constexpr const char BIN_PATH[]        = "/data/data/com.mtermux/file/usr/bin";
+constexpr const char LIB_PATH[]        = "/data/data/com.mtermux/file/usr/lib";
+constexpr const char TMP_PATH[]        = "/data/data/com.mtermux/file/usr/tmp";
+constexpr const char HOME_PATH[]       = "/data/data/com.mtermux/file/home";
+constexpr const char APT_ARCHIVES_PARTIAL[] = "/data/data/com.mtermux/cach/apt/archives/partial";
+constexpr const char SECOND_STAGE_MARKER[]  = "/data/data/com.mtermux/file/usr/etc/termux/.mtermux_stage2_done";
 
 constexpr const char OLD_FILES_16[] = "com.termux/files";
-constexpr const char NEW_FILES_16[] = "com.termuxx/file";
+constexpr const char LEG_FILES_16[] = "com.mtermux/file";
+constexpr const char NEW_FILES_16[] = "com.mtermux/file";
 constexpr const char OLD_CACHE_16[] = "com.termux/cache";
-constexpr const char NEW_CACHE_16[] = "com.termuxx/cach";
+constexpr const char LEG_CACHE_16[] = "com.mtermux/cach";
+constexpr const char NEW_CACHE_16[] = "com.mtermux/cach";
 constexpr size_t TOKEN_16_LEN = 16;
 
 // Cell style bit flags
@@ -369,7 +371,7 @@ static inline uint32_t resolveBgColor(uint32_t fg, uint32_t bg, uint16_t flags) 
 }
 
 // ============================================================================
-// C++23 Procedural Box-Drawing (U+2500..U+257F) & Block Elements (U+2580..U+259F)
+// C++26 Procedural Box-Drawing (U+2500..U+257F) & Block Elements (U+2580..U+259F)
 // Encodes fractional 1/16th cell rectangles directly into outGlyphs (cp = -1)
 // ============================================================================
 static inline int packRect16(int x0, int y0, int x1, int y1) noexcept {
@@ -462,7 +464,9 @@ static void replaceAllTokens16(uint8_t* data, size_t len, const char* oldTok, co
 
 static void patchBufferTokensInPlace(uint8_t* data, size_t len) noexcept {
     replaceAllTokens16(data, len, OLD_FILES_16, NEW_FILES_16);
+    replaceAllTokens16(data, len, LEG_FILES_16, NEW_FILES_16);
     replaceAllTokens16(data, len, OLD_CACHE_16, NEW_CACHE_16);
+    replaceAllTokens16(data, len, LEG_CACHE_16, NEW_CACHE_16);
 }
 
 static void writeAllFd(int fd, const void* buf, size_t len) noexcept {
@@ -555,7 +559,7 @@ static inline uint32_t readLe32(const uint8_t* p) noexcept {
            (static_cast<uint32_t>(p[3]) << 24);
 }
 
-static bool extractBootstrapInCpp23(const uint8_t* zipData, size_t zipSize) noexcept {
+static bool extractBootstrapInCpp26(const uint8_t* zipData, size_t zipSize) noexcept {
     if (!zipData || zipSize < 22) return false;
 
     size_t minOff = (zipSize > 65557) ? (zipSize - 65557) : 0;
@@ -718,9 +722,9 @@ static void ensureExecutablePermissionsInDir(const char* dirPath) noexcept {
 }
 
 static void installUnifiedRedirectLibrary(const char* nativeLibDir) noexcept {
-    std::string dstSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
+    std::string dstSo = std::string(LIB_PATH) + "/libmtermux-redirect.so";
     if (nativeLibDir && nativeLibDir[0] != '\0') {
-        std::string srcSo = std::string(nativeLibDir) + "/libtermuxx-redirect.so";
+        std::string srcSo = std::string(nativeLibDir) + "/libmtermux-redirect.so";
         if (access(srcSo.c_str(), R_OK) == 0) {
             copyFileBinary(srcSo.c_str(), dstSo.c_str(), 0700);
         }
@@ -728,36 +732,36 @@ static void installUnifiedRedirectLibrary(const char* nativeLibDir) noexcept {
     if (access(dstSo.c_str(), R_OK) == 0) {
         chmod(dstSo.c_str(), 0700);
         static const char* const execAliases[] = {
-            "/data/data/com.termuxx/file/usr/lib/libtermux-exec.so",
-            "/data/data/com.termuxx/file/usr/lib/libtermux-exec-ld-preload.so",
-            "/data/data/com.termuxx/file/usr/lib/libtermux-exec-direct-ld-preload.so",
-            "/data/data/com.termuxx/file/usr/lib/libtermux-exec-nosandbox-ld-preload.so"
+            "/data/data/com.mtermux/file/usr/lib/libtermux-exec.so",
+            "/data/data/com.mtermux/file/usr/lib/libtermux-exec-ld-preload.so",
+            "/data/data/com.mtermux/file/usr/lib/libtermux-exec-direct-ld-preload.so",
+            "/data/data/com.mtermux/file/usr/lib/libtermux-exec-nosandbox-ld-preload.so"
         };
         for (const char* aliasPath : execAliases) {
             unlink(aliasPath);
-            symlink("libtermuxx-redirect.so", aliasPath);
+            symlink("libmtermux-redirect.so", aliasPath);
         }
     }
 }
 
 static void installBuiltInSudoWrapper() noexcept {
-    const char* sudoPath = "/data/data/com.termuxx/file/usr/bin/sudo";
+    const char* sudoPath = "/data/data/com.mtermux/file/usr/bin/sudo";
     if (access(sudoPath, X_OK) == 0) return;
     const char* sudoScript =
-        "#!/data/data/com.termuxx/file/usr/bin/sh\n"
+        "#!/data/data/com.mtermux/file/usr/bin/sh\n"
         "for s in /debug_ramdisk/su /sbin/su /system/bin/su /system/xbin/su /data/adb/ksu/bin/su /data/adb/ap/bin/su; do\n"
         "  if [ -x \"$s\" ]; then SU_BIN=\"$s\"; break; fi\n"
         "done\n"
         "if [ -z \"$SU_BIN\" ]; then SU_BIN=su; fi\n"
         "if [ $# -eq 0 ] || [ \"$1\" = \"-s\" ] || [ \"$1\" = \"-i\" ]; then\n"
-        "  exec \"$SU_BIN\" -c \"export PATH=/data/data/com.termuxx/file/usr/bin:/data/data/com.termuxx/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; export LD_LIBRARY_PATH=/data/data/com.termuxx/file/usr/lib; export PREFIX=/data/data/com.termuxx/file/usr; export HOME=/data/data/com.termuxx/file/home; export TMPDIR=/data/data/com.termuxx/file/usr/tmp; export LD_PRELOAD=/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so; exec /data/data/com.termuxx/file/usr/bin/bash -l\"\n"
+        "  exec \"$SU_BIN\" -c \"export PATH=/data/data/com.mtermux/file/usr/bin:/data/data/com.mtermux/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; export LD_LIBRARY_PATH=/data/data/com.mtermux/file/usr/lib; export PREFIX=/data/data/com.mtermux/file/usr; export HOME=/data/data/com.mtermux/file/home; export TMPDIR=/data/data/com.mtermux/file/usr/tmp; export LD_PRELOAD=/data/data/com.mtermux/file/usr/lib/libmtermux-redirect.so; exec /data/data/com.mtermux/file/usr/bin/bash -l\"\n"
         "fi\n"
         "CMD=\"\"\n"
         "for arg in \"$@\"; do\n"
         "  ESCAPED=$(printf \"%s\" \"$arg\" | sed \"s/'/'\\\\\\\\''/g\")\n"
         "  CMD=\"$CMD '$ESCAPED'\"\n"
         "done\n"
-        "exec \"$SU_BIN\" -c \"export PATH=/data/data/com.termuxx/file/usr/bin:/data/data/com.termuxx/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; export LD_LIBRARY_PATH=/data/data/com.termuxx/file/usr/lib; export PREFIX=/data/data/com.termuxx/file/usr; export HOME=/data/data/com.termuxx/file/home; export TMPDIR=/data/data/com.termuxx/file/usr/tmp; export LD_PRELOAD=/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so; eval $CMD\"\n";
+        "exec \"$SU_BIN\" -c \"export PATH=/data/data/com.mtermux/file/usr/bin:/data/data/com.mtermux/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; export LD_LIBRARY_PATH=/data/data/com.mtermux/file/usr/lib; export PREFIX=/data/data/com.mtermux/file/usr; export HOME=/data/data/com.mtermux/file/home; export TMPDIR=/data/data/com.mtermux/file/usr/tmp; export LD_PRELOAD=/data/data/com.mtermux/file/usr/lib/libmtermux-redirect.so; eval $CMD\"\n";
     int fd = open(sudoPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
     if (fd >= 0) {
         writeAllFd(fd, sudoScript, strlen(sudoScript));
@@ -768,7 +772,7 @@ static void installBuiltInSudoWrapper() noexcept {
 
 static void runSecondStageBootstrapSilently(const char* preloadPath, bool forceRun) noexcept {
     if (!forceRun && access(SECOND_STAGE_MARKER, F_OK) == 0) return;
-    const char* bashBin = "/data/data/com.termuxx/file/usr/bin/bash";
+    const char* bashBin = "/data/data/com.mtermux/file/usr/bin/bash";
     if (access(bashBin, R_OK) != 0) return;
 
     pid_t pid = fork();
@@ -783,7 +787,7 @@ static void runSecondStageBootstrapSilently(const char* preloadPath, bool forceR
         setenv("PREFIX", PREFIX_PATH, 1);
         setenv("HOME", HOME_PATH, 1);
         setenv("TMPDIR", TMP_PATH, 1);
-        setenv("PATH", "/data/data/com.termuxx/file/usr/bin:/data/data/com.termuxx/file/usr/bin/applets:/system/bin", 1);
+        setenv("PATH", "/data/data/com.mtermux/file/usr/bin:/data/data/com.mtermux/file/usr/bin/applets:/system/bin", 1);
         setenv("LD_LIBRARY_PATH", LIB_PATH, 1);
         if (preloadPath && access(preloadPath, R_OK) == 0) {
             setenv("LD_PRELOAD", preloadPath, 1);
@@ -818,17 +822,17 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     mkdirsRecursive(HOME_PATH, 0700);
     mkdirsRecursive(TMP_PATH, 0700);
     mkdirsRecursive(APT_ARCHIVES_PARTIAL, 0700);
-    mkdirsRecursive("/data/data/com.termuxx/cache/apt/archives/partial", 0700);
-    mkdirsRecursive("/data/data/com.termuxx/file/usr/var/lib/proot-distro/installed-rootfs", 0700);
+    mkdirsRecursive("/data/data/com.mtermux/cache/apt/archives/partial", 0700);
+    mkdirsRecursive("/data/data/com.mtermux/file/usr/var/lib/proot-distro/installed-rootfs", 0700);
 
-    unlink("/data/data/com.termuxx/files/usr");
-    symlink(PREFIX_PATH, "/data/data/com.termuxx/files/usr");
-    unlink("/data/data/com.termuxx/files/home");
-    symlink(HOME_PATH, "/data/data/com.termuxx/files/home");
+    unlink("/data/data/com.mtermux/files/usr");
+    symlink(PREFIX_PATH, "/data/data/com.mtermux/files/usr");
+    unlink("/data/data/com.mtermux/files/home");
+    symlink(HOME_PATH, "/data/data/com.mtermux/files/home");
 
     // Pre-select default Termux mirror group if not yet chosen so `pkg` never warns or pings 70 mirrors
-    const char* chosenMirrorsPath = "/data/data/com.termuxx/file/usr/etc/termux/chosen_mirrors";
-    const char* defaultMirrorsDir = "/data/data/com.termuxx/file/usr/etc/termux/mirrors/default";
+    const char* chosenMirrorsPath = "/data/data/com.mtermux/file/usr/etc/termux/chosen_mirrors";
+    const char* defaultMirrorsDir = "/data/data/com.mtermux/file/usr/etc/termux/mirrors/default";
     struct stat cmSt{};
     if (lstat(chosenMirrorsPath, &cmSt) != 0 && access(defaultMirrorsDir, F_OK) == 0) {
         unlink(chosenMirrorsPath);
@@ -836,34 +840,49 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     }
 
     ensureExecutablePermissionsInDir(BIN_PATH);
-    ensureExecutablePermissionsInDir("/data/data/com.termuxx/file/usr/libexec");
-    ensureExecutablePermissionsInDir("/data/data/com.termuxx/file/usr/lib/apt");
+    ensureExecutablePermissionsInDir("/data/data/com.mtermux/file/usr/libexec");
+    ensureExecutablePermissionsInDir("/data/data/com.mtermux/file/usr/lib/apt");
 
     installUnifiedRedirectLibrary(nativeLibDir);
     installBuiltInSudoWrapper();
-    std::string dstSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
+    std::string dstSo = std::string(LIB_PATH) + "/libmtermux-redirect.so";
 
-    mkdirsRecursive("/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d", 0700);
-    const char* aptConfPath = "/data/data/com.termuxx/file/usr/etc/apt/apt.conf.d/00termuxx";
+    ensureExecutablePermissionsInDir("/data/data/com.mtermux/file/usr/var/lib/dpkg/info");
+    mkdirsRecursive("/data/data/com.mtermux/file/usr/etc/apt/apt.conf.d", 0700);
+    unlink("/data/data/com.mtermux/file/usr/etc/apt/apt.conf.d/00mtermux");
+    const char* aptConfPath = "/data/data/com.mtermux/file/usr/etc/apt/apt.conf.d/00mtermux";
     const char* aptConfText =
-        "Dir::Cache \"/data/data/com.termuxx/cach/apt\";\n"
-        "Dir::Cache::archives \"/data/data/com.termuxx/cach/apt/archives\";\n";
+        "Dir \"/data/data/com.mtermux/file/usr\";\n"
+        "Dir::State \"/data/data/com.mtermux/file/usr/var/lib/apt\";\n"
+        "Dir::State::status \"/data/data/com.mtermux/file/usr/var/lib/dpkg/status\";\n"
+        "Dir::Cache \"/data/data/com.mtermux/cach/apt\";\n"
+        "Dir::Cache::archives \"/data/data/com.mtermux/cach/apt/archives\";\n"
+        "Dir::Etc \"/data/data/com.mtermux/file/usr/etc/apt\";\n"
+        "Dir::Bin::dpkg \"/data/data/com.mtermux/file/usr/bin/dpkg\";\n"
+        "Dir::Bin::Methods \"/data/data/com.mtermux/file/usr/lib/apt/methods\";\n"
+        "Dir::Bin::gpg \"/data/data/com.mtermux/file/usr/bin/gpgv\";\n"
+        "Acquire::Sandbox::User \"root\";\n"
+        "Dpkg::Options {\n"
+        "   \"--force-not-root\";\n"
+        "   \"--force-bad-path\";\n"
+        "   \"--force-overwrite\";\n"
+        "};\n";
     int afd = open(aptConfPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (afd >= 0) {
         writeAllFd(afd, aptConfText, strlen(aptConfText));
         close(afd);
     }
 
-    mkdirsRecursive("/data/data/com.termuxx/file/usr/etc/profile.d", 0700);
-    const char* profPath = "/data/data/com.termuxx/file/usr/etc/profile.d/99-termuxx-preload.sh";
+    mkdirsRecursive("/data/data/com.mtermux/file/usr/etc/profile.d", 0700);
+    const char* profPath = "/data/data/com.mtermux/file/usr/etc/profile.d/99-mtermux-preload.sh";
     const char* profText =
-        "if [ -f \"/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so\" ]; then\n"
-        "  export LD_PRELOAD=\"/data/data/com.termuxx/file/usr/lib/libtermuxx-redirect.so\"\n"
+        "if [ -f \"/data/data/com.mtermux/file/usr/lib/libmtermux-redirect.so\" ]; then\n"
+        "  export LD_PRELOAD=\"/data/data/com.mtermux/file/usr/lib/libmtermux-redirect.so\"\n"
         "fi\n"
         "export HISTCONTROL=ignoredups:erasedups\n"
         "export HISTSIZE=10000\n"
         "export HISTFILESIZE=20000\n"
-        "export PROOT_TMP_DIR=/data/data/com.termuxx/file/usr/tmp\n";
+        "export PROOT_TMP_DIR=/data/data/com.mtermux/file/usr/tmp\n";
     int pfd = open(profPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (pfd >= 0) {
         writeAllFd(pfd, profText, strlen(profText));
@@ -877,14 +896,14 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     const char* rcText =
         "export TERM=xterm-256color\n"
         "export COLORTERM=truecolor\n"
-        "export PREFIX=/data/data/com.termuxx/file/usr\n"
-        "export HOME=/data/data/com.termuxx/file/home\n"
-        "export TMPDIR=/data/data/com.termuxx/file/usr/tmp\n"
-        "export PROOT_TMP_DIR=/data/data/com.termuxx/file/usr/tmp\n"
+        "export PREFIX=/data/data/com.mtermux/file/usr\n"
+        "export HOME=/data/data/com.mtermux/file/home\n"
+        "export TMPDIR=/data/data/com.mtermux/file/usr/tmp\n"
+        "export PROOT_TMP_DIR=/data/data/com.mtermux/file/usr/tmp\n"
         "export PATH=\"$PREFIX/bin:$PREFIX/bin/applets:/system/bin:/system/xbin\"\n"
         "export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n"
-        "if [ -f \"$PREFIX/lib/libtermuxx-redirect.so\" ]; then\n"
-        "  export LD_PRELOAD=\"$PREFIX/lib/libtermuxx-redirect.so\"\n"
+        "if [ -f \"$PREFIX/lib/libmtermux-redirect.so\" ]; then\n"
+        "  export LD_PRELOAD=\"$PREFIX/lib/libmtermux-redirect.so\"\n"
         "fi\n"
         "export HISTCONTROL=ignoredups:erasedups\n"
         "export HISTSIZE=10000\n"
@@ -900,7 +919,7 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
         close(fd);
     }
 
-    unlink("/data/data/com.termuxx/file/usr/etc/motd");
+    unlink("/data/data/com.mtermux/file/usr/etc/motd");
     gEnvInitialized = true;
     pthread_mutex_unlock(&gInitOnceMutex);
 }
@@ -1204,7 +1223,7 @@ public:
         markAllDirtyLocked();
     }
 
-    // ColorOS 17 Lollipop Selection Geometry & Touch State Machine in C++23:
+    // ColorOS 17 Lollipop Selection Geometry & Touch State Machine in C++26:
     // Start Handle: vertical stem on left edge of mSelX1, circle on TOP of stem (or bottom if rowTop1 < 2*radius)
     // End Handle:   vertical stem on right edge of mSelX2, circle on BOTTOM of stem
     bool computeSelectionGeometryLocked(
@@ -2394,13 +2413,13 @@ static bool startSessionProcess(
     engine->resize(rows, cols, cellW, cellH);
 
     initializeEnvironmentAndAutoUpdater(nativeLibDir, false);
-    std::string preloadPath = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
+    std::string preloadPath = std::string(LIB_PATH) + "/libmtermux-redirect.so";
     std::string fullPreload = preloadPath;
 
     static const char* const userShells[] = {
-        "/data/data/com.termuxx/file/usr/bin/zsh",
-        "/data/data/com.termuxx/file/usr/bin/bash",
-        "/data/data/com.termuxx/file/usr/bin/sh",
+        "/data/data/com.mtermux/file/usr/bin/zsh",
+        "/data/data/com.mtermux/file/usr/bin/bash",
+        "/data/data/com.mtermux/file/usr/bin/sh",
         "/system/bin/sh"
     };
     static const char* const suBins[] = {
@@ -2410,19 +2429,22 @@ static bool startSessionProcess(
         "/system/xbin/su",
         "/data/adb/ksu/bin/su",
         "/data/adb/ap/bin/su",
-        "/data/data/com.termuxx/file/usr/bin/su"
+        "/data/data/com.mtermux/file/usr/bin/su"
     };
 
     const char* userShell = resolveExecutable(userShells, 4);
-    const char* loginBin = "/data/data/com.termuxx/file/usr/bin/login";
+    const char* loginBin = "/data/data/com.mtermux/file/usr/bin/login";
     bool hasLogin = (access(loginBin, R_OK) == 0);
 
     std::vector<std::string> envStrings;
     envStrings.emplace_back("TERM=xterm-256color");
     envStrings.emplace_back("COLORTERM=truecolor");
-    envStrings.emplace_back("TERM_PROGRAM=Termuxx-C++26");
+    envStrings.emplace_back("TERM_PROGRAM=MTermux-C++26");
     envStrings.emplace_back("HOME=" + std::string(HOME_PATH));
     envStrings.emplace_back("PREFIX=" + std::string(PREFIX_PATH));
+    envStrings.emplace_back("TERMUX_PREFIX=" + std::string(PREFIX_PATH));
+    envStrings.emplace_back("TERMUX_APP__PACKAGE_NAME=com.mtermux");
+    envStrings.emplace_back("TERMUX_MAIN_PACKAGE_FORMAT=debian");
     envStrings.emplace_back("TMPDIR=" + std::string(TMP_PATH));
     envStrings.emplace_back("TMP=" + std::string(TMP_PATH));
     envStrings.emplace_back("PROOT_TMP_DIR=" + std::string(TMP_PATH));
@@ -2693,10 +2715,10 @@ static void sendCodepointInternal(NeoTerminalEngine* engine, int codepoint, bool
 
 static void* bootstrapWorkerThread(void* /*arg*/) {
     bool extracted = false;
-    if ((access("/data/data/com.termuxx/file/usr/bin/bash", R_OK) != 0 ||
-         access("/data/data/com.termuxx/file/usr/bin/ssh", R_OK) != 0) &&
+    if ((access("/data/data/com.mtermux/file/usr/bin/bash", R_OK) != 0 ||
+         access("/data/data/com.mtermux/file/usr/bin/ssh", R_OK) != 0) &&
         blob_size > 0) {
-        extracted = extractBootstrapInCpp23(
+        extracted = extractBootstrapInCpp26(
             reinterpret_cast<const uint8_t*>(blob),
             static_cast<size_t>(blob_size)
         );
@@ -2722,7 +2744,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeRegisterSurface(JNIEnv* env, jclass /*clazz*/, jobject surface) {
+Java_com_mtermux_app_TermuxActivity_nativeRegisterSurface(JNIEnv* env, jclass /*clazz*/, jobject surface) {
     pthread_mutex_lock(&gViewMutex);
     if (gSurfaceView) {
         env->DeleteGlobalRef(gSurfaceView);
@@ -2740,7 +2762,7 @@ Java_com_termuxx_app_TermuxActivity_nativeRegisterSurface(JNIEnv* env, jclass /*
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeInitAndPollBootstrap(JNIEnv* env, jclass /*clazz*/, jstring nativeLibDir) {
+Java_com_mtermux_app_TermuxActivity_nativeInitAndPollBootstrap(JNIEnv* env, jclass /*clazz*/, jstring nativeLibDir) {
     int state = gBootstrapState.load(std::memory_order_acquire);
     if (state == 2) return 2;
 
@@ -2765,7 +2787,7 @@ Java_com_termuxx_app_TermuxActivity_nativeInitAndPollBootstrap(JNIEnv* env, jcla
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeNewSession(
+Java_com_mtermux_app_TermuxActivity_nativeNewSession(
     JNIEnv* /*env*/, jclass /*clazz*/, jboolean asRoot, jint rows, jint cols, jint cellW, jint cellH) {
     pthread_mutex_lock(&gGlobalMutex);
     auto engine = std::make_shared<NeoTerminalEngine>(rows, cols, 10000, asRoot == JNI_TRUE);
@@ -2782,7 +2804,7 @@ Java_com_termuxx_app_TermuxActivity_nativeNewSession(
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeSwitchSession(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
+Java_com_mtermux_app_TermuxActivity_nativeSwitchSession(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
     pthread_mutex_lock(&gGlobalMutex);
     if (index >= 0 && index < static_cast<int>(gSessions.size())) {
         gActiveIdx = index;
@@ -2792,7 +2814,7 @@ Java_com_termuxx_app_TermuxActivity_nativeSwitchSession(JNIEnv* /*env*/, jclass 
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeCloseSession(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
+Java_com_mtermux_app_TermuxActivity_nativeCloseSession(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
     std::shared_ptr<NeoTerminalEngine> toClose;
     pthread_mutex_lock(&gGlobalMutex);
     if (index >= 0 && index < static_cast<int>(gSessions.size())) {
@@ -2820,7 +2842,7 @@ Java_com_termuxx_app_TermuxActivity_nativeCloseSession(JNIEnv* /*env*/, jclass /
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeDestroyAll(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeDestroyAll(JNIEnv* /*env*/, jclass /*clazz*/) {
     std::vector<std::shared_ptr<NeoTerminalEngine>> oldSessions;
     pthread_mutex_lock(&gGlobalMutex);
     oldSessions.swap(gSessions);
@@ -2833,7 +2855,7 @@ Java_com_termuxx_app_TermuxActivity_nativeDestroyAll(JNIEnv* /*env*/, jclass /*c
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetSessionCount(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeGetSessionCount(JNIEnv* /*env*/, jclass /*clazz*/) {
     pthread_mutex_lock(&gGlobalMutex);
     int c = static_cast<int>(gSessions.size());
     pthread_mutex_unlock(&gGlobalMutex);
@@ -2841,7 +2863,7 @@ Java_com_termuxx_app_TermuxActivity_nativeGetSessionCount(JNIEnv* /*env*/, jclas
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetActiveIndex(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeGetActiveIndex(JNIEnv* /*env*/, jclass /*clazz*/) {
     pthread_mutex_lock(&gGlobalMutex);
     int idx = gActiveIdx;
     pthread_mutex_unlock(&gGlobalMutex);
@@ -2849,7 +2871,7 @@ Java_com_termuxx_app_TermuxActivity_nativeGetActiveIndex(JNIEnv* /*env*/, jclass
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeIsSessionRoot(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
+Java_com_mtermux_app_TermuxActivity_nativeIsSessionRoot(JNIEnv* /*env*/, jclass /*clazz*/, jint index) {
     pthread_mutex_lock(&gGlobalMutex);
     std::shared_ptr<NeoTerminalEngine> eng =
         (index >= 0 && index < static_cast<int>(gSessions.size())) ? gSessions[static_cast<size_t>(index)] : nullptr;
@@ -2859,7 +2881,7 @@ Java_com_termuxx_app_TermuxActivity_nativeIsSessionRoot(JNIEnv* /*env*/, jclass 
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeResizeActive(
+Java_com_mtermux_app_TermuxActivity_nativeResizeActive(
     JNIEnv* /*env*/, jclass /*clazz*/, jint rows, jint cols, jint cellW, jint cellH) {
     pthread_mutex_lock(&gGlobalMutex);
     auto eng = activeEngineLocked();
@@ -2871,14 +2893,14 @@ Java_com_termuxx_app_TermuxActivity_nativeResizeActive(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeConsumeFrameDirty(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeConsumeFrameDirty(JNIEnv* /*env*/, jclass /*clazz*/) {
     auto eng = getActiveEngineSafe();
     bool d = eng && eng->mFrameDirty.exchange(false, std::memory_order_acq_rel);
     return d ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeConsumeOsc52Clipboard(JNIEnv* env, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeConsumeOsc52Clipboard(JNIEnv* env, jclass /*clazz*/) {
     auto eng = getActiveEngineSafe();
     if (!eng) return nullptr;
     eng->lock();
@@ -2893,10 +2915,10 @@ Java_com_termuxx_app_TermuxActivity_nativeConsumeOsc52Clipboard(JNIEnv* env, jcl
 }
 
 // ============================================================================
-// ColorOS 17 Selection JNI Methods (C++23 Handle Geometry & Touch Dragging)
+// ColorOS 17 Selection JNI Methods (C++26 Handle Geometry & Touch Dragging)
 // ============================================================================
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeStartTextSelection(
+Java_com_mtermux_app_TermuxActivity_nativeStartTextSelection(
     JNIEnv* /*env*/, jclass /*clazz*/, jint scrollOffset, jint screenCol, jint screenRow) {
     auto eng = getActiveEngineSafe();
     if (eng) {
@@ -2906,7 +2928,7 @@ Java_com_termuxx_app_TermuxActivity_nativeStartTextSelection(
 
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeOnSelectionTouchPx(
+Java_com_mtermux_app_TermuxActivity_nativeOnSelectionTouchPx(
     JNIEnv* /*env*/,
     jclass /*clazz*/,
     jint action,
@@ -2929,7 +2951,7 @@ Java_com_termuxx_app_TermuxActivity_nativeOnSelectionTouchPx(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetSelectionGeometryPx(
+Java_com_mtermux_app_TermuxActivity_nativeGetSelectionGeometryPx(
     JNIEnv* env,
     jclass /*clazz*/,
     jint scrollOffset,
@@ -2954,14 +2976,14 @@ Java_com_termuxx_app_TermuxActivity_nativeGetSelectionGeometryPx(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeStopTextSelection(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeStopTextSelection(JNIEnv* /*env*/, jclass /*clazz*/) {
     auto eng = getActiveEngineSafe();
     bool stopped = eng && eng->stopSelection();
     return stopped ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeIsSelectingText(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeIsSelectingText(JNIEnv* /*env*/, jclass /*clazz*/) {
     auto eng = getActiveEngineSafe();
     if (!eng) return JNI_FALSE;
     eng->lock();
@@ -2971,7 +2993,7 @@ Java_com_termuxx_app_TermuxActivity_nativeIsSelectingText(JNIEnv* /*env*/, jclas
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeSelectAll(JNIEnv* /*env*/, jclass /*clazz*/, jint scrollOffset) {
+Java_com_mtermux_app_TermuxActivity_nativeSelectAll(JNIEnv* /*env*/, jclass /*clazz*/, jint scrollOffset) {
     auto eng = getActiveEngineSafe();
     if (eng) {
         eng->lock();
@@ -2989,7 +3011,7 @@ Java_com_termuxx_app_TermuxActivity_nativeSelectAll(JNIEnv* /*env*/, jclass /*cl
 
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetSelectedText(JNIEnv* env, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeGetSelectedText(JNIEnv* env, jclass /*clazz*/) {
     auto engine = getActiveEngineSafe();
     if (!engine) return env->NewStringUTF("");
 
@@ -3003,7 +3025,7 @@ Java_com_termuxx_app_TermuxActivity_nativeGetSelectedText(JNIEnv* env, jclass /*
 // Universal Customizable Extra-Key & Input JNI Methods
 // ============================================================================
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeDispatchCustomKey(JNIEnv* env, jclass /*clazz*/, jstring keyLabel) {
+Java_com_mtermux_app_TermuxActivity_nativeDispatchCustomKey(JNIEnv* env, jclass /*clazz*/, jstring keyLabel) {
     if (!keyLabel) return 0;
     const char* utf = env->GetStringUTFChars(keyLabel, nullptr);
     if (!utf) return 0;
@@ -3116,7 +3138,7 @@ Java_com_termuxx_app_TermuxActivity_nativeDispatchCustomKey(JNIEnv* env, jclass 
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetModifierMask(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeGetModifierMask(JNIEnv* /*env*/, jclass /*clazz*/) {
     pthread_mutex_lock(&gGlobalMutex);
     int mask = (gCtrlArmed ? 1 : 0) | (gAltArmed ? 2 : 0);
     pthread_mutex_unlock(&gGlobalMutex);
@@ -3124,7 +3146,7 @@ Java_com_termuxx_app_TermuxActivity_nativeGetModifierMask(JNIEnv* /*env*/, jclas
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeSendText(
+Java_com_mtermux_app_TermuxActivity_nativeSendText(
     JNIEnv* env, jclass /*clazz*/, jstring text, jboolean isPaste) {
     if (!text) return;
     pthread_mutex_lock(&gGlobalMutex);
@@ -3190,7 +3212,7 @@ Java_com_termuxx_app_TermuxActivity_nativeSendText(
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeSendKeyEvent(
+Java_com_mtermux_app_TermuxActivity_nativeSendKeyEvent(
     JNIEnv* /*env*/, jclass /*clazz*/, jint keyCode, jint unicodeChar, jint metaState) {
     pthread_mutex_lock(&gGlobalMutex);
     auto engine = activeEngineLocked();
@@ -3219,7 +3241,7 @@ Java_com_termuxx_app_TermuxActivity_nativeSendKeyEvent(
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeSendMouse(
+Java_com_mtermux_app_TermuxActivity_nativeSendMouse(
     JNIEnv* /*env*/, jclass /*clazz*/, jint button, jint col, jint row, jboolean pressed) {
     auto engine = getActiveEngineSafe();
     if (!engine) return;
@@ -3239,7 +3261,7 @@ Java_com_termuxx_app_TermuxActivity_nativeSendMouse(
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetActiveScrollback(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeGetActiveScrollback(JNIEnv* /*env*/, jclass /*clazz*/) {
     auto eng = getActiveEngineSafe();
     if (!eng) return 0;
     eng->lock();
@@ -3249,7 +3271,7 @@ Java_com_termuxx_app_TermuxActivity_nativeGetActiveScrollback(JNIEnv* /*env*/, j
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeIsRowDirty(JNIEnv* /*env*/, jclass /*clazz*/, jint screenRow) {
+Java_com_mtermux_app_TermuxActivity_nativeIsRowDirty(JNIEnv* /*env*/, jclass /*clazz*/, jint screenRow) {
     auto eng = getActiveEngineSafe();
     bool dirty = false;
     if (eng) {
@@ -3263,7 +3285,7 @@ Java_com_termuxx_app_TermuxActivity_nativeIsRowDirty(JNIEnv* /*env*/, jclass /*c
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeClearDirtyFlags(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeClearDirtyFlags(JNIEnv* /*env*/, jclass /*clazz*/) {
     auto eng = getActiveEngineSafe();
     if (eng) {
         eng->lock();
@@ -3294,7 +3316,7 @@ static int findPromptEndColOnRow(const Row& row, int cursorCol) noexcept {
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
+Java_com_mtermux_app_TermuxActivity_nativePackRowRender(
     JNIEnv* env,
     jclass /*clazz*/,
     jint scrollOffset,
@@ -3394,7 +3416,7 @@ Java_com_termuxx_app_TermuxActivity_nativePackRowRender(
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeSetDefaultCursorShape(JNIEnv* /*env*/, jclass /*clazz*/, jint shape) {
+Java_com_mtermux_app_TermuxActivity_nativeSetDefaultCursorShape(JNIEnv* /*env*/, jclass /*clazz*/, jint shape) {
     pthread_mutex_lock(&gGlobalMutex);
     gDefaultCursorShape = std::clamp<int>(shape, 0, 2);
     for (auto& eng : gSessions) {
@@ -3407,7 +3429,7 @@ Java_com_termuxx_app_TermuxActivity_nativeSetDefaultCursorShape(JNIEnv* /*env*/,
 }
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeSetPreDeleteCount(JNIEnv* /*env*/, jclass /*clazz*/, jint count) {
+Java_com_mtermux_app_TermuxActivity_nativeSetPreDeleteCount(JNIEnv* /*env*/, jclass /*clazz*/, jint count) {
     auto eng = getActiveEngineSafe();
     if (!eng) return;
     eng->lock();
@@ -3430,7 +3452,7 @@ Java_com_termuxx_app_TermuxActivity_nativeSetPreDeleteCount(JNIEnv* /*env*/, jcl
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetInputLineBeforeCursor(JNIEnv* env, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeGetInputLineBeforeCursor(JNIEnv* env, jclass /*clazz*/) {
     auto eng = getActiveEngineSafe();
     if (!eng) return env->NewStringUTF("");
     std::string line;
@@ -3622,7 +3644,7 @@ static std::string createOneShotAskPassEnvCpp(int authType, const std::string& s
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativePingHostMs(
+Java_com_mtermux_app_TermuxActivity_nativePingHostMs(
     JNIEnv* env, jclass /*clazz*/, jstring jHost, jint port, jint timeoutMs) {
     std::string host = trimCpp(jstringToStdString(env, jHost));
     if (host.empty()) return -1;
@@ -3702,7 +3724,7 @@ Java_com_termuxx_app_TermuxActivity_nativePingHostMs(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeBuildSshCommand(
+Java_com_mtermux_app_TermuxActivity_nativeBuildSshCommand(
     JNIEnv* env,
     jclass /*clazz*/,
     jstring jHost,
@@ -3780,7 +3802,7 @@ Java_com_termuxx_app_TermuxActivity_nativeBuildSshCommand(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeParseSshCommand(
+Java_com_mtermux_app_TermuxActivity_nativeParseSshCommand(
     JNIEnv* env, jclass /*clazz*/, jstring jRawCmd) {
     std::string raw = trimCpp(jstringToStdString(env, jRawCmd));
     std::vector<std::string> tokens;
@@ -3877,7 +3899,7 @@ static const char* resolveRootSuBinaryCpp26() noexcept {
         "/sbin/su",
         "/system/bin/su",
         "/system/xbin/su",
-        "/data/data/com.termuxx/file/usr/bin/su"
+        "/data/data/com.mtermux/file/usr/bin/su"
     };
     for (const char* p : suBins) {
         if (access(p, X_OK) == 0) return p;
@@ -4053,7 +4075,7 @@ static bool execRootShellCommandCpp26(const std::string& shellCmd, std::string& 
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeExecLocalRootCmd(
+Java_com_mtermux_app_TermuxActivity_nativeExecLocalRootCmd(
     JNIEnv* env, jclass /*clazz*/, jstring jShellCmd) {
     std::string cmd = jstringToStdString(env, jShellCmd);
     std::string out;
@@ -4063,7 +4085,7 @@ Java_com_termuxx_app_TermuxActivity_nativeExecLocalRootCmd(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeListLocalDir(
+Java_com_mtermux_app_TermuxActivity_nativeListLocalDir(
     JNIEnv* env, jclass /*clazz*/, jstring jDirPath, jboolean showHidden, jstring jSearchQuery) {
     std::string dirPath = jstringToStdString(env, jDirPath);
     if (dirPath.empty()) dirPath = "/";
@@ -4221,7 +4243,7 @@ static bool runRemoteSftpCommandInternalCpp26(
         pthread_mutex_lock(&gGlobalMutex);
         std::string libDir = gNativeLibDir;
         pthread_mutex_unlock(&gGlobalMutex);
-        if (extractBootstrapInCpp23(reinterpret_cast<const uint8_t*>(blob), static_cast<size_t>(blob_size))) {
+        if (extractBootstrapInCpp26(reinterpret_cast<const uint8_t*>(blob), static_cast<size_t>(blob_size))) {
             initializeEnvironmentAndAutoUpdater(libDir.c_str(), true);
         }
     }
@@ -4264,7 +4286,7 @@ static bool runRemoteSftpCommandInternalCpp26(
         sshArgs += " -J " + shellEscapeSingleCpp(jumpHost);
     }
 
-    std::string redirectSo = std::string(LIB_PATH) + "/libtermuxx-redirect.so";
+    std::string redirectSo = std::string(LIB_PATH) + "/libmtermux-redirect.so";
     std::string fullShellLine =
         "export PATH=\"" + std::string(BIN_PATH) + ":$PATH\"; "
         "export LD_LIBRARY_PATH=\"" + std::string(LIB_PATH) + "\"; "
@@ -4409,7 +4431,7 @@ static bool runRemoteSftpCommandInternalCpp26(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
+Java_com_mtermux_app_TermuxActivity_nativeExecRemoteSftp(
     JNIEnv* env,
     jclass /*clazz*/,
     jstring jHost,
@@ -4435,7 +4457,7 @@ Java_com_termuxx_app_TermuxActivity_nativeExecRemoteSftp(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeListRemoteSftpDir(
+Java_com_mtermux_app_TermuxActivity_nativeListRemoteSftpDir(
     JNIEnv* env,
     jclass /*clazz*/,
     jstring jHost,
@@ -4572,7 +4594,7 @@ Java_com_termuxx_app_TermuxActivity_nativeListRemoteSftpDir(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetInstalledPackages(JNIEnv* env, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeGetInstalledPackages(JNIEnv* env, jclass /*clazz*/) {
     std::string statusPath = std::string(PREFIX_PATH) + "/var/lib/dpkg/status";
     int fd = open(statusPath.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) return env->NewStringUTF("");
@@ -4664,7 +4686,7 @@ Java_com_termuxx_app_TermuxActivity_nativeGetInstalledPackages(JNIEnv* env, jcla
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetCursorState(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeGetCursorState(JNIEnv* /*env*/, jclass /*clazz*/) {
     auto eng = getActiveEngineSafe();
     int state = -1;
     if (eng) {
@@ -4680,13 +4702,13 @@ Java_com_termuxx_app_TermuxActivity_nativeGetCursorState(JNIEnv* /*env*/, jclass
 }
 
 JNIEXPORT jint JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetModesMask(JNIEnv* /*env*/, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeGetModesMask(JNIEnv* /*env*/, jclass /*clazz*/) {
     auto eng = getActiveEngineSafe();
     return eng ? eng->mModes.load(std::memory_order_relaxed) : 0;
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGetTranscriptText(JNIEnv* env, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeGetTranscriptText(JNIEnv* env, jclass /*clazz*/) {
     auto engine = getActiveEngineSafe();
     if (!engine) return env->NewStringUTF("");
 
@@ -4808,7 +4830,7 @@ inline float wrapHue(float h) noexcept {
 } // namespace
 
 JNIEXPORT jintArray JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeGenerateColorSpec2026Palette(
+Java_com_mtermux_app_TermuxActivity_nativeGenerateColorSpec2026Palette(
     JNIEnv* env, jclass /*clazz*/, jint seedArgb, jint styleIndex
 ) {
     OklchColor seed = argbToOklch(static_cast<uint32_t>(seedArgb));
@@ -4904,11 +4926,11 @@ Java_com_termuxx_app_TermuxActivity_nativeGenerateColorSpec2026Palette(
 
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeDiscoverCustomFonts(JNIEnv* env, jclass /*clazz*/) {
+Java_com_mtermux_app_TermuxActivity_nativeDiscoverCustomFonts(JNIEnv* env, jclass /*clazz*/) {
     applyOryonSmartAffinity(true);
     std::vector<std::string> searchDirs = {
-        "/data/data/com.termuxx/file/home/.termux",
-        "/data/data/com.termuxx/file/home",
+        "/data/data/com.mtermux/file/home/.termux",
+        "/data/data/com.mtermux/file/home",
         "/sdcard/Download",
         "/sdcard/Fonts",
         "/sdcard/Documents"
@@ -4938,7 +4960,7 @@ Java_com_termuxx_app_TermuxActivity_nativeDiscoverCustomFonts(JNIEnv* env, jclas
 
 
 JNIEXPORT void JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeSetMaxScrollback(JNIEnv* /*env*/, jclass /*clazz*/, jint maxLines) {
+Java_com_mtermux_app_TermuxActivity_nativeSetMaxScrollback(JNIEnv* /*env*/, jclass /*clazz*/, jint maxLines) {
     int clamped = std::clamp<int>(maxLines, 500, 50000);
     pthread_mutex_lock(&gGlobalMutex);
     gDefaultMaxScrollback = clamped;
@@ -5158,7 +5180,7 @@ static void initM3ShapeTableCpp26() noexcept {
 } // namespace
 
 JNIEXPORT jfloatArray JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeComputeM3LoadingPolygon(
+Java_com_mtermux_app_TermuxActivity_nativeComputeM3LoadingPolygon(
     JNIEnv* env,
     jclass /*clazz*/,
     jfloat phase,
@@ -5225,7 +5247,7 @@ Java_com_termuxx_app_TermuxActivity_nativeComputeM3LoadingPolygon(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_termuxx_app_TermuxActivity_nativeStageKeyOrParseFileZillaXml(
+Java_com_mtermux_app_TermuxActivity_nativeStageKeyOrParseFileZillaXml(
     JNIEnv* env,
     jclass /*clazz*/,
     jstring jInput,
@@ -5278,6 +5300,253 @@ Java_com_termuxx_app_TermuxActivity_nativeStageKeyOrParseFileZillaXml(
         }
         pos = s2 + 9;
     }
+    return env->NewStringUTF(out.c_str());
+}
+
+
+// ============================================================================
+// C++26 Unified Animation Engine, Liquid Geometry, Chmod & Directory Weight
+// ============================================================================
+namespace {
+
+[[nodiscard]] constexpr float evalCubicBezierYForXCpp26(float xTarget, float x1, float y1, float x2, float y2) noexcept {
+    float x = std::clamp(xTarget, 0.0f, 1.0f);
+    if (x <= 0.0f) return 0.0f;
+    if (x >= 1.0f) return 1.0f;
+    float t = x;
+    for (int i = 0; i < 6; ++i) {
+        float inv = 1.0f - t;
+        float bx = 3.0f * inv * inv * t * x1 + 3.0f * inv * t * t * x2 + t * t * t;
+        float dbx = 3.0f * inv * inv * x1 + 6.0f * inv * t * (x2 - x1) + 3.0f * t * t * (1.0f - x2);
+        if (dbx > 1e-5f || dbx < -1e-5f) {
+            t = std::clamp(t - (bx - x) / dbx, 0.0f, 1.0f);
+        }
+    }
+    float inv = 1.0f - t;
+    return 3.0f * inv * inv * t * y1 + 3.0f * inv * t * t * y2 + t * t * t;
+}
+
+[[nodiscard]] inline float evalAnimCurveCpp26(int curveType, float rawT) noexcept {
+    float t = std::clamp(rawT, 0.0f, 1.0f);
+    switch (curveType) {
+        case 0: // CURVE_SPATIAL: PathInterpolator(0.22, 1.0, 0.36, 1.0)
+            return evalCubicBezierYForXCpp26(t, 0.22f, 1.0f, 0.36f, 1.0f);
+        case 1: // CURVE_PREDICTIVE: PathInterpolator(0.18, 1.0, 0.30, 1.0)
+            return evalCubicBezierYForXCpp26(t, 0.18f, 1.0f, 0.30f, 1.0f);
+        case 2: { // CURVE_OVERSHOOT_SOFT (tension = 1.9f)
+            float u = t - 1.0f;
+            return u * u * ((1.9f + 1.0f) * u + 1.9f) + 1.0f;
+        }
+        case 3: { // CURVE_OVERSHOOT_BOUNCE (tension = 2.2f)
+            float u = t - 1.0f;
+            return u * u * ((2.2f + 1.0f) * u + 2.2f) + 1.0f;
+        }
+        case 4: { // CURVE_LIQUID_LEAD
+            float inv = 1.0f - t;
+            return 1.0f - inv * inv * inv * inv;
+        }
+        case 5: { // CURVE_LIQUID_TRAIL
+            if (t < 0.26f) {
+                float r = t / 0.26f;
+                return r * r * 0.16f;
+            }
+            float p = (t - 0.26f) / 0.74f;
+            float spring = 1.0f - std::exp(-4.8f * p) * std::cos(4.6f * p);
+            return std::clamp(0.16f + 0.84f * spring, 0.0f, 1.03f);
+        }
+        default:
+            return t;
+    }
+}
+
+static void sumDirWeightRecursiveCpp26(
+    const char* dirPath,
+    int depth,
+    long long& totalBytes,
+    long long& fileCount
+) noexcept {
+    if (!dirPath || depth > 24 || fileCount > 150000) return;
+    DIR* d = opendir(dirPath);
+    if (!d) return;
+    struct dirent* de = nullptr;
+    while ((de = readdir(d)) != nullptr) {
+        const char* n = de->d_name;
+        if (strcmp(n, ".") == 0 || strcmp(n, "..") == 0) continue;
+        std::string full = (strcmp(dirPath, "/") == 0)
+            ? (std::string("/") + n)
+            : (std::string(dirPath) + "/" + n);
+        struct stat st{};
+        if (lstat(full.c_str(), &st) == 0) {
+            if (S_ISREG(st.st_mode)) {
+                totalBytes += static_cast<long long>(st.st_size);
+                fileCount++;
+            } else if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+                sumDirWeightRecursiveCpp26(full.c_str(), depth + 1, totalBytes, fileCount);
+            }
+        }
+    }
+    closedir(d);
+}
+
+} // namespace
+
+JNIEXPORT jfloat JNICALL
+Java_com_mtermux_app_TermuxActivity_nativeEvalAnimCurve(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jint curveType,
+    jfloat t
+) {
+    return evalAnimCurveCpp26(static_cast<int>(curveType), static_cast<float>(t));
+}
+
+JNIEXPORT jfloatArray JNICALL
+Java_com_mtermux_app_TermuxActivity_nativeComputeLiquidPillStep(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jfloat rawT,
+    jboolean movingRight,
+    jfloat startLeft,
+    jfloat startRight,
+    jfloat endLeft,
+    jfloat endRight,
+    jfloat liveOuterW,
+    jfloat liveTabW,
+    jfloat minPillW
+) {
+    float t = std::clamp(static_cast<float>(rawT), 0.0f, 1.0f);
+    float outerW = std::max(24.0f, static_cast<float>(liveOuterW));
+    float tabW = std::max(1.0f, static_cast<float>(liveTabW));
+    float eLeft = std::clamp(static_cast<float>(endLeft), 0.0f, std::max(0.0f, outerW - tabW));
+    float eRight = std::clamp(static_cast<float>(endRight), eLeft + 1.0f, std::max(eLeft + 1.0f, outerW));
+
+    float curLeft = eLeft;
+    float curRight = eRight;
+    float scaleY = 1.0f;
+
+    if (t < 0.999f) {
+        float sLeft = std::clamp(static_cast<float>(startLeft), 0.0f, std::max(0.0f, outerW - 1.0f));
+        float sRight = std::clamp(static_cast<float>(startRight), sLeft + 1.0f, std::max(sLeft + 1.0f, outerW));
+        float leadT = evalAnimCurveCpp26(4, t);
+        float trailT = evalAnimCurveCpp26(5, t);
+        if (movingRight) {
+            curLeft = sLeft + (eLeft - sLeft) * trailT;
+            curRight = sRight + (eRight - sRight) * leadT;
+        } else {
+            curLeft = sLeft + (eLeft - sLeft) * leadT;
+            curRight = sRight + (eRight - sRight) * trailT;
+        }
+        float rawW = std::max(1.0f, curRight - curLeft);
+        float stretchRatio = std::clamp(rawW / tabW, 0.86f, 1.75f);
+        float settleBounce = (t > 0.65f)
+            ? (0.03f * std::sin(((t - 0.65f) / 0.35f) * kPi26))
+            : 0.0f;
+        scaleY = std::clamp(
+            std::clamp(1.0f / std::sqrt(stretchRatio), 0.90f, 1.02f) + settleBounce,
+            0.90f,
+            1.04f
+        );
+    }
+
+    float clampedLeft = std::clamp(curLeft, 0.0f, std::max(0.0f, outerW - 1.0f));
+    float minRight = std::min(clampedLeft + std::max(12.0f, static_cast<float>(minPillW)), outerW);
+    float clampedRight = std::clamp(curRight, minRight, std::max(minRight, outerW));
+    float curW = std::max(1.0f, clampedRight - clampedLeft);
+
+    jfloat out[3] = {clampedLeft, curW, scaleY};
+    jfloatArray arr = env->NewFloatArray(3);
+    if (arr != nullptr) {
+        env->SetFloatArrayRegion(arr, 0, 3, out);
+    }
+    return arr;
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_com_mtermux_app_TermuxActivity_nativeCalculateDirWeight(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring jDirPath
+) {
+    std::string dirPath = jstringToStdString(env, jDirPath);
+    long long totalBytes = 0;
+    long long fileCount = 0;
+    if (!dirPath.empty()) {
+        if (access(dirPath.c_str(), R_OK) == 0) {
+            sumDirWeightRecursiveCpp26(dirPath.c_str(), 0, totalBytes, fileCount);
+        }
+        if (totalBytes == 0 && fileCount == 0) {
+            std::string rootOut;
+            std::string cmd = "du -sb -- " + shellEscapeSingleCpp(dirPath);
+            if (execRootShellCommandCpp26(cmd, rootOut, 5000) && !rootOut.empty()) {
+                totalBytes = atoll(rootOut.c_str());
+            }
+        }
+    }
+    jlong res[2] = {static_cast<jlong>(totalBytes), static_cast<jlong>(fileCount)};
+    jlongArray arr = env->NewLongArray(2);
+    if (arr != nullptr) {
+        env->SetLongArrayRegion(arr, 0, 2, res);
+    }
+    return arr;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_mtermux_app_TermuxActivity_nativeConvertChmodInfo(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring jInput,
+    jboolean isDir,
+    jint bitMaskOverride
+) {
+    int mask = 0;
+    if (bitMaskOverride >= 0) {
+        mask = static_cast<int>(bitMaskOverride) & 0777;
+    } else {
+        std::string s = trimCpp(jstringToStdString(env, jInput));
+        bool allOctal = (s.size() >= 3);
+        for (char c : s) {
+            if (c < '0' || c > '7') { allOctal = false; break; }
+        }
+        if (allOctal) {
+            std::string last3 = s.substr(s.size() - 3);
+            mask = ((last3[0] - '0') << 6) | ((last3[1] - '0') << 3) | (last3[2] - '0');
+        } else {
+            std::string rwx = (s.size() >= 10) ? s.substr(1, 9) : ((s.size() == 9) ? s : "");
+            if (rwx.size() == 9) {
+                for (int g = 0; g < 3; ++g) {
+                    int d = 0;
+                    char cr = rwx[static_cast<size_t>(g * 3 + 0)];
+                    char cw = rwx[static_cast<size_t>(g * 3 + 1)];
+                    char cx = rwx[static_cast<size_t>(g * 3 + 2)];
+                    if (cr == 'r') d |= 4;
+                    if (cw == 'w') d |= 2;
+                    if (cx == 'x' || cx == 's' || cx == 't') d |= 1;
+                    mask |= (d << ((2 - g) * 3));
+                }
+            } else {
+                mask = isDir ? 0755 : 0644;
+            }
+        }
+    }
+    int u = (mask >> 6) & 7;
+    int g = (mask >> 3) & 7;
+    int o = mask & 7;
+    char octal[4] = {
+        static_cast<char>('0' + u),
+        static_cast<char>('0' + g),
+        static_cast<char>('0' + o),
+        ' '
+    };
+    char sym[11];
+    sym[0] = isDir ? 'd' : '-';
+    const int groups[3] = {u, g, o};
+    for (int i = 0; i < 3; ++i) {
+        sym[i * 3 + 1] = (groups[i] & 4) ? 'r' : '-';
+        sym[i * 3 + 2] = (groups[i] & 2) ? 'w' : '-';
+        sym[i * 3 + 3] = (groups[i] & 1) ? 'x' : '-';
+    }
+    sym[10] = ' ';
+    std::string out = std::string(octal) + "	" + std::string(sym) + "	" + std::to_string(mask);
     return env->NewStringUTF(out.c_str());
 }
 

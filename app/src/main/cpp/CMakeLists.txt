@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(termuxx-core LANGUAGES C CXX ASM)
+project(mtermux-core LANGUAGES C CXX ASM)
 
 # Automatically use ccache when available to cache C++26 object compilation across builds
 find_program(CCACHE_PROGRAM ccache)
@@ -10,6 +10,10 @@ endif()
 
 include(CheckCXXCompilerFlag)
 
+set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 check_cxx_compiler_flag("-std=c++26" HAS_CXX26)
 check_cxx_compiler_flag("-std=c++2c" HAS_CXX2C)
 if(HAS_CXX26)
@@ -17,10 +21,8 @@ if(HAS_CXX26)
 elseif(HAS_CXX2C)
     set(CXX_STD_FLAG "-std=c++2c")
 else()
-    set(CXX_STD_FLAG "-std=c++23")
+    set(CXX_STD_FLAG "-std=c++26")
 endif()
-
-set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(COMMON_CXX_FLAGS
     ${CXX_STD_FLAG}
@@ -33,21 +35,21 @@ set_source_files_properties(termux-bootstrap-zip.S PROPERTIES
     OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/bootstrap-aarch64.zip"
 )
 
-add_library(termuxx-core SHARED
+add_library(mtermux-core SHARED
     termux-bootstrap-zip.S
     termux_core.cpp
 )
 
-add_library(termuxx-redirect SHARED
-    termuxx_redirect.cpp
+add_library(mtermux-redirect SHARED
+    mtermux_redirect.cpp
 )
 
-target_compile_options(termuxx-core PRIVATE
+target_compile_options(mtermux-core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${COMMON_CXX_FLAGS}>
     "-Wa,-I${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
-target_compile_options(termuxx-redirect PRIVATE
+target_compile_options(mtermux-redirect PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${COMMON_CXX_FLAGS}>
 )
 
@@ -55,19 +57,19 @@ target_compile_options(termuxx-redirect PRIVATE
 # on Qualcomm Oryon (Snapdragon 8 Elite / Gen 5) and other ARM64 SoCs without SVE2.
 check_cxx_compiler_flag("-march=armv8.2-a+crypto+dotprod+fp16" HAS_ARMV8_2)
 if(HAS_ARMV8_2)
-    target_compile_options(termuxx-core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
-    target_compile_options(termuxx-redirect PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
+    target_compile_options(mtermux-core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
+    target_compile_options(mtermux-redirect PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
 endif()
 
 find_library(log-lib log)
 find_library(z-lib z)
 
-target_link_libraries(termuxx-core
+target_link_libraries(mtermux-core
     ${log-lib}
     ${z-lib}
 )
 
-target_link_libraries(termuxx-redirect
+target_link_libraries(mtermux-redirect
     dl
 )
 
@@ -79,5 +81,5 @@ set(COMMON_LINK_FLAGS
     -Wl,--strip-all
 )
 
-target_link_options(termuxx-core PRIVATE ${COMMON_LINK_FLAGS})
-target_link_options(termuxx-redirect PRIVATE ${COMMON_LINK_FLAGS})
+target_link_options(mtermux-core PRIVATE ${COMMON_LINK_FLAGS})
+target_link_options(mtermux-redirect PRIVATE ${COMMON_LINK_FLAGS})

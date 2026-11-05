@@ -1,12 +1,13 @@
 [versions]
 agp = "9.6.0-alpha02"
 kotlin = "2.5.0-Beta2"
+javaToolchain = "28"
 ndk = "30.0.16248370"
 compileSdk = "37"
 minSdk = "37"
 targetSdk = "37"
-appVersionCode = "600"
-appVersionName = "6.0.0"
+appVersionCode = "700"
+appVersionName = "7.0.0"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "termux"
+rootProject.name = "MTermux"
 include(":app")

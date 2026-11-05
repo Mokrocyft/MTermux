@@ -1,90 +1,174 @@
-name: Build
+name: MTermux C++26 & Kotlin 2.5.0-Beta2 CI/CD
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [ main, master, "**" ]
+    tags: [ "v*" ]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   workflow_dispatch:
 
+concurrency:
+  group: mtermux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  JAVA_OPTS: "-XX:+UseZGC -XX:+ZGenerational -Xmx6g -Dfile.encoding=UTF-8"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.jvmargs=-Xmx6g"
+  ANDROID_COMPILE_SDK: "36"
+  ANDROID_BUILD_TOOLS: "36.0.0"
+  ANDROID_NDK_VERSION: "29.0.13113456"
+  CMAKE_VERSION: "4.0.2"
+
 jobs:
-  build:
-    name: Build APK
+  build-mtermux:
+    name: Build & Sign MTermux (C++26 / Kotlin 2.5 / APK v4)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
-      - name: Configure Git Defaults
-        run: |
-          git config --global init.defaultBranch main
-          git config --global advice.defaultBranchName false
-
-      - name: Checkout
-        uses: actions/checkout@main
-
-      - name: Setup Node.js
-        uses: actions/setup-node@main
+      - name: Checkout MTermux Repository
+        uses: actions/checkout@v4
         with:
-          node-version: 'latest'
+          fetch-depth: 1
 
-      - name: Setup Java
-        uses: actions/setup-java@main
+      - name: Set up Python 3.13 for Bootstrap Binary Patching
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Set up JDK Baseline (Temurin 25 LTS) & Gradle Cache
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '25'
+          cache: 'gradle'
 
-      - name: Cache Pre-Patched Bootstrap & Font
-        uses: actions/cache@main
+      - name: Upgrade to Latest Java 28 Early-Access (if available on runner mirror)
+        id: jdk28
+        continue-on-error: true
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '28-ea'
+          check-latest: true
+
+      - name: Verify Active Java Runtime & Configure Toolchain Environment
+        run: |
+          echo "Active JAVA_HOME: $JAVA_HOME"
+          java -version
+          echo "MTERMUX_ACTIVE_JDK=$JAVA_HOME" >> "$GITHUB_ENV"
+
+      - name: Set up Android SDK, NDK r29 (Clang 20 C++26) & CMake 4.0
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Android NDK, CMake & Pre-Downloaded Termux Bootstrap
+        uses: actions/cache@v4
         with:
           path: |
-            app/src/main/cpp/bootstrap-aarch64.zip
-            app/src/main/cpp/.bootstrap_patched_v4.stamp
-            app/src/main/assets/fonts/JetBrainsMono.ttf
-          key: termuxx-bootstrap-v4-${{ hashFiles('scripts/update_bootstrap.py') }}
-          restore-keys: |
-            termuxx-bootstrap-v4-
-
-      - name: Cache Gradle, CMake & CCache
-        uses: actions/cache@main
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
+            app/src/main/assets/bootstrap-aarch64.zip
             ~/.ccache
             app/.cxx
-          key: termuxx-gradle-cxx-v4-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml', 'app/src/main/cpp/CMakeLists.txt') }}
+          key: mtermux-native-v5-${{ hashFiles('scripts/update_bootstrap.py', 'app/src/main/cpp/CMakeLists.txt', 'app/src/main/cpp/*.cpp') }}
           restore-keys: |
-            termuxx-gradle-cxx-v4-${{ runner.os }}-
+            mtermux-native-v5-
 
-      - name: Accept SDK Licenses
+      - name: Install Native Build Acceleration (Ninja & CCache)
         run: |
-          yes 2>/dev/null | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build ccache zip unzip
+          ccache --max-size=2G
+          ccache --set-config=compression=true
 
-      - name: Prepare Bootstrap & Pre-Install OpenSSH
+      - name: Install Android NDK & CMake Components
         run: |
-          chmod +x ./gradlew scripts/update_bootstrap.py
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${ANDROID_COMPILE_SDK}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK_VERSION}" \
+            "cmake;${CMAKE_VERSION}"
+
+      - name: Fetch & Patch Official Termux Bootstrap for com.mtermux (16-Byte ELF Safe)
+        run: |
           python3 scripts/update_bootstrap.py
 
-      - name: Build Release APK (Strict Mode)
-        env:
-          TERMUX_PACKAGE_VARIANT: apt-android-7
-        run: |
-          ./gradlew assembleRelease --build-cache --parallel --warning-mode all --stacktrace
-          mkdir -p dist
-          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          cp -f "$RELEASE_APK" dist/termux-release.apk
-          APKSIGNER=$(find ${ANDROID_HOME}/build-tools -name apksigner | sort -V | tail -n 1)
-          if [ -n "$APKSIGNER" ]; then
-            "$APKSIGNER" verify --verbose dist/termux-release.apk
-          fi
-          ls -lh dist/termux-release.apk
+      - name: Grant Execute Permission to Gradle Wrapper
+        run: chmod +x gradlew
 
-      - name: Upload Release APK
-        uses: actions/upload-artifact@main
+      - name: Compile MTermux Debug & Release APKs (C++26 + Kotlin 2.5.0-Beta2)
+        run: |
+          ./gradlew assembleDebug assembleRelease \
+            --build-cache \
+            --parallel \
+            --configuration-cache \
+            --stacktrace
+
+      - name: Generate Signing Key & Sign APK with Signature Scheme v1 + v2 + v3 + v4
+        run: |
+          mkdir -p dist
+          KEYSTORE_FILE="dist/mtermux-release.jks"
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE_FILE" \
+            -alias mtermux \
+            -keyalg RSA \
+            -keysize 4096 \
+            -validity 10000 \
+            -storepass mtermux2026 \
+            -keypass mtermux2026 \
+            -dname "CN=MTermux, OU=MaterialTermux, O=MTermux, L=Austin, ST=TX, C=US"
+
+          APKSIGNER="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/apksigner"
+          ZIPALIGN="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/zipalign"
+
+          UNSIGNED_REL=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+
+          if [ -n "$UNSIGNED_REL" ]; then
+            "$ZIPALIGN" -p -f -v 4 "$UNSIGNED_REL" dist/MTermux-v3.5.0-arm64-v8a-aligned.apk
+            "$APKSIGNER" sign \
+              --ks "$KEYSTORE_FILE" \
+              --ks-key-alias mtermux \
+              --ks-pass pass:mtermux2026 \
+              --key-pass pass:mtermux2026 \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --v4-signing-enabled true \
+              --out dist/MTermux-v3.5.0-arm64-v8a-release.apk \
+              dist/MTermux-v3.5.0-arm64-v8a-aligned.apk
+            rm -f dist/MTermux-v3.5.0-arm64-v8a-aligned.apk
+            "$APKSIGNER" verify --verbose --v4-signature-file dist/MTermux-v3.5.0-arm64-v8a-release.apk.idsig dist/MTermux-v3.5.0-arm64-v8a-release.apk
+          fi
+
+          if [ -n "$DEBUG_APK" ]; then
+            cp "$DEBUG_APK" dist/MTermux-v3.5.0-arm64-v8a-debug.apk
+            "$APKSIGNER" sign \
+              --ks "$KEYSTORE_FILE" \
+              --ks-key-alias mtermux \
+              --ks-pass pass:mtermux2026 \
+              --key-pass pass:mtermux2026 \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --v4-signing-enabled true \
+              --out dist/MTermux-v3.5.0-arm64-v8a-debug.apk \
+              dist/MTermux-v3.5.0-arm64-v8a-debug.apk
+          fi
+
+          rm -f "$KEYSTORE_FILE"
+          ls -lh dist/
+
+      - name: Upload MTermux Signed APK & v4 .idsig Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: termux-release
-          path: dist/termux-release.apk
+          name: MTermux-v3.5.0-C++26-APKs-v4Signed
+          path: |
+            dist/*.apk
+            dist/*.apk.idsig
           if-no-files-found: error
+          retention-days: 30

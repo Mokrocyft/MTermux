@@ -5,12 +5,12 @@ plugins {
 }
 
 android {
-    namespace = "com.termuxx"
+    namespace = "com.mtermux"
     compileSdk = libs.versions.compileSdk.get().toInt()
     ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: libs.versions.ndk.get()
 
     defaultConfig {
-        applicationId = "com.termuxx"
+        applicationId = "com.mtermux"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = libs.versions.appVersionCode.get().toInt()
@@ -22,7 +22,11 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments += listOf("-DANDROID_STL=c++_static")
+                arguments += listOf(
+                    "-DANDROID_STL=c++_static",
+                    "-DCMAKE_CXX_STANDARD=26",
+                    "-DCMAKE_CXX_STANDARD_REQUIRED=ON"
+                )
             }
         }
     }
@@ -36,6 +40,7 @@ android {
             enableV1Signing = true
             enableV2Signing = true
             enableV3Signing = true
+            enableV4Signing = true
         }
     }
 
@@ -72,6 +77,15 @@ android {
         jniLibs {
             useLegacyPackaging = true
         }
+        resources {
+            excludes += setOf(
+                "META-INF/*.kotlin_module",
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "DebugProbesKt.bin"
+            )
+        }
     }
 
     buildFeatures {
@@ -87,17 +101,18 @@ androidComponents {
 }
 
 dependencies {
-    // Zero external Java libraries — 100% pure Kotlin + Android framework + C++26 native core!
+    // Zero external Java libraries — 100% pure Kotlin 2.5.0-Beta2 + Android 17 framework + C++26 native core!
 }
 
 val prepareBootstrapAndFont = tasks.register<Exec>("prepareBootstrapAndFont") {
-    description = "Ensures pre-patched bootstrap-aarch64.zip (with OpenSSH) and JetBrainsMono.ttf are ready"
+    description = "Ensures pre-patched bootstrap-aarch64.zip (for com.mtermux with OpenSSH) and JetBrainsMono.ttf are ready"
     workingDir = rootProject.projectDir
     commandLine("python3", "scripts/update_bootstrap.py")
     onlyIf {
         val bs = layout.projectDirectory.file("src/main/cpp/bootstrap-aarch64.zip").asFile
+        val stamp = layout.projectDirectory.file("src/main/cpp/.bootstrap_patched_mtermux_v5.stamp").asFile
         val font = layout.projectDirectory.file("src/main/assets/fonts/JetBrainsMono.ttf").asFile
-        !bs.exists() || bs.length() < 38_000_000L || !font.exists() || font.length() < 50_000L
+        !bs.exists() || bs.length() < 38_000_000L || !stamp.exists() || !font.exists() || font.length() < 50_000L
     }
 }
 
