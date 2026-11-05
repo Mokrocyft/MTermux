@@ -348,6 +348,8 @@ class TermuxActivity : Activity() {
     private lateinit var tabSlidingIndicator: View
     private var prevActiveSessionIdx: Int = 0
     private val prevSessionRootStates = HashMap<Int, Boolean>()
+    private lateinit var topVignetteView: View
+    private lateinit var bottomVignetteView: View
     private lateinit var extraKeysRoot: LinearLayout
     private var isImeCurrentlyOpen: Boolean = false
     private var isExtraKeysScrollHidden: Boolean = false
@@ -546,15 +548,59 @@ class TermuxActivity : Activity() {
             )
         )
 
-        // 2. Top Floating Capsules Row (overlays top of TerminalSurface with dark vignette & matte transparency)
+        // 1.5. Deep Vignette Overlays (Full-bleed dark gradients at absolute top and bottom of screen)
+        topVignetteView = View(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(
+                    0xF8000000.toInt(),
+                    0xE0000000.toInt(),
+                    0x88000000.toInt(),
+                    0x33000000.toInt(),
+                    0x00000000
+                )
+            )
+            isClickable = false
+            isFocusable = false
+        }
+        rootLayout.addView(
+            topVignetteView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(120),
+                Gravity.TOP
+            )
+        )
+
+        bottomVignetteView = View(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.BOTTOM_TOP,
+                intArrayOf(
+                    0xF8000000.toInt(),
+                    0xEE000000.toInt(),
+                    0xA0000000.toInt(),
+                    0x44000000.toInt(),
+                    0x00000000
+                )
+            )
+            isClickable = false
+            isFocusable = false
+        }
+        rootLayout.addView(
+            bottomVignetteView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(140),
+                Gravity.BOTTOM
+            )
+        )
+
+        // 2. Top Floating Capsules Row (overlays top of TerminalSurface)
         headerBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0xDD000000.toInt(), 0x77000000.toInt(), 0x00000000)
-            )
-            setPadding(dp(10), dp(6), dp(10), dp(12))
+            setBackgroundColor(0x00000000)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
             clipChildren = false
             clipToPadding = false
         }
@@ -633,14 +679,11 @@ class TermuxActivity : Activity() {
             )
         )
 
-        // 3. Bottom Floating Extra Keys Bar (overlays bottom of TerminalSurface with dark vignette & matte transparency)
+        // 3. Bottom Floating Extra Keys Bar (overlays bottom of TerminalSurface, zero layout-pass IME glide)
         extraKeysRoot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = GradientDrawable(
-                GradientDrawable.Orientation.BOTTOM_TOP,
-                intArrayOf(0xE8000000.toInt(), 0x88000000.toInt(), 0x00000000)
-            )
-            setPadding(0, dp(12), 0, dp(4))
+            setBackgroundColor(0x00000000)
+            setPadding(0, dp(4), 0, dp(4))
             clipChildren = false
             clipToPadding = false
         }
@@ -5106,6 +5149,9 @@ class TermuxActivity : Activity() {
                 val clamped = safeClamp(frac, 0f, 1f)
                 currentExtraKeysImeLiftPx = bottomInsetPx + dpF(14f) * (1f - clamped)
                 updateExtraKeysTranslationY()
+                if (::bottomVignetteView.isInitialized) {
+                    bottomVignetteView.translationY = -(bottomInsetPx - currentSysNavBottomPx).coerceAtLeast(0f)
+                }
                 if (abs(clamped - lastAppliedFraction) >= 0.002f) {
                     lastAppliedFraction = clamped
                     imeOpenFraction = clamped
@@ -6382,6 +6428,11 @@ class TermuxActivity : Activity() {
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dlg.window?.apply {
             setBackgroundDrawable(ColorDrawable(0x00000000))
+            statusBarColor = 0x00000000
+            navigationBarColor = 0x00000000
+            setDimAmount(0f)
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setWindowAnimations(0)
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             attributes = attributes.apply {
                 layoutInDisplayCutoutMode =
@@ -6393,8 +6444,22 @@ class TermuxActivity : Activity() {
         val root = FrameLayout(this).apply {
             setBackgroundColor(COLOR_AMOLED_BG)
         }
-        // Exact same extraTopDp = 4 as headerBar on Terminal screen so "Терминал" and Sessions align 1-to-1!
-        applySafeWindowInsets(root, extraLeftDp = 0, extraTopDp = 4, extraRightDp = 0, extraBottomDp = 6)
+        root.setOnApplyWindowInsetsListener { v, insets ->
+            val sysBars = insets.getInsets(
+                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+            )
+            val fallbackStatusBarPx = try {
+                val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
+                if (resId > 0) resources.getDimensionPixelSize(resId) else dp(34)
+            } catch (_: Throwable) {
+                dp(34)
+            }
+            val safeTop = max(sysBars.top, fallbackStatusBarPx) + dp(4)
+            val safeBottom = sysBars.bottom + dp(6)
+            v.setPadding(sysBars.left, safeTop, sysBars.right, safeBottom)
+            insets
+        }
+        root.post { root.requestApplyInsets() }
 
         // Layer 1: Main Hub view (Top Nav + Tab Content) — pitch-black AMOLED background
         val mainCol = LinearLayout(this).apply {
@@ -6944,7 +7009,8 @@ class TermuxActivity : Activity() {
                 termOuterFrame.layoutParams = lp
             })
             ensureCenteredPivot(root)
-            animEngine.morph(root, alpha = 0f, sx = 0.90f, sy = 0.90f, durationMs = 195L, interp = predictiveCommitInterpolator) {
+            animEngine.morph(root, alpha = 0f, sx = 0.90f, sy = 0.90f, durationMs = 180L, interp = predictiveCommitInterpolator) {
+                root.visibility = View.INVISIBLE
                 dlg.dismiss()
                 sessionsOuterPillView?.let { pill ->
                     pill.scaleX = 0.92f
@@ -7027,15 +7093,14 @@ class TermuxActivity : Activity() {
                 val targetCompactW = if (activeTab == 1) dp(154) else dp(112)
                 hubTabsOuter.visibility = View.VISIBLE
                 hubTabsOuter.alpha = 0f
-                hubTabsOuter.scaleX = 0.92f
-                hubTabsOuter.scaleY = 0.92f
+                hubTabsOuter.scaleX = 0.94f
+                hubTabsOuter.scaleY = 0.94f
 
-                termExpandAnim = animEngine.drive(
-                    key = "termFoldCollapse",
-                    durationMs = 250L,
-                    curveType = 0,
-                    onStep = { t ->
-                        val p = safeClamp(t, 0f, 1f)
+                termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 240L
+                    interpolator = aosp17SpatialInterpolator
+                    addUpdateListener { va ->
+                        val p = safeClamp(va.animatedValue as Float, 0f, 1f)
                         val inv = 1f - p
                         val curW = (startTermW + (targetCompactW - startTermW) * p).roundToInt()
                         val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
@@ -7046,31 +7111,29 @@ class TermuxActivity : Activity() {
 
                         for (cIdx in 1 until termOuterFrame.childCount) {
                             val ch = termOuterFrame.getChildAt(cIdx)
-                            ch.alpha = (inv * inv).coerceIn(0f, 1f)
-                            ch.translationX = -dpF(16f) * p
-                            ch.scaleX = 0.84f + 0.16f * inv
-                            ch.scaleY = 0.84f + 0.16f * inv
+                            ch.alpha = inv.coerceIn(0f, 1f)
+                            ch.translationX = -dpF(12f) * p
                         }
 
                         val fadeP = safeClamp((p - 0.08f) / 0.92f, 0f, 1f)
                         hubTabsOuter.alpha = fadeP
-                        hubTabsOuter.scaleX = 0.92f + 0.08f * fadeP
-                        hubTabsOuter.scaleY = 0.92f + 0.08f * fadeP
+                        hubTabsOuter.scaleX = 0.94f + 0.06f * fadeP
+                        hubTabsOuter.scaleY = 0.94f + 0.06f * fadeP
                         (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
                             syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
                         }
-                    },
-                    onEnd = {
-                        if (!termDrawerExpanded && selectedSftpPaths.isEmpty() && selectedPackageNames.isEmpty()) {
-                            currentTermPillMode = -1
-                            termAccessoryProg = if (activeTab == 1) 1f else 0f
-                            rebuildUniversalTermPill(false)
-                            termOuterFrame.scaleX = 0.96f
-                            termOuterFrame.scaleY = 0.96f
-                            animEngine.morph(termOuterFrame, sx = 1f, sy = 1f, durationMs = 150L, interp = animEngine.overshootSoftInterp)
-                        }
                     }
-                )
+                    addListener(object : android.animation.AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                            if (!termDrawerExpanded && selectedSftpPaths.isEmpty() && selectedPackageNames.isEmpty()) {
+                                currentTermPillMode = -1
+                                termAccessoryProg = if (activeTab == 1) 1f else 0f
+                                rebuildUniversalTermPill(false)
+                            }
+                        }
+                    })
+                    start()
+                }
                 return@rebuildPillLambda
             }
 
@@ -8159,7 +8222,8 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     renderActiveTab()
                 } else {
                     ensureCenteredPivot(root)
-                    animEngine.morph(root, alpha = 0f, sx = 0.88f, sy = 0.88f, durationMs = 190L, interp = predictiveCommitInterpolator) {
+                    animEngine.morph(root, alpha = 0f, sx = 0.88f, sy = 0.88f, durationMs = 180L, interp = predictiveCommitInterpolator) {
+                        root.visibility = View.INVISIBLE
                         dlg.dismiss()
                     }
                 }
