@@ -4961,7 +4961,7 @@ Java_com_mtermux_app_TermuxActivity_nativeDiscoverCustomFonts(JNIEnv* env, jclas
 
 JNIEXPORT void JNICALL
 Java_com_mtermux_app_TermuxActivity_nativeSetMaxScrollback(JNIEnv* /*env*/, jclass /*clazz*/, jint maxLines) {
-    int clamped = std::clamp<int>(maxLines, 500, 50000);
+    int clamped = (maxLines <= 0 || maxLines >= 1000000) ? 2000000 : std::clamp<int>(maxLines, 500, 1000000);
     pthread_mutex_lock(&gGlobalMutex);
     gDefaultMaxScrollback = clamped;
     for (auto& eng : gSessions) {

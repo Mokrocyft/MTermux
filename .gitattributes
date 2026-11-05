@@ -1,8 +1,0 @@
-# Ensure GitHub Linguist accurately detects Kotlin, C++, and Python
-*.kt linguist-detectable=true linguist-language=Kotlin
-*.kts linguist-detectable=true linguist-language=Kotlin
-*.cpp linguist-detectable=true linguist-language=C++
-*.c linguist-detectable=true linguist-language=C
-*.h linguist-detectable=true linguist-language=C++
-*.hpp linguist-detectable=true linguist-language=C++
-*.py linguist-detectable=true linguist-language=Python
