@@ -7206,8 +7206,7 @@ class TermuxActivity : Activity() {
                         }
                     } else {
                         runOnUiThread {
-                            onDone(false, (errOut + "
-" + stdOut).trim().ifEmpty { "ssh-keygen exit $code" }, null)
+                            onDone(false, (errOut + "\n" + stdOut).trim().ifEmpty { "ssh-keygen exit $code" }, null)
                         }
                     }
                 } catch (e: Throwable) {
@@ -7483,9 +7482,7 @@ class TermuxActivity : Activity() {
                                         val content = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
                                         if (content.contains("PRIVATE KEY")) {
                                             val dst = File(sshVaultDir, rawName.removeSuffix(".pem").removeSuffix(".key"))
-                                            dst.writeText(if (content.endsWith("
-")) content else "$content
-")
+                                            dst.writeText(if (content.endsWith("\n")) content else "$content\n")
                                             Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", "600", dst.absolutePath)).waitFor()
                                             // Derive public key if possible
                                             try {
@@ -7500,8 +7497,7 @@ class TermuxActivity : Activity() {
                                                 val p = Runtime.getRuntime().exec(arrayOf(keygenBin.absolutePath, "-y", "-f", dst.absolutePath), env, sshVaultDir)
                                                 val pubOut = p.inputStream.bufferedReader().readText().trim()
                                                 if (p.waitFor() == 0 && pubOut.startsWith("ssh-")) {
-                                                    File(sshVaultDir, "${dst.name}.pub").writeText("$pubOut
-")
+                                                    File(sshVaultDir, "${dst.name}.pub").writeText("$pubOut\n")
                                                 }
                                             } catch (_: Throwable) {}
                                             runOnUiThread {
@@ -7629,9 +7625,7 @@ class TermuxActivity : Activity() {
                             return@makeExpressiveChip
                         }
                         val dst = File(sshVaultDir, kName)
-                        dst.writeText(if (pem.endsWith("
-")) pem else "$pem
-")
+                        dst.writeText(if (pem.endsWith("\n")) pem else "$pem\n")
                         try {
                             Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", "600", dst.absolutePath)).waitFor()
                         } catch (_: Throwable) {}
