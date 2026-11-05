@@ -280,7 +280,11 @@ internal enum class M3Icon {
     SERVER,
     EDIT,
     COPY,
-    FONT
+    FONT,
+    SELECT_ALL,
+    CUT,
+    ARCHIVE_ZIP,
+    INFO
 }
 
 private data class Quadruple<out A, out B, out C, out D>(
@@ -5281,24 +5285,45 @@ class TermuxActivity : Activity() {
                     path.lineTo(x(19.5f), y(15.5f))
                     canvas.drawPath(path, strokePaint)
                 }
-                M3Icon.FOLDER, M3Icon.FOLDER_OPEN -> {
-                    path.moveTo(x(3f), y(6.8f))
-                    path.quadTo(x(3f), y(5f), x(4.8f), y(5f))
-                    path.lineTo(x(9.4f), y(5f))
-                    path.lineTo(x(11.6f), y(7.4f))
+                M3Icon.FOLDER -> {
+                    // Crisp Material 3 closed folder with distinct top tab and front pocket line
+                    path.moveTo(x(2.8f), y(6.8f))
+                    path.quadTo(x(2.8f), y(4.8f), x(4.8f), y(4.8f))
+                    path.lineTo(x(9.5f), y(4.8f))
+                    path.lineTo(x(11.8f), y(7.4f))
                     path.lineTo(x(19.2f), y(7.4f))
-                    path.quadTo(x(21f), y(7.4f), x(21f), y(9.2f))
-                    path.lineTo(x(21f), y(17.7f))
-                    path.quadTo(x(21f), y(19.5f), x(19.2f), y(19.5f))
-                    path.lineTo(x(4.8f), y(19.5f))
-                    path.quadTo(x(3f), y(19.5f), x(3f), y(17.7f))
+                    path.quadTo(x(21.2f), y(7.4f), x(21.2f), y(9.4f))
+                    path.lineTo(x(21.2f), y(17.6f))
+                    path.quadTo(x(21.2f), y(19.6f), x(19.2f), y(19.6f))
+                    path.lineTo(x(4.8f), y(19.6f))
+                    path.quadTo(x(2.8f), y(19.6f), x(2.8f), y(17.6f))
                     path.close()
-                    fillPaint.color = (0x36 shl 24) or (tintColor and 0x00FFFFFF)
+                    fillPaint.color = (0x30 shl 24) or (tintColor and 0x00FFFFFF)
                     canvas.drawPath(path, fillPaint)
                     canvas.drawPath(path, strokePaint)
-                    if (icon == M3Icon.FOLDER_OPEN) {
-                        canvas.drawLine(x(3.5f), y(11.2f), x(20.5f), y(11.2f), strokePaint)
-                    }
+                    canvas.drawLine(x(3.0f), y(9.6f), x(21.0f), y(9.6f), strokePaint)
+                }
+                M3Icon.FOLDER_OPEN -> {
+                    // Back folder tab
+                    path.moveTo(x(2.8f), y(18.5f))
+                    path.lineTo(x(2.8f), y(6.8f))
+                    path.quadTo(x(2.8f), y(4.8f), x(4.8f), y(4.8f))
+                    path.lineTo(x(9.4f), y(4.8f))
+                    path.lineTo(x(11.6f), y(7.2f))
+                    path.lineTo(x(18.5f), y(7.2f))
+                    path.quadTo(x(20.2f), y(7.2f), x(20.2f), y(9.0f))
+                    path.lineTo(x(20.2f), y(11.0f))
+                    canvas.drawPath(path, strokePaint)
+                    // Tilted front open flap
+                    path.reset()
+                    path.moveTo(x(2.8f), y(19.2f))
+                    path.lineTo(x(5.4f), y(11.0f))
+                    path.lineTo(x(21.6f), y(11.0f))
+                    path.lineTo(x(19.2f), y(19.2f))
+                    path.close()
+                    fillPaint.color = (0x38 shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawPath(path, fillPaint)
+                    canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.FILE -> {
                     path.moveTo(x(5.5f), y(3.5f))
@@ -5419,17 +5444,23 @@ class TermuxActivity : Activity() {
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.STORAGE -> {
-                    rect.set(x(4.5f), y(4f), x(19.5f), y(9f))
-                    canvas.drawOval(rect, strokePaint)
-                    path.moveTo(x(4.5f), y(6.5f))
-                    path.lineTo(x(4.5f), y(17.5f))
-                    path.quadTo(x(12f), y(21f), x(19.5f), y(17.5f))
-                    path.lineTo(x(19.5f), y(6.5f))
+                    // Crisp microSD / Storage Card icon with angled top-right corner and contact pins
+                    path.moveTo(x(5.2f), y(5.2f))
+                    path.quadTo(x(5.2f), y(3.5f), x(6.9f), y(3.5f))
+                    path.lineTo(x(14.8f), y(3.5f))
+                    path.lineTo(x(18.8f), y(7.5f))
+                    path.lineTo(x(18.8f), y(18.8f))
+                    path.quadTo(x(18.8f), y(20.5f), x(17.1f), y(20.5f))
+                    path.lineTo(x(6.9f), y(20.5f))
+                    path.quadTo(x(5.2f), y(20.5f), x(5.2f), y(18.8f))
+                    path.close()
+                    fillPaint.color = (0x26 shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawPath(path, fillPaint)
                     canvas.drawPath(path, strokePaint)
-                    path.reset()
-                    path.moveTo(x(4.5f), y(12f))
-                    path.quadTo(x(12f), y(15.2f), x(19.5f), y(12f))
-                    canvas.drawPath(path, strokePaint)
+                    // SD card contact pins at top
+                    canvas.drawLine(x(8.5f), y(6.8f), x(8.5f), y(10.0f), strokePaint)
+                    canvas.drawLine(x(11.5f), y(6.8f), x(11.5f), y(10.0f), strokePaint)
+                    canvas.drawLine(x(14.5f), y(6.8f), x(14.5f), y(10.0f), strokePaint)
                 }
                 M3Icon.CURSOR -> {
                     val r = 2.2f * u
@@ -5540,6 +5571,55 @@ class TermuxActivity : Activity() {
                     canvas.drawLine(x(5.5f), y(14.2f), x(12.1f), y(14.2f), strokePaint)
                     canvas.drawCircle(x(17.8f), y(15.2f), 2.8f * u, strokePaint)
                     canvas.drawLine(x(20.6f), y(12.2f), x(20.6f), y(18.5f), strokePaint)
+                }
+                M3Icon.SELECT_ALL -> {
+                    // Back stacked selection square
+                    path.moveTo(x(15.5f), y(7.5f))
+                    path.lineTo(x(15.5f), y(5.6f))
+                    path.quadTo(x(15.5f), y(3.8f), x(13.7f), y(3.8f))
+                    path.lineTo(x(5.6f), y(3.8f))
+                    path.quadTo(x(3.8f), y(3.8f), x(3.8f), y(5.6f))
+                    path.lineTo(x(3.8f), y(13.7f))
+                    path.quadTo(x(3.8f), y(15.5f), x(5.6f), y(15.5f))
+                    path.lineTo(x(7.5f), y(15.5f))
+                    canvas.drawPath(path, strokePaint)
+                    // Front checkbox with bold checkmark
+                    val r = 2.4f * u
+                    rect.set(x(7.8f), y(7.8f), x(20.2f), y(20.2f))
+                    fillPaint.color = (0x2C shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawRoundRect(rect, r, r, fillPaint)
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    path.reset()
+                    path.moveTo(x(10.8f), y(14.1f))
+                    path.lineTo(x(13.1f), y(16.4f))
+                    path.lineTo(x(17.4f), y(11.6f))
+                    canvas.drawPath(path, strokePaint)
+                }
+                M3Icon.CUT -> {
+                    // Crisp Scissors icon for Cut (Вырезать)
+                    canvas.drawCircle(x(6.2f), y(7.0f), 2.5f * u, strokePaint)
+                    canvas.drawCircle(x(6.2f), y(17.0f), 2.5f * u, strokePaint)
+                    canvas.drawLine(x(8.4f), y(8.4f), x(19.8f), y(17.8f), strokePaint)
+                    canvas.drawLine(x(8.4f), y(15.6f), x(19.8f), y(6.2f), strokePaint)
+                }
+                M3Icon.ARCHIVE_ZIP -> {
+                    // Crisp ZIP Archive box with vertical zipper teeth and pull tab
+                    val r = 2.6f * u
+                    rect.set(x(4.0f), y(4.0f), x(20.0f), y(20.0f))
+                    fillPaint.color = (0x24 shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawRoundRect(rect, r, r, fillPaint)
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    canvas.drawLine(x(12.0f), y(4.2f), x(12.0f), y(12.8f), strokePaint)
+                    canvas.drawLine(x(9.6f), y(6.8f), x(14.4f), y(6.8f), strokePaint)
+                    canvas.drawLine(x(9.6f), y(9.6f), x(14.4f), y(9.6f), strokePaint)
+                    rect.set(x(10.0f), y(12.8f), x(14.0f), y(16.8f))
+                    canvas.drawRoundRect(rect, 1.2f * u, 1.2f * u, strokePaint)
+                }
+                M3Icon.INFO -> {
+                    canvas.drawCircle(x(12.0f), y(12.0f), 8.6f * u, strokePaint)
+                    fillPaint.color = tintColor
+                    canvas.drawCircle(x(12.0f), y(8.0f), 1.3f * u, fillPaint)
+                    canvas.drawLine(x(12.0f), y(11.4f), x(12.0f), y(16.4f), strokePaint)
                 }
             }
         }
@@ -5978,6 +6058,8 @@ class TermuxActivity : Activity() {
         var justToggledTreeFolderPath: String? = null
         val selectedSftpPaths = LinkedHashSet<String>()
         var lastRenderedEntries: List<SftpItemEntry> = emptyList()
+        val selectedPackageNames = LinkedHashSet<String>()
+        var lastUserPackageNames: List<String> = emptyList()
         val batchClipSources = ArrayList<String>()
         var batchClipIsMove = false
         var sftpSearchActive = false
@@ -5994,6 +6076,72 @@ class TermuxActivity : Activity() {
         var activeSftpRefreshCallback: ((Boolean, (() -> Unit)?) -> Unit)? = null
         var activeSftpBreadcrumbsCallback: ((Boolean) -> Unit)? = null
         var activeSftpPopulateRowsCallback: ((String?, List<SftpItemEntry>) -> Unit)? = null
+        var activePackagesPopulateCallback: (() -> Unit)? = null
+
+        // Reliable local & remote .zip archive creator (pure JVM ZipOutputStream with CLI/Python fallback)
+        fun compressPathsToZipAsync(
+            srv: SshServerProfile?,
+            baseDirStr: String,
+            targetPaths: List<String>,
+            outZipPath: String,
+            onFinished: (Boolean, String) -> Unit
+        ) {
+            Thread {
+                if (srv == null) {
+                    var okZip = false
+                    try {
+                        val outFile = File(outZipPath)
+                        if (outFile.parentFile?.canWrite() == true && targetPaths.all { File(it).canRead() }) {
+                            java.util.zip.ZipOutputStream(java.io.BufferedOutputStream(java.io.FileOutputStream(outFile))).use { zos ->
+                                fun addFileToZip(f: File, relPrefix: String) {
+                                    val entryName = if (relPrefix.isEmpty()) f.name else "$relPrefix/${f.name}"
+                                    if (f.isDirectory) {
+                                        val children = f.listFiles()
+                                        if (children.isNullOrEmpty()) {
+                                            zos.putNextEntry(java.util.zip.ZipEntry("$entryName/"))
+                                            zos.closeEntry()
+                                        } else {
+                                            for (ch in children) addFileToZip(ch, entryName)
+                                        }
+                                    } else if (f.isFile) {
+                                        zos.putNextEntry(java.util.zip.ZipEntry(entryName))
+                                        java.io.FileInputStream(f).use { fis -> fis.copyTo(zos) }
+                                        zos.closeEntry()
+                                    }
+                                }
+                                for (p in targetPaths) {
+                                    val f = File(p)
+                                    if (f.exists() && f.absolutePath != outFile.absolutePath) {
+                                        addFileToZip(f, "")
+                                    }
+                                }
+                            }
+                            okZip = outFile.exists() && outFile.length() > 0L
+                        }
+                    } catch (_: Throwable) {
+                        okZip = false
+                    }
+                    if (!okZip) {
+                        val relNames = targetPaths.map { it.substringAfterLast('/') }.filter { it.isNotEmpty() }
+                        val joinedArgs = relNames.joinToString(" ") { shellEscapeSingle(it) }
+                        val zipCmd = "cd -- ${shellEscapeSingle(baseDirStr)} && (zip -rq ${shellEscapeSingle(outZipPath)} -- $joinedArgs || python3 -m zipfile -c ${shellEscapeSingle(outZipPath)} $joinedArgs)"
+                        val res = nativeExecLocalRootCmd(zipCmd)
+                        okZip = File(outZipPath).exists() || res.startsWith("OK")
+                    }
+                    runOnUiThread {
+                        onFinished(okZip, outZipPath.substringAfterLast('/'))
+                    }
+                } else {
+                    val relNames = targetPaths.map { it.substringAfterLast('/') }.filter { it.isNotEmpty() }
+                    val joinedArgs = relNames.joinToString(" ") { shellEscapeSingle(it) }
+                    val zipCmd = "cd -- ${shellEscapeSingle(baseDirStr)} && (zip -rq ${shellEscapeSingle(outZipPath)} -- $joinedArgs || python3 -m zipfile -c ${shellEscapeSingle(outZipPath)} $joinedArgs)"
+                    val (ok, _) = runRemoteSftpViaCpp23(srv, zipCmd)
+                    runOnUiThread {
+                        onFinished(ok, outZipPath.substringAfterLast('/'))
+                    }
+                }
+            }.start()
+        }
 
         fun openHubSubPage(populateSubPage: (LinearLayout, () -> Unit) -> Unit) {
             inHubSubPage = true
@@ -6090,7 +6238,9 @@ class TermuxActivity : Activity() {
             }
         }
 
-        // Right-side Material 3 Expressive Connected Tab Capsule: [ SSH | Файлы | Пакеты ]
+        // Right-side Tab Capsule styled like 1000008634.jpg & 1000008635.jpg:
+        // Single dark capsule background (`uiSurfaceLow`), inactive tabs have NO box and show only text,
+        // while the active tab has a rounded pill background and smoothly reveals its icon + label!
         val hubTabsOuter = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -6103,7 +6253,13 @@ class TermuxActivity : Activity() {
             )
         }
 
-        val hubTabTitles = listOf("SSH", tr("Файлы", "Files"), tr("Пакеты", "Packages"))
+        val hubTabSpecs = listOf(
+            M3Icon.SERVER to "SSH",
+            M3Icon.FOLDER to tr("Файлы", "Files"),
+            M3Icon.ALL_PACKAGES to tr("Пакеты", "Packages")
+        )
+        val hubTabContainers = ArrayList<LinearLayout>(3)
+        val hubTabIcons = ArrayList<MaterialIconView>(3)
         val hubTabViews = ArrayList<TextView>(3)
         val hubTabBgs = ArrayList<GradientDrawable>(3)
         val hubTabSelProg = FloatArray(3) { idx -> if (idx == activeTab) 1f else 0f }
@@ -6111,34 +6267,64 @@ class TermuxActivity : Activity() {
         val hubTabPressAnims = arrayOfNulls<ValueAnimator>(3)
         var hubTabSwitchAnim: ValueAnimator? = null
 
+        val activePillColor = blendColor(uiSurfaceHigh, uiAccentContainer, 0.42f)
+
         fun updateHubTabsBentoGeometry() {
             for (i in 0 until 3) {
                 val selF = safeClamp(hubTabSelProg[i], 0f, 1f)
                 val pF = safeClamp(hubTabPressProg[i], 0f, 1f)
-                val morph = max(selF, pF)
-                val restL = if (i == 0) pillOuterR else pillInnerR
-                val restR = if (i == 2) pillOuterR else pillInnerR
-                val curL = restL + (pillOuterR - restL) * morph
-                val curR = restR + (pillOuterR - restR) * morph
+                val pillVisibility = safeClamp(max(selF, pF * 0.65f), 0f, 1f)
 
                 val bg = hubTabBgs[i]
-                bg.setColor(blendColor(uiSurfaceHigh, uiAccentContainer, max(selF, pF * 0.75f)))
-                bg.cornerRadii = floatArrayOf(curL, curL, curR, curR, curR, curR, curL, curL)
+                // Inactive tabs are completely transparent inside the dark capsule (like 1000008634.jpg)!
+                val alphaInt = (pillVisibility * 255f).roundToInt().coerceIn(0, 255)
+                val rgb = activePillColor and 0x00FFFFFF
+                bg.setColor((alphaInt shl 24) or rgb)
+                val rad = pillOuterR - dpF(3f) * pF * (1f - selF)
+                bg.cornerRadius = rad
+
+                // Active tab icon smoothly expands in (like Photos/Collections icon on 1000008634.jpg & 1000008635.jpg)!
+                val ic = hubTabIcons[i]
+                val icLp = ic.layoutParams as LinearLayout.LayoutParams
+                val targetIcW = (dpF(16f) * selF).roundToInt()
+                val targetIcMargin = (dpF(5f) * selF).roundToInt()
+                if (targetIcW <= 1) {
+                    ic.visibility = View.GONE
+                } else {
+                    ic.visibility = View.VISIBLE
+                    ic.alpha = selF
+                    ic.scaleX = 0.65f + 0.35f * selF
+                    ic.scaleY = 0.65f + 0.35f * selF
+                    if (icLp.width != targetIcW || icLp.marginEnd != targetIcMargin) {
+                        icLp.width = targetIcW
+                        icLp.marginEnd = targetIcMargin
+                        ic.layoutParams = icLp
+                    }
+                }
+                ic.tintColor = blendColor(COLOR_TEXT_DIM, uiOnAccentContainer, selF)
+                ic.invalidate()
 
                 val tv = hubTabViews[i]
-                tv.setTextColor(blendColor(COLOR_TEXT_BRIGHT, uiOnAccentContainer, morph))
-                val lp = tv.layoutParams as LinearLayout.LayoutParams
-                val targetWeight = 1.0f + 0.16f * selF + 0.12f * pF
+                tv.setTextColor(blendColor(COLOR_TEXT_DIM, COLOR_TEXT_BRIGHT, max(selF, pF * 0.7f)))
+
+                val box = hubTabContainers[i]
+                val lp = box.layoutParams as LinearLayout.LayoutParams
+                val targetWeight = 0.88f + 0.36f * selF + 0.08f * pF
                 if (abs(lp.weight - targetWeight) > 0.005f) {
                     lp.weight = targetWeight
-                    tv.layoutParams = lp
+                    box.layoutParams = lp
                 }
             }
         }
 
         for (i in 0 until 3) {
             val tabIdx = i
-            val bg = makeConnectedSegmentDrawable(uiSurfaceHigh, pillOuterR, pillOuterR)
+            val (tabIcon, tabTitle) = hubTabSpecs[i]
+            val bg = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = pillOuterR
+                setColor(0x00000000)
+            }
             hubTabBgs.add(bg)
             var downMs = 0L
             fun animateHubTabPress(holding: Boolean) {
@@ -6158,16 +6344,30 @@ class TermuxActivity : Activity() {
             }
             val relRun = Runnable { animateHubTabPress(false) }
 
+            val icView = MaterialIconView(this, tabIcon, uiOnAccentContainer, 15.5f, 2.0f).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    if (i == activeTab) dp(16) else 0,
+                    dp(16)
+                ).apply {
+                    marginEnd = if (i == activeTab) dp(5) else 0
+                }
+                if (i != activeTab) visibility = View.GONE
+            }
             val tv = TextView(this).apply {
-                text = hubTabTitles[i]
+                text = tabTitle
                 gravity = Gravity.CENTER
                 setSingleLine(true)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f)
+            }
+            val tabBox = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
                 background = bg
-                layoutParams = LinearLayout.LayoutParams(0, pillInnerH, if (i == activeTab) 1.16f else 1f).apply {
-                    if (i < 2) marginEnd = dp(2)
-                }
+                setPadding(dp(8), 0, dp(8), 0)
+                layoutParams = LinearLayout.LayoutParams(0, pillInnerH, if (i == activeTab) 1.24f else 0.88f)
+                addView(icView)
+                addView(tv)
                 setOnTouchListener { v, ev ->
                     when (ev.actionMasked) {
                         MotionEvent.ACTION_DOWN -> {
@@ -6199,8 +6399,10 @@ class TermuxActivity : Activity() {
                     }
                 }
             }
+            hubTabIcons.add(icView)
             hubTabViews.add(tv)
-            hubTabsOuter.addView(tv)
+            hubTabContainers.add(tabBox)
+            hubTabsOuter.addView(tabBox)
         }
         updateHubTabsBentoGeometry()
 
@@ -6253,16 +6455,21 @@ class TermuxActivity : Activity() {
         }
 
         // Universal Right-Expanding "Терминал" Capsule:
-        // - Normal state: [ >_ Терминал ] (or with connected source indicator [ 📁 ▸ ] in Файлы / paste badge).
-        //   Swipe right, long-press, or tap the right segment to smoothly unfold to the right!
-        // - Selection state (Item 9): automatically unfolds to the right into the Icon Toolbar
-        //   [ >_ | N | Все | Копировать | Вырезать | .tar.gz | 🗑️ (expands to "🗑️ Уверены?") | ✕ ]!
-        // - Drawer state (Item 8): unfolds to the right with contextual options for SSH / Файлы / Пакеты!
+        // - In SSH tab (activeTab == 0): simple 1-tap "Терминал" button (no swipe/hold drawer menu!).
+        // - In Файлы tab (activeTab == 1):
+        //     * Selection mode: [ >_ N | Выбрать всё (SELECT_ALL) | Копировать (COPY) | Вырезать (CUT) | .zip (ARCHIVE_ZIP) | 🗑️ (expands to "Уверены?") | ✕ ]
+        //     * Source drawer mode: [ >_ | Termux | SD | / | SSH | ✕ ]
+        // - In Пакеты tab (activeTab == 2):
+        //     * Package selection mode: [ >_ N | Выбрать всё (SELECT_ALL) | 🗑️ (expands to "Уверены?" -> apt remove) | ✕ ]
         rebuildUniversalTermPill = { animateMorph ->
             val oldWidth = termOuterFrame.width
             termOuterFrame.removeAllViews()
-            val isSelectionMode = (activeTab == 1 && selectedSftpPaths.isNotEmpty())
-            val isExpandedRight = isSelectionMode || termDrawerExpanded
+            if (activeTab != 1) {
+                termDrawerExpanded = false
+            }
+            val isFileSelectionMode = (activeTab == 1 && selectedSftpPaths.isNotEmpty())
+            val isPkgSelectionMode = (activeTab == 2 && selectedPackageNames.isNotEmpty())
+            val isExpandedRight = isFileSelectionMode || isPkgSelectionMode || (activeTab == 1 && termDrawerExpanded)
 
             fun makeSegmentPill(
                 icon: M3Icon?,
@@ -6316,12 +6523,11 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            if (isSelectionMode) {
-                // Item 9: Right-expanded File/Folder Selection Icon Toolbar!
+            if (isFileSelectionMode) {
                 val srv = activeSftpServer
                 val activeDirStr = if (srv == null) localCurrentDir.absolutePath else remoteCurrentPath
 
-                // 1. Compact Terminal icon button on the left
+                // 1. Compact Terminal icon + selected count
                 termOuterFrame.addView(
                     makeSegmentPill(
                         icon = M3Icon.TERMINAL,
@@ -6335,10 +6541,10 @@ class TermuxActivity : Activity() {
                         exitToTerminalAnimated()
                     }
                 )
-                // 2. Select All icon
+                // 2. Select All icon (M3Icon.SELECT_ALL)
                 termOuterFrame.addView(
                     makeSegmentPill(
-                        icon = M3Icon.ALL_PACKAGES,
+                        icon = M3Icon.SELECT_ALL,
                         label = null,
                         leftR = pillInnerR,
                         rightR = pillInnerR,
@@ -6347,15 +6553,20 @@ class TermuxActivity : Activity() {
                         weightVal = 0.85f
                     ) {
                         trashConfirmExpanded = false
-                        for (e in lastRenderedEntries) {
-                            selectedSftpPaths.add(e.path)
+                        if (selectedSftpPaths.size >= lastRenderedEntries.size && lastRenderedEntries.isNotEmpty()) {
+                            selectedSftpPaths.clear()
+                            rebuildUniversalTermPill(true)
+                        } else {
+                            for (e in lastRenderedEntries) {
+                                selectedSftpPaths.add(e.path)
+                            }
+                            rebuildUniversalTermPill(false)
                         }
-                        rebuildUniversalTermPill(false)
                         activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
                     }
                 )
                 if (srv == null) {
-                    // 3. Copy icon
+                    // 3. Copy icon (M3Icon.COPY)
                     termOuterFrame.addView(
                         makeSegmentPill(
                             icon = M3Icon.COPY,
@@ -6376,10 +6587,10 @@ class TermuxActivity : Activity() {
                             activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
                         }
                     )
-                    // 4. Cut/Move icon
+                    // 4. Cut icon (M3Icon.CUT - unmistakable scissors!)
                     termOuterFrame.addView(
                         makeSegmentPill(
-                            icon = M3Icon.FOLDER_OPEN,
+                            icon = M3Icon.CUT,
                             label = null,
                             leftR = pillInnerR,
                             rightR = pillInnerR,
@@ -6398,10 +6609,10 @@ class TermuxActivity : Activity() {
                         }
                     )
                 }
-                // 5. Compress to .tar.gz icon
+                // 5. Compress to .zip icon (M3Icon.ARCHIVE_ZIP - unmistakable zipper box!)
                 termOuterFrame.addView(
                     makeSegmentPill(
-                        icon = M3Icon.STORAGE,
+                        icon = M3Icon.ARCHIVE_ZIP,
                         label = null,
                         leftR = pillInnerR,
                         rightR = pillInnerR,
@@ -6411,24 +6622,19 @@ class TermuxActivity : Activity() {
                     ) {
                         trashConfirmExpanded = false
                         val targets = selectedSftpPaths.toList()
-                        val archiveName = "archive_${System.currentTimeMillis() / 1000}.tar.gz"
+                        val archiveName = if (targets.size == 1) {
+                            "${targets[0].substringAfterLast('/')}.zip"
+                        } else {
+                            "archive_${System.currentTimeMillis() / 1000}.zip"
+                        }
                         val archivePath = if (activeDirStr == "/") "/$archiveName" else "$activeDirStr/$archiveName"
-                        val relNames = targets.map { it.substringAfterLast('/') }.filter { it.isNotEmpty() }
-                        val joinedArgs = relNames.joinToString(" ") { shellEscapeSingle(it) }
-                        val tarCmd = "cd -- ${shellEscapeSingle(activeDirStr)} && tar -czf ${shellEscapeSingle(archivePath)} -- $joinedArgs"
                         selectedSftpPaths.clear()
                         rebuildUniversalTermPill(true)
-                        Thread {
-                            if (srv == null) {
-                                nativeExecLocalRootCmd(tarCmd)
-                            } else {
-                                runRemoteSftpViaCpp23(srv, tarCmd)
-                            }
-                            runOnUiThread {
-                                Toast.makeText(this, tr("Создан архив: $archiveName", "Created: $archiveName"), Toast.LENGTH_SHORT).show()
-                                activeSftpRefreshCallback?.invoke(true, null)
-                            }
-                        }.start()
+                        activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                        compressPathsToZipAsync(srv, activeDirStr, targets, archivePath) { _, createdName ->
+                            Toast.makeText(this, tr("Создан архив: $createdName", "Archived: $createdName"), Toast.LENGTH_SHORT).show()
+                            activeSftpRefreshCallback?.invoke(true, null)
+                        }
                     }
                 )
                 // 6. Expandable Trash Icon -> on 1st tap smoothly unfolds to the right with "Уверены?"!
@@ -6514,8 +6720,109 @@ class TermuxActivity : Activity() {
                         activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
                     }
                 )
-            } else if (termDrawerExpanded) {
-                // Item 8: Right-expanded contextual menu inside "Терминал" capsule!
+            } else if (isPkgSelectionMode) {
+                // Batch Package Selection Toolbar in Пакеты tab!
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.TERMINAL,
+                        label = "${selectedPackageNames.size}",
+                        leftR = pillOuterR,
+                        rightR = pillInnerR,
+                        fillCol = uiAccentContainer,
+                        tintCol = uiOnAccentContainer,
+                        weightVal = 1.0f
+                    ) {
+                        exitToTerminalAnimated()
+                    }
+                )
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.SELECT_ALL,
+                        label = tr("Все", "All"),
+                        leftR = pillInnerR,
+                        rightR = pillInnerR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        weightVal = 1.15f
+                    ) {
+                        trashConfirmExpanded = false
+                        if (selectedPackageNames.size >= lastUserPackageNames.size && lastUserPackageNames.isNotEmpty()) {
+                            selectedPackageNames.clear()
+                            rebuildUniversalTermPill(true)
+                        } else {
+                            selectedPackageNames.addAll(lastUserPackageNames)
+                            rebuildUniversalTermPill(false)
+                        }
+                        activePackagesPopulateCallback?.invoke()
+                    }
+                )
+                val pkgTrashBtn = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    background = makeConnectedSegmentDrawable(
+                        COLOR_ROOT_CONTAINER,
+                        if (trashConfirmExpanded) pillOuterR else pillInnerR,
+                        if (trashConfirmExpanded) pillOuterR else pillInnerR
+                    )
+                    setPadding(dp(12), 0, dp(12), 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        pillInnerH,
+                        if (trashConfirmExpanded) 2.1f else 1.25f
+                    ).apply {
+                        marginEnd = dp(2)
+                    }
+                    addView(
+                        MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                                marginEnd = dp(5)
+                            }
+                        }
+                    )
+                    addView(TextView(this@TermuxActivity).apply {
+                        text = if (trashConfirmExpanded) tr("Уверены?", "Sure?") else tr("Удалить", "Remove")
+                        setSingleLine(true)
+                        setTextColor(COLOR_ROOT)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    })
+                    attachSmoothPressAnimation(this, 0.93f)
+                    setOnClickListener {
+                        if (!trashConfirmExpanded) {
+                            triggerHaptic(1.1f)
+                            trashConfirmExpanded = true
+                            rebuildUniversalTermPill(true)
+                        } else {
+                            triggerHaptic(1.35f)
+                            val pkgsToRemove = selectedPackageNames.joinToString(" ")
+                            selectedPackageNames.clear()
+                            trashConfirmExpanded = false
+                            dlg.dismiss()
+                            nativeSendText("apt remove -y $pkgsToRemove\n", false)
+                        }
+                    }
+                }
+                termOuterFrame.addView(pkgTrashBtn)
+
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.CLOSE,
+                        label = null,
+                        leftR = pillInnerR,
+                        rightR = pillOuterR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        marginEndDp = 0,
+                        weightVal = 0.85f
+                    ) {
+                        trashConfirmExpanded = false
+                        selectedPackageNames.clear()
+                        rebuildUniversalTermPill(true)
+                        activePackagesPopulateCallback?.invoke()
+                    }
+                )
+            } else if (activeTab == 1 && termDrawerExpanded) {
+                // Файлы source switcher drawer inside "Терминал" capsule: [ >_ | Termux | SD | / | SSH | ✕ ]
                 termOuterFrame.addView(
                     makeSegmentPill(
                         icon = M3Icon.TERMINAL,
@@ -6530,159 +6837,90 @@ class TermuxActivity : Activity() {
                     }
                 )
 
-                when (activeTab) {
-                    1 -> {
-                        // Файлы sources: [ Termux (/data/data/com.termuxx/file) | SD (/sdcard) | / (Root) | SSH ]
-                        val curSrc = currentSftpSourceCode()
-                        val sources = listOf(
-                            Triple(0, M3Icon.TERMINAL, "Termux"),
-                            Triple(1, M3Icon.STORAGE, "SD"),
-                            Triple(2, M3Icon.ROOT_HASH, "/"),
-                            Triple(3, M3Icon.SERVER, "SSH")
-                        )
-                        for ((sCode, sIcon, sLbl) in sources) {
-                            val isSel = (curSrc == sCode)
-                            termOuterFrame.addView(
-                                makeSegmentPill(
-                                    icon = sIcon,
-                                    label = sLbl,
-                                    leftR = if (isSel) pillOuterR else pillInnerR,
-                                    rightR = if (isSel) pillOuterR else pillInnerR,
-                                    fillCol = if (isSel) uiAccentContainer else uiSurfaceHigh,
-                                    tintCol = if (isSel) uiOnAccentContainer else COLOR_TEXT_BRIGHT,
-                                    weightVal = if (isSel) 1.25f else 1.05f
-                                ) {
-                                    when (sCode) {
-                                        0 -> {
-                                            activeSftpServer = null
-                                            localCurrentDir = appRootDir
+                val curSrc = currentSftpSourceCode()
+                val sources = listOf(
+                    Triple(0, M3Icon.FOLDER, "Termux"),
+                    Triple(1, M3Icon.STORAGE, "SD"),
+                    Triple(2, M3Icon.ROOT_HASH, "/"),
+                    Triple(3, M3Icon.SERVER, "SSH")
+                )
+                for ((sCode, sIcon, sLbl) in sources) {
+                    val isSel = (curSrc == sCode)
+                    termOuterFrame.addView(
+                        makeSegmentPill(
+                            icon = sIcon,
+                            label = sLbl,
+                            leftR = if (isSel) pillOuterR else pillInnerR,
+                            rightR = if (isSel) pillOuterR else pillInnerR,
+                            fillCol = if (isSel) uiAccentContainer else uiSurfaceHigh,
+                            tintCol = if (isSel) uiOnAccentContainer else COLOR_TEXT_BRIGHT,
+                            weightVal = if (isSel) 1.25f else 1.05f
+                        ) {
+                            when (sCode) {
+                                0 -> {
+                                    activeSftpServer = null
+                                    localCurrentDir = appRootDir
+                                    termDrawerExpanded = false
+                                    rebuildUniversalTermPill(true)
+                                    activeSftpBreadcrumbsCallback?.invoke(true)
+                                    activeSftpRefreshCallback?.invoke(false, null)
+                                }
+                                1 -> {
+                                    val switchToSd = {
+                                        activeSftpServer = null
+                                        localCurrentDir = sdDirGlobal
+                                        termDrawerExpanded = false
+                                        rebuildUniversalTermPill(true)
+                                        activeSftpBreadcrumbsCallback?.invoke(true)
+                                        activeSftpRefreshCallback?.invoke(false, null)
+                                    }
+                                    if (!hasAllFilesAccessPermission() && !hasStandardStoragePermission()) {
+                                        showStoragePermissionsModal { switchToSd() }
+                                    } else {
+                                        switchToSd()
+                                    }
+                                }
+                                2 -> {
+                                    activeSftpServer = null
+                                    localCurrentDir = fsRootDir
+                                    termDrawerExpanded = false
+                                    rebuildUniversalTermPill(true)
+                                    activeSftpBreadcrumbsCallback?.invoke(true)
+                                    activeSftpRefreshCallback?.invoke(false, null)
+                                }
+                                3 -> {
+                                    val saved = loadSshServers()
+                                    if (saved.isEmpty()) {
+                                        Toast.makeText(this, tr("Сначала добавьте SSH-сервер во вкладке SSH", "Add an SSH server in the SSH tab first"), Toast.LENGTH_SHORT).show()
+                                    } else if (saved.size == 1 && activeSftpServer == null) {
+                                        val srv = saved[0]
+                                        activeSftpServer = srv
+                                        remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                                        termDrawerExpanded = false
+                                        rebuildUniversalTermPill(true)
+                                        activeSftpBreadcrumbsCallback?.invoke(true)
+                                        activeSftpRefreshCallback?.invoke(false, null)
+                                    } else {
+                                        val curIdx = saved.indexOfFirst { it.id == activeSftpServer?.id }.coerceAtLeast(0)
+                                        showBakaSuChooseDialog(
+                                            title = tr("Выберите SSH-сервер", "Select SSH Server"),
+                                            items = saved.map { it.label },
+                                            descriptions = saved.map { "${it.username}@${it.host}:${it.port}" },
+                                            selectedIndex = curIdx
+                                        ) { chosen ->
+                                            val srv = saved[chosen]
+                                            activeSftpServer = srv
+                                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
                                             termDrawerExpanded = false
                                             rebuildUniversalTermPill(true)
                                             activeSftpBreadcrumbsCallback?.invoke(true)
                                             activeSftpRefreshCallback?.invoke(false, null)
-                                        }
-                                        1 -> {
-                                            val switchToSd = {
-                                                activeSftpServer = null
-                                                localCurrentDir = sdDirGlobal
-                                                termDrawerExpanded = false
-                                                rebuildUniversalTermPill(true)
-                                                activeSftpBreadcrumbsCallback?.invoke(true)
-                                                activeSftpRefreshCallback?.invoke(false, null)
-                                            }
-                                            if (!hasAllFilesAccessPermission() && !hasStandardStoragePermission()) {
-                                                showStoragePermissionsModal { switchToSd() }
-                                            } else {
-                                                switchToSd()
-                                            }
-                                        }
-                                        2 -> {
-                                            activeSftpServer = null
-                                            localCurrentDir = fsRootDir
-                                            termDrawerExpanded = false
-                                            rebuildUniversalTermPill(true)
-                                            activeSftpBreadcrumbsCallback?.invoke(true)
-                                            activeSftpRefreshCallback?.invoke(false, null)
-                                        }
-                                        3 -> {
-                                            val saved = loadSshServers()
-                                            if (saved.isEmpty()) {
-                                                Toast.makeText(this, tr("Сначала добавьте SSH-сервер во вкладке SSH", "Add an SSH server in the SSH tab first"), Toast.LENGTH_SHORT).show()
-                                            } else if (saved.size == 1 && activeSftpServer == null) {
-                                                val srv = saved[0]
-                                                activeSftpServer = srv
-                                                remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
-                                                termDrawerExpanded = false
-                                                rebuildUniversalTermPill(true)
-                                                activeSftpBreadcrumbsCallback?.invoke(true)
-                                                activeSftpRefreshCallback?.invoke(false, null)
-                                            } else {
-                                                val curIdx = saved.indexOfFirst { it.id == activeSftpServer?.id }.coerceAtLeast(0)
-                                                showBakaSuChooseDialog(
-                                                    title = tr("Выберите SSH-сервер", "Select SSH Server"),
-                                                    items = saved.map { it.label },
-                                                    descriptions = saved.map { "${it.username}@${it.host}:${it.port}" },
-                                                    selectedIndex = curIdx
-                                                ) { chosen ->
-                                                    val srv = saved[chosen]
-                                                    activeSftpServer = srv
-                                                    remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
-                                                    termDrawerExpanded = false
-                                                    rebuildUniversalTermPill(true)
-                                                    activeSftpBreadcrumbsCallback?.invoke(true)
-                                                    activeSftpRefreshCallback?.invoke(false, null)
-                                                }
-                                            }
                                         }
                                     }
                                 }
-                            )
+                            }
                         }
-                    }
-                    0 -> {
-                        // SSH quick actions: [ + Сервер | SSH-ключи ]
-                        termOuterFrame.addView(
-                            makeSegmentPill(
-                                icon = M3Icon.ADD,
-                                label = tr("Сервер", "Server"),
-                                leftR = pillInnerR,
-                                rightR = pillInnerR,
-                                fillCol = uiSurfaceHigh,
-                                tintCol = COLOR_TEXT_BRIGHT,
-                                weightVal = 1.2f
-                            ) {
-                                termDrawerExpanded = false
-                                rebuildUniversalTermPill(false)
-                                openSshServerSubPageRef(null) { renderActiveTab() }
-                            }
-                        )
-                        termOuterFrame.addView(
-                            makeSegmentPill(
-                                icon = M3Icon.KEY,
-                                label = tr("SSH-ключи", "SSH Keys"),
-                                leftR = pillInnerR,
-                                rightR = pillInnerR,
-                                fillCol = uiSurfaceHigh,
-                                tintCol = COLOR_TEXT_BRIGHT,
-                                weightVal = 1.3f
-                            ) {
-                                termDrawerExpanded = false
-                                rebuildUniversalTermPill(false)
-                                openSshKeyVaultSubPage { renderActiveTab() }
-                            }
-                        )
-                    }
-                    else -> {
-                        // Пакеты quick actions: [ Обновить (pkg upgrade) | Очистить кэш ]
-                        termOuterFrame.addView(
-                            makeSegmentPill(
-                                icon = M3Icon.REFRESH,
-                                label = "pkg upgrade",
-                                leftR = pillInnerR,
-                                rightR = pillInnerR,
-                                fillCol = uiSurfaceHigh,
-                                tintCol = COLOR_TEXT_BRIGHT,
-                                weightVal = 1.3f
-                            ) {
-                                dlg.dismiss()
-                                nativeSendText("pkg upgrade -y\n", false)
-                            }
-                        )
-                        termOuterFrame.addView(
-                            makeSegmentPill(
-                                icon = M3Icon.TRASH,
-                                label = "apt clean",
-                                leftR = pillInnerR,
-                                rightR = pillInnerR,
-                                fillCol = uiSurfaceHigh,
-                                tintCol = COLOR_TEXT_BRIGHT,
-                                weightVal = 1.2f
-                            ) {
-                                dlg.dismiss()
-                                nativeSendText("apt clean\n", false)
-                            }
-                        )
-                    }
+                    )
                 }
 
                 // Collapse drawer button
@@ -6702,7 +6940,9 @@ class TermuxActivity : Activity() {
                     }
                 )
             } else {
-                // Collapsed Default State: [ >_ Терминал ] (or with connected source/paste pill in Файлы!)
+                // Collapsed Default State:
+                // In SSH (activeTab == 0) and Пакеты (activeTab == 2), "Терминал" is a clean single pill with NO swipe/hold drawer!
+                // In Файлы (activeTab == 1), it shows the connected source/paste indicator and supports swipe/hold to switch sources!
                 val hasPasteClipboard = (activeTab == 1 && activeSftpServer == null && (fileClipSource != null || batchClipSources.isNotEmpty()))
                 val showSourceAccessory = (activeTab == 1)
 
@@ -6737,37 +6977,39 @@ class TermuxActivity : Activity() {
                     addView(termBackIcon)
                     addView(termBackLabel)
                     attachSmoothPressAnimation(this, 0.94f)
-                    setOnTouchListener { _, ev ->
-                        when (ev.actionMasked) {
-                            MotionEvent.ACTION_DOWN -> {
-                                swipeStartX = ev.rawX
-                                swipeTriggered = false
-                                false
-                            }
-                            MotionEvent.ACTION_MOVE -> {
-                                if (!swipeTriggered && (ev.rawX - swipeStartX) > dpF(26f)) {
-                                    swipeTriggered = true
-                                    triggerHaptic(1.0f)
-                                    termDrawerExpanded = true
-                                    rebuildUniversalTermPill(true)
-                                    true
-                                } else {
+                    if (activeTab == 1) {
+                        setOnTouchListener { _, ev ->
+                            when (ev.actionMasked) {
+                                MotionEvent.ACTION_DOWN -> {
+                                    swipeStartX = ev.rawX
+                                    swipeTriggered = false
                                     false
                                 }
+                                MotionEvent.ACTION_MOVE -> {
+                                    if (!swipeTriggered && (ev.rawX - swipeStartX) > dpF(26f)) {
+                                        swipeTriggered = true
+                                        triggerHaptic(1.0f)
+                                        termDrawerExpanded = true
+                                        rebuildUniversalTermPill(true)
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                else -> swipeTriggered
                             }
-                            else -> swipeTriggered
+                        }
+                        setOnLongClickListener {
+                            triggerHaptic(1.15f)
+                            termDrawerExpanded = true
+                            rebuildUniversalTermPill(true)
+                            true
                         }
                     }
                     setOnClickListener {
                         if (!swipeTriggered) {
                             exitToTerminalAnimated()
                         }
-                    }
-                    setOnLongClickListener {
-                        triggerHaptic(1.15f)
-                        termDrawerExpanded = true
-                        rebuildUniversalTermPill(true)
-                        true
                     }
                 }
                 termOuterFrame.addView(termBackChip)
@@ -6895,7 +7137,7 @@ class TermuxActivity : Activity() {
                     interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
                     addUpdateListener { va ->
                         val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                        if (!termDrawerExpanded && selectedSftpPaths.isEmpty()) {
+                        if (!termDrawerExpanded && selectedSftpPaths.isEmpty() && selectedPackageNames.isEmpty()) {
                             val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
                             lp.width = (fromW + (toW - fromW) * t).roundToInt().coerceAtLeast(dp(56))
                             termOuterFrame.layoutParams = lp
@@ -6903,7 +7145,7 @@ class TermuxActivity : Activity() {
                     }
                     addListener(object : android.animation.AnimatorListenerAdapter() {
                         override fun onAnimationEnd(animation: android.animation.Animator) {
-                            if (!termDrawerExpanded && selectedSftpPaths.isEmpty()) {
+                            if (!termDrawerExpanded && selectedSftpPaths.isEmpty() && selectedPackageNames.isEmpty()) {
                                 val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
                                 lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
                                 termOuterFrame.layoutParams = lp
@@ -6986,6 +7228,22 @@ class TermuxActivity : Activity() {
                             applyRoundedCornersProgress(subPageLayer, 0f)
                         }
                         .start()
+                } else if (activeTab == 1 && selectedSftpPaths.isNotEmpty()) {
+                    trashConfirmExpanded = false
+                    selectedSftpPaths.clear()
+                    cancelPredictiveBackPreview(root, null)
+                    rebuildUniversalTermPill(true)
+                    activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                } else if (activeTab == 2 && selectedPackageNames.isNotEmpty()) {
+                    trashConfirmExpanded = false
+                    selectedPackageNames.clear()
+                    cancelPredictiveBackPreview(root, null)
+                    rebuildUniversalTermPill(true)
+                    activePackagesPopulateCallback?.invoke()
+                } else if (termDrawerExpanded) {
+                    termDrawerExpanded = false
+                    cancelPredictiveBackPreview(root, null)
+                    rebuildUniversalTermPill(true)
                 } else if (activeTab == 1 && sftpSearchActive) {
                     sftpSearchActive = false
                     sftpSearchQuery = ""
@@ -7841,6 +8099,23 @@ class TermuxActivity : Activity() {
                                 actionsRow.addView(makeExpressiveChip(tr("Копировать .pub", "Copy .pub"), true) {
                                     copyToClipboard(pubTxt, true)
                                 })
+                                val savedSrvs = loadSshServers()
+                                if (savedSrvs.isNotEmpty()) {
+                                    actionsRow.addView(makeExpressiveChip(tr("На сервер…", "Deploy…"), false) {
+                                        showBakaSuChooseDialog(
+                                            title = tr("Установить ключ на сервер", "Install key on server"),
+                                            items = savedSrvs.map { it.label },
+                                            descriptions = savedSrvs.map { "${it.username}@${it.host}:${it.port}" },
+                                            selectedIndex = 0
+                                        ) { chosenSrvIdx ->
+                                            val srv = savedSrvs[chosenSrvIdx]
+                                            dlg.dismiss()
+                                            createSession(false, runStartupCmd = false)
+                                            val copyCmd = "ssh-copy-id -i ${shellEscapeSingle(pubFile.absolutePath)} -p ${srv.port} ${srv.username}@${srv.host}\n"
+                                            terminalSurface.postDelayed({ nativeSendText(copyCmd, false) }, 120L)
+                                        }
+                                    })
+                                }
                             }
                             actionsRow.addView(makeExpressiveChip(tr("Путь", "Copy path"), false) {
                                 copyToClipboard(privFile.absolutePath, true)
@@ -8051,163 +8326,190 @@ class TermuxActivity : Activity() {
 
                 // Section 2: Main Connection Parameters
                 form.addView(makeSectionLabel(tr("Подключение и авторизация", "Connection & authentication")))
-                val (labelCard, labelEt) = makeM3InputCard(M3Icon.SERVER, tr("Название профиля", "Profile name"), existing?.label ?: "", tr("Мой сервер", "My Server"), 0, 7)
-                val (hostCard, hostEt) = makeM3InputCard(M3Icon.PING, tr("Адрес сервера (IP или домен)", "Host (IP or domain)"), existing?.host ?: "", "192.168.1.10", 1, 7)
-                val (userCard, userEt) = makeM3InputCard(M3Icon.TERMINAL, tr("Пользователь", "Username"), existing?.username ?: "root", "root", 2, 7)
-                val (portCard, portEt) = makeM3InputCard(M3Icon.SLIDERS, tr("Порт SSH (-p добавляется только если != 22)", "SSH Port (-p added only if != 22)"), (existing?.port ?: 22).toString(), "22", 3, 7, isNumeric = true)
+                val (labelCard, labelEt) = makeM3InputCard(M3Icon.SERVER, tr("Название", "Name"), existing?.label ?: "", tr("Мой сервер", "My Server"), 0, 6)
+                val (hostCard, hostEt) = makeM3InputCard(M3Icon.PING, tr("Хост (IP или домен)", "Host (IP or domain)"), existing?.host ?: "", "192.168.1.10", 1, 6)
+                val (userCard, userEt) = makeM3InputCard(M3Icon.TERMINAL, tr("Пользователь", "Username"), existing?.username ?: "root", "root", 2, 6)
+                val (portCard, portEt) = makeM3InputCard(M3Icon.SLIDERS, tr("Порт", "Port"), (existing?.port ?: 22).toString(), "22", 3, 6, isNumeric = true)
 
                 var selectedAuth = existing?.authType ?: 0
                 val vaultKeysInitial = listSshVaultPrivateKeys()
                 val defaultKeyPath = vaultKeysInitial.firstOrNull()?.absolutePath ?: File(sshVaultDir, "id_ed25519").absolutePath
                 val authOptions = listOf(
-                    tr("Пароль или без флагов (по умолчанию)", "Password or default (no extra flags)"),
-                    tr("Приватный SSH-ключ (-i)", "Private SSH key (-i)"),
-                    tr("Проброс SSH-агента (-A)", "SSH Agent forwarding (-A)")
+                    tr("Пароль", "Password"),
+                    tr("SSH-ключ", "SSH key"),
+                    tr("SSH-агент (-A)", "SSH agent (-A)")
                 )
                 val authCardHolder = FrameLayout(this)
                 val vaultKeySelectorHolder = FrameLayout(this)
                 val (secretCard, secretEt) = makeM3InputCard(
                     M3Icon.KEY,
-                    if (selectedAuth == 1) tr("Путь к приватному ключу (-i)", "Private key path (-i)") else tr("Пароль (для авто-ввода)", "Password (for auto-login)"),
+                    tr("Пароль", "Password"),
                     existing?.secretOrKeyPath ?: "",
-                    if (selectedAuth == 1) defaultKeyPath else tr("Необязательно", "Optional"),
-                    6,
-                    7
+                    tr("Необязательно (для авто-входа)", "Optional (for auto-login)"),
+                    5,
+                    6
                 )
 
                 lateinit var rebuildAuthCard: () -> Unit
                 rebuildAuthCard = {
+                    val totalAuthCards = if (selectedAuth == 2) 5 else 6
                     authCardHolder.removeAllViews()
                     authCardHolder.addView(
                         makeBakaSuChooseCard(
                             icon = M3Icon.KEY,
-                            title = tr("Способ авторизации", "Authentication method"),
+                            title = tr("Способ авторизации", "Authentication"),
                             subtitle = null,
                             items = authOptions,
                             selectedIndex = selectedAuth,
                             index = 4,
-                            total = 7
+                            total = totalAuthCards
                         ) { chosen ->
+                            val prevAuth = selectedAuth
                             selectedAuth = chosen
-                            if (chosen == 1 && secretEt.text.isNullOrBlank()) {
+                            if (chosen == 1 && (prevAuth != 1 || secretEt.text.isNullOrBlank())) {
                                 val latestVault = listSshVaultPrivateKeys()
                                 secretEt.setText(latestVault.firstOrNull()?.absolutePath ?: defaultKeyPath)
+                            } else if (chosen == 0 && prevAuth == 1 && secretEt.text.toString().startsWith("/")) {
+                                secretEt.setText("")
                             }
                             rebuildAuthCard()
                             updateLivePreview()
                         }
                     )
 
-                    // Item 6: Offer selecting a key from the SSH Key Vault when creating/editing an SSH server!
+                    // When SSH Key is selected (selectedAuth == 1), hide the password input field (`secretCard`)
+                    // and show only the SSH Key Vault selector card!
+                    // When Password is selected (selectedAuth == 0), show `secretCard` and hide `vaultKeySelectorHolder`!
                     vaultKeySelectorHolder.removeAllViews()
-                    val vaultKeys = listSshVaultPrivateKeys()
-                    val curPath = secretEt.text.toString().trim()
-                    val matchedKey = vaultKeys.firstOrNull { it.absolutePath == curPath }
-                    val vaultCard = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                        setPadding(dp(16), dp(12), dp(16), dp(12))
-                        background = segmentedCardBg(5, 7, uiSurfaceLow, 0, 20f, 5f)
-                        layoutParams = LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ).apply {
-                            bottomMargin = dp(2)
+                    when (selectedAuth) {
+                        0 -> {
+                            vaultKeySelectorHolder.visibility = View.GONE
+                            secretCard.visibility = View.VISIBLE
+                            secretCard.background = segmentedCardBg(5, 6, uiSurfaceLow, 0, 20f, 5f)
                         }
-                        attachSmoothPressAnimation(this, 0.98f)
-                        setOnClickListener {
-                            triggerHaptic(0.85f)
-                            val latestKeys = listSshVaultPrivateKeys()
-                            if (latestKeys.isEmpty()) {
-                                // Offer one-tap generation of id_ed25519 or opening the full vault
-                                showBakaSuChooseDialog(
-                                    title = tr("Хранилище ключей SSH", "SSH Key Vault"),
-                                    items = listOf(
-                                        tr("Создать ключ Ed25519 (id_ed25519) автоматически", "Auto-generate Ed25519 key (id_ed25519)"),
-                                        tr("Открыть хранилище ключей SSH…", "Open SSH Key Vault…")
-                                    ),
-                                    descriptions = listOf(
-                                        File(sshVaultDir, "id_ed25519").absolutePath,
-                                        tr("Импортировать или создать ключ вручную", "Import or generate key manually")
-                                    ),
-                                    selectedIndex = 0
-                                ) { actIdx ->
-                                    if (actIdx == 0) {
-                                        generateSshKeyPairInVault("id_ed25519", "ed25519", "termux@android") { ok, pathOrErr, _ ->
-                                            if (ok) {
-                                                selectedAuth = 1
-                                                secretEt.setText(pathOrErr)
-                                                rebuildAuthCard()
-                                                updateLivePreview()
-                                                Toast.makeText(this@TermuxActivity, tr("Ключ id_ed25519 создан и выбран", "Key id_ed25519 generated & selected"), Toast.LENGTH_SHORT).show()
+                        1 -> {
+                            secretCard.visibility = View.GONE
+                            vaultKeySelectorHolder.visibility = View.VISIBLE
+                            val vaultKeys = listSshVaultPrivateKeys()
+                            val curPath = secretEt.text.toString().trim()
+                            val matchedKey = vaultKeys.firstOrNull { it.absolutePath == curPath }
+                            val vaultCard = LinearLayout(this).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER_VERTICAL
+                                setPadding(dp(16), dp(12), dp(16), dp(12))
+                                background = segmentedCardBg(5, 6, uiSurfaceLow, 0, 20f, 5f)
+                                layoutParams = LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT
+                                ).apply {
+                                    bottomMargin = dp(8)
+                                }
+                                attachSmoothPressAnimation(this, 0.98f)
+                                setOnClickListener {
+                                    triggerHaptic(0.85f)
+                                    val latestKeys = listSshVaultPrivateKeys()
+                                    if (latestKeys.isEmpty()) {
+                                        showBakaSuChooseDialog(
+                                            title = tr("Хранилище ключей SSH", "SSH Key Vault"),
+                                            items = listOf(
+                                                tr("Создать ключ Ed25519 автоматически", "Auto-generate Ed25519 key"),
+                                                tr("Открыть хранилище ключей SSH…", "Open SSH Key Vault…")
+                                            ),
+                                            descriptions = listOf(
+                                                File(sshVaultDir, "id_ed25519").absolutePath,
+                                                tr("Импортировать или создать ключ вручную", "Import or generate key manually")
+                                            ),
+                                            selectedIndex = 0
+                                        ) { actIdx ->
+                                            if (actIdx == 0) {
+                                                generateSshKeyPairInVault("id_ed25519", "ed25519", "termux@android") { ok, pathOrErr, _ ->
+                                                    if (ok) {
+                                                        selectedAuth = 1
+                                                        secretEt.setText(pathOrErr)
+                                                        rebuildAuthCard()
+                                                        updateLivePreview()
+                                                        Toast.makeText(this@TermuxActivity, tr("Ключ id_ed25519 создан и выбран", "Key id_ed25519 generated & selected"), Toast.LENGTH_SHORT).show()
+                                                    } else {
+                                                        Toast.makeText(this@TermuxActivity, "Error: $pathOrErr", Toast.LENGTH_LONG).show()
+                                                    }
+                                                }
                                             } else {
-                                                Toast.makeText(this@TermuxActivity, "Error: $pathOrErr", Toast.LENGTH_LONG).show()
+                                                openSshKeyVaultSubPage {
+                                                    openSshServerSubPage(existing, onSaved)
+                                                }
                                             }
                                         }
                                     } else {
-                                        openSshKeyVaultSubPage {
-                                            openSshServerSubPage(existing, onSaved)
-                                        }
-                                    }
-                                }
-                            } else {
-                                val titles = latestKeys.map { "${it.name} (${detectSshKeyAlgorithmBadge(it)})" } +
-                                    listOf(tr("Открыть хранилище ключей SSH…", "Open SSH Key Vault…"))
-                                val descs = latestKeys.map { it.absolutePath } +
-                                    listOf(tr("Создать новый или импортировать ключ", "Create new or import key"))
-                                val selIdx = latestKeys.indexOfFirst { it.absolutePath == secretEt.text.toString().trim() }.coerceAtLeast(0)
-                                showBakaSuChooseDialog(
-                                    title = tr("Выбрать ключ из хранилища SSH", "Choose key from SSH Vault"),
-                                    items = titles,
-                                    descriptions = descs,
-                                    selectedIndex = selIdx
-                                ) { chosenIdx ->
-                                    if (chosenIdx in latestKeys.indices) {
-                                        val chosenKey = latestKeys[chosenIdx]
-                                        selectedAuth = 1
-                                        secretEt.setText(chosenKey.absolutePath)
-                                        rebuildAuthCard()
-                                        updateLivePreview()
-                                    } else {
-                                        openSshKeyVaultSubPage {
-                                            openSshServerSubPage(existing, onSaved)
+                                        val titles = latestKeys.map { "${it.name} (${detectSshKeyAlgorithmBadge(it)})" } +
+                                            listOf(tr("Открыть хранилище ключей SSH…", "Open SSH Key Vault…"))
+                                        val descs = latestKeys.map { it.absolutePath } +
+                                            listOf(tr("Создать новый или импортировать ключ", "Create new or import key"))
+                                        val selIdx = latestKeys.indexOfFirst { it.absolutePath == secretEt.text.toString().trim() }.coerceAtLeast(0)
+                                        showBakaSuChooseDialog(
+                                            title = tr("Выберите SSH-ключ", "Select SSH key"),
+                                            items = titles,
+                                            descriptions = descs,
+                                            selectedIndex = selIdx
+                                        ) { chosenIdx ->
+                                            if (chosenIdx in latestKeys.indices) {
+                                                val chosenKey = latestKeys[chosenIdx]
+                                                selectedAuth = 1
+                                                secretEt.setText(chosenKey.absolutePath)
+                                                rebuildAuthCard()
+                                                updateLivePreview()
+                                            } else {
+                                                openSshKeyVaultSubPage {
+                                                    openSshServerSubPage(existing, onSaved)
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                    }
-                    vaultCard.addView(
-                        FrameLayout(this).apply {
-                            background = tonalBg(uiAccentContainer, dp(12))
-                            layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
-                                marginEnd = dp(14)
+                            vaultCard.addView(
+                                FrameLayout(this).apply {
+                                    background = tonalBg(uiAccentContainer, dp(12))
+                                    layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
+                                        marginEnd = dp(14)
+                                    }
+                                    addView(MaterialIconView(this@TermuxActivity, M3Icon.KEY, uiAccent, 20f, 2.0f))
+                                }
+                            )
+                            val vCol = LinearLayout(this).apply {
+                                orientation = LinearLayout.VERTICAL
+                                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                             }
-                            addView(MaterialIconView(this@TermuxActivity, M3Icon.KEY, uiAccent, 20f, 2.0f))
+                            vCol.addView(TextView(this).apply {
+                                text = tr("SSH-ключ", "SSH key")
+                                setTextColor(COLOR_TEXT_DIM)
+                                typeface = Typeface.DEFAULT_BOLD
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                            })
+                            vCol.addView(TextView(this).apply {
+                                text = when {
+                                    matchedKey != null -> "${matchedKey.name} (${detectSshKeyAlgorithmBadge(matchedKey)})"
+                                    curPath.isNotEmpty() -> curPath.substringAfterLast('/')
+                                    vaultKeys.isNotEmpty() -> tr("Выбрать из хранилища (${vaultKeys.size})", "Choose from vault (${vaultKeys.size})")
+                                    else -> tr("Создать или импортировать ключ…", "Generate or import key…")
+                                }
+                                setTextColor(COLOR_TEXT_BRIGHT)
+                                typeface = Typeface.MONOSPACE
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                                setPadding(0, dp(3), 0, 0)
+                            })
+                            vaultCard.addView(vCol)
+                            vaultCard.addView(
+                                MaterialIconView(this, M3Icon.CHEVRON_RIGHT, uiAccent, 18f, 2.0f).apply {
+                                    layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
+                                }
+                            )
+                            vaultKeySelectorHolder.addView(vaultCard)
                         }
-                    )
-                    val vCol = LinearLayout(this).apply {
-                        orientation = LinearLayout.VERTICAL
-                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                        else -> {
+                            vaultKeySelectorHolder.visibility = View.GONE
+                            secretCard.visibility = View.GONE
+                        }
                     }
-                    vCol.addView(TextView(this).apply {
-                        text = tr("Ключ из хранилища SSH", "SSH Vault Key")
-                        setTextColor(COLOR_TEXT_BRIGHT)
-                        typeface = Typeface.DEFAULT_BOLD
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-                    })
-                    vCol.addView(TextView(this).apply {
-                        text = when {
-                            matchedKey != null -> "${matchedKey.name} (${detectSshKeyAlgorithmBadge(matchedKey)})"
-                            vaultKeys.isNotEmpty() -> tr("Доступно ключей в хранилище: ${vaultKeys.size} (нажмите для выбора)", "${vaultKeys.size} keys in vault (tap to choose)")
-                            else -> tr("Хранилище пусто — нажмите, чтобы создать или импортировать ключ", "Vault empty — tap to generate or import a key")
-                        }
-                        setTextColor(uiAccent)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                        setPadding(0, dp(2), 0, 0)
-                    })
-                    vaultCard.addView(vCol)
-                    vaultKeySelectorHolder.addView(vaultCard)
                 }
                 rebuildAuthCard()
 
@@ -8281,8 +8583,8 @@ class TermuxActivity : Activity() {
                 form.addView(dynamicPortCard)
                 form.addView(jumpHostCard)
 
-                // Section 4: Optional OpenSSH Flags (ALL OFF BY DEFAULT so base command is strictly `ssh root@ip`!)
-                form.addView(makeSectionLabel(tr("Опции протокола SSH (по умолчанию выключены)", "SSH protocol options (off by default)")))
+                // Section 4: Optional OpenSSH Flags
+                form.addView(makeSectionLabel(tr("Параметры соединения", "Connection options")))
 
                 var keepAliveSec = existing?.keepAliveSec ?: 0
                 var useComp = existing?.useCompression ?: false
@@ -8292,11 +8594,11 @@ class TermuxActivity : Activity() {
 
                 val keepAliveValues = intArrayOf(0, 15, 30, 60, 120)
                 val keepAliveLabels = listOf(
-                    tr("Выключено (не добавлять в команду)", "Off (do not add to command)"),
-                    "15 сек (ServerAliveInterval=15)",
-                    "30 сек (ServerAliveInterval=30)",
-                    "60 сек (ServerAliveInterval=60)",
-                    "120 сек (ServerAliveInterval=120)"
+                    tr("Выключено", "Off"),
+                    tr("Каждые 15 сек", "Every 15s"),
+                    tr("Каждые 30 сек", "Every 30s"),
+                    tr("Каждые 60 сек", "Every 60s"),
+                    tr("Каждые 120 сек", "Every 120s")
                 )
                 val optionsContainer = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
@@ -8310,7 +8612,7 @@ class TermuxActivity : Activity() {
                     optionsContainer.addView(
                         makeBakaSuChooseCard(
                             icon = M3Icon.REFRESH,
-                            title = tr("Удержание соединения (ServerAliveInterval)", "Keep-alive (ServerAliveInterval)"),
+                            title = tr("Поддержка соединения (Keep-Alive)", "Keep-alive interval"),
                             subtitle = null,
                             items = keepAliveLabels,
                             selectedIndex = kaIdx,
@@ -8326,7 +8628,7 @@ class TermuxActivity : Activity() {
                         makeBakaSuSwitchCard(
                             icon = M3Icon.SLIDERS,
                             title = tr("Сжатие трафика (-C)", "Traffic compression (-C)"),
-                            subtitle = tr("Добавляет флаг -C в команду ssh", "Adds -C flag to ssh command"),
+                            subtitle = tr("Ускоряет передачу текста на медленных сетях", "Speeds up text transfer on slow networks"),
                             checked = useComp,
                             index = 1,
                             total = 5
@@ -8339,7 +8641,7 @@ class TermuxActivity : Activity() {
                         makeBakaSuSwitchCard(
                             icon = M3Icon.KEY,
                             title = tr("Проброс SSH-агента (-A)", "Forward SSH agent (-A)"),
-                            subtitle = tr("Добавляет флаг -A в команду ssh", "Adds -A flag to ssh command"),
+                            subtitle = tr("Использовать локальные ключи на удалённом сервере", "Use local keys on remote server"),
                             checked = fwdAgent,
                             index = 2,
                             total = 5
@@ -8351,8 +8653,8 @@ class TermuxActivity : Activity() {
                     optionsContainer.addView(
                         makeBakaSuSwitchCard(
                             icon = M3Icon.TERMINAL,
-                            title = tr("Только туннель портов без оболочки (-N)", "Port tunnel only without shell (-N)"),
-                            subtitle = tr("Добавляет флаг -N для фонового проброса портов", "Adds -N flag for port forwarding only"),
+                            title = tr("Только туннель портов (-N)", "Port forwarding only (-N)"),
+                            subtitle = tr("Подключение для проброса портов без запуска оболочки", "Forward ports without opening remote shell"),
                             checked = tunnelOnlyN,
                             index = 3,
                             total = 5
@@ -8364,8 +8666,8 @@ class TermuxActivity : Activity() {
                     optionsContainer.addView(
                         makeBakaSuSwitchCard(
                             icon = M3Icon.PING,
-                            title = tr("Только IPv4 (-4)", "Force IPv4 only (-4)"),
-                            subtitle = tr("Добавляет флаг -4 для подключения строго по IPv4", "Adds -4 flag to force IPv4"),
+                            title = tr("Только IPv4 (-4)", "IPv4 only (-4)"),
+                            subtitle = tr("Подключаться строго по протоколу IPv4", "Connect exclusively over IPv4"),
                             checked = ipv4Only,
                             index = 4,
                             total = 5
@@ -8379,8 +8681,8 @@ class TermuxActivity : Activity() {
 
                 // Section 5: Extra Custom Flags & Startup Command
                 form.addView(makeSectionLabel(tr("Дополнительно", "Advanced")))
-                val (customFlagsCard, customFlagsEt) = makeM3InputCard(M3Icon.EDIT, tr("Произвольные аргументы SSH", "Custom SSH flags"), existing?.customFlags ?: "", tr("Напр. -X или -o StrictHostKeyChecking=no", "e.g. -X or -o StrictHostKeyChecking=no"), 0, 2)
-                val (startupCard, startupEt) = makeM3InputCard(M3Icon.TERMINAL, tr("Команда после входа на сервер", "Remote startup command"), existing?.startupCommand ?: "", "tmux attach || tmux", 1, 2)
+                val (customFlagsCard, customFlagsEt) = makeM3InputCard(M3Icon.EDIT, tr("Дополнительные флаги SSH", "Extra SSH flags"), existing?.customFlags ?: "", tr("Напр. -X или -o StrictHostKeyChecking=no", "e.g. -X or -o StrictHostKeyChecking=no"), 0, 2)
+                val (startupCard, startupEt) = makeM3InputCard(M3Icon.TERMINAL, tr("Автозапуск команды при входе", "Startup command"), existing?.startupCommand ?: "", "tmux attach || tmux", 1, 2)
                 form.addView(customFlagsCard)
                 form.addView(startupCard)
 
@@ -8739,30 +9041,24 @@ class TermuxActivity : Activity() {
                                     setPadding(dp(4), 0, dp(4), dp(10))
                                 })
                                 val actions = listOf(
-                                    Triple(M3Icon.TERMINAL, tr("Подключиться в терминале", "Connect in terminal")) {
+                                    Triple(M3Icon.TERMINAL, tr("Подключиться", "Connect")) {
                                         connectToSshServerInTerminal(srv, dlg)
                                     },
-                                    Triple(M3Icon.FOLDER, tr("Открыть проводник SFTP", "Open SFTP explorer")) {
+                                    Triple(M3Icon.FOLDER, tr("Открыть SFTP", "Open SFTP")) {
                                         activeSftpServer = srv
                                         remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
                                         previousTab = activeTab
                                         activeTab = 1
                                         renderActiveTab()
                                     },
-                                    Triple(M3Icon.EDIT, tr("Настроить сервер и порты", "Configure server & ports")) {
+                                    Triple(M3Icon.EDIT, tr("Изменить", "Edit")) {
                                         openSshServerSubPage(srv) { renderServersTab() }
                                     },
-                                    Triple(M3Icon.PING, tr("Пинговать сервер", "Ping server")) {
+                                    Triple(M3Icon.PING, tr("Пингануть сервер", "Ping server")) {
                                         pingServerAsync(srv, pingTv)
                                     },
-                                    Triple(M3Icon.COPY, tr("Скопировать команду SSH", "Copy SSH command")) {
+                                    Triple(M3Icon.COPY, tr("Скопировать команду", "Copy command")) {
                                         copyToClipboard(buildSshCommandViaCpp23(srv, withAskPass = false), true)
-                                    },
-                                    Triple(M3Icon.KEY, tr("Установить мой ключ (ssh-copy-id)", "Install my SSH key (ssh-copy-id)")) {
-                                        dlg.dismiss()
-                                        createSession(false, runStartupCmd = false)
-                                        val copyCmd = "mkdir -p ~/.ssh && ([ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -t ed25519 -N \"\" -f ~/.ssh/id_ed25519) && ssh-copy-id -p ${srv.port} ${srv.username}@${srv.host}\n"
-                                        terminalSurface.postDelayed({ nativeSendText(copyCmd, false) }, 120L)
                                     },
                                     Triple(M3Icon.TRASH, tr("Удалить сервер", "Delete server")) {
                                         val updated = loadSshServers().filter { it.id != srv.id }
@@ -8942,7 +9238,7 @@ class TermuxActivity : Activity() {
                         }
                     )
                     sftpPill.addView(TextView(this).apply {
-                        text = tr("Файлы", "Files")
+                        text = "SFTP"
                         setSingleLine(true)
                         setTextColor(uiOnAccentContainer)
                         typeface = Typeface.DEFAULT_BOLD
@@ -9580,6 +9876,301 @@ class TermuxActivity : Activity() {
             }
             mainSftpCol.addView(ptrSftp)
 
+            fun openItemPropertiesDialog(item: SftpItemEntry) {
+                val srv = activeSftpServer
+                val (pDlg, pSheet) = createExpressiveDialog(420)
+
+                val hdrRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(2), 0, dp(2), dp(12))
+                }
+                val hdrBadge = FrameLayout(this).apply {
+                    background = tonalBg(if (item.isDirectory) uiAccentContainer else uiSurfaceLow, dp(14))
+                    layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+                        marginEnd = dp(12)
+                    }
+                    addView(
+                        MaterialIconView(
+                            this@TermuxActivity,
+                            if (item.isDirectory) M3Icon.FOLDER else M3Icon.FILE,
+                            if (item.isDirectory) uiAccent else COLOR_TEXT_BRIGHT,
+                            22f,
+                            2.05f
+                        )
+                    )
+                }
+                hdrRow.addView(hdrBadge)
+                val hdrCol = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                hdrCol.addView(TextView(this).apply {
+                    text = item.name
+                    setSingleLine(true)
+                    setTextColor(COLOR_TEXT_BRIGHT)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
+                })
+                hdrCol.addView(TextView(this).apply {
+                    text = if (item.isDirectory) tr("Папка", "Folder") else tr("Файл", "File")
+                    setTextColor(uiAccent)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                })
+                hdrRow.addView(hdrCol)
+                pSheet.addView(hdrRow)
+
+                val infoCard = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = tonalBg(uiSurfaceLow, dp(18))
+                    setPadding(dp(14), dp(12), dp(14), dp(12))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        bottomMargin = dp(10)
+                    }
+                }
+                fun addInfoRow(label: String, value: String) {
+                    val r = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(0, dp(3), 0, dp(5))
+                    }
+                    r.addView(TextView(this).apply {
+                        text = label
+                        setTextColor(COLOR_TEXT_DIM)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                    })
+                    r.addView(TextView(this).apply {
+                        text = value
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f)
+                        setTextIsSelectable(true)
+                    })
+                    infoCard.addView(r)
+                }
+                addInfoRow(tr("Полный путь", "Full path"), item.path)
+                if (!item.isDirectory) {
+                    addInfoRow(tr("Размер", "Size"), "${formatSize(item.sizeBytes)} (${item.sizeBytes} B)")
+                }
+                val modStr = formatTimestamp(item.modifiedEpochMs)
+                if (modStr.isNotEmpty()) {
+                    addInfoRow(tr("Изменён", "Modified"), modStr)
+                }
+                if (item.permissions.isNotEmpty()) {
+                    addInfoRow(tr("Текущие права", "Current permissions"), item.permissions)
+                }
+                pSheet.addView(infoCard)
+
+                // Interactive chmod bar inside Properties!
+                pSheet.addView(TextView(this).apply {
+                    text = tr("Права доступа (chmod)", "Permissions (chmod)")
+                    setTextColor(uiAccent)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    setPadding(dp(4), 0, dp(4), dp(6))
+                })
+
+                val chmodRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = tonalBg(uiSurfaceLow, dp(16))
+                    setPadding(dp(4), dp(4), dp(4), dp(4))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        bottomMargin = dp(12)
+                    }
+                }
+                val chmodModes = listOf("755", "644", "700", "600", "777")
+                for ((cIdx, octal) in chmodModes.withIndex()) {
+                    val chip = TextView(this).apply {
+                        text = octal
+                        gravity = Gravity.CENTER
+                        setSingleLine(true)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        background = makeConnectedSegmentDrawable(
+                            uiSurfaceHigh,
+                            if (cIdx == 0) dpF(12f) else dpF(4f),
+                            if (cIdx == chmodModes.lastIndex) dpF(12f) else dpF(4f)
+                        )
+                        setPadding(dp(8), dp(8), dp(8), dp(8))
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                            if (cIdx < chmodModes.lastIndex) marginEnd = dp(2)
+                        }
+                        attachSmoothPressAnimation(this, 0.94f)
+                        setOnClickListener {
+                            triggerHaptic(0.85f)
+                            if (srv == null) {
+                                Thread {
+                                    try {
+                                        val p = Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", octal, item.path))
+                                        if (p.waitFor() != 0) {
+                                            nativeExecLocalRootCmd("chmod $octal -- ${shellEscapeSingle(item.path)}")
+                                        }
+                                    } catch (_: Throwable) {
+                                        nativeExecLocalRootCmd("chmod $octal -- ${shellEscapeSingle(item.path)}")
+                                    }
+                                    runOnUiThread {
+                                        Toast.makeText(this@TermuxActivity, "chmod $octal: ${item.name}", Toast.LENGTH_SHORT).show()
+                                        refreshSftpListInPlace(false, null)
+                                    }
+                                }.start()
+                            } else {
+                                Thread {
+                                    runRemoteSftpViaCpp23(srv, "chmod $octal -- ${shellEscapeSingle(item.path)}")
+                                    runOnUiThread {
+                                        Toast.makeText(this@TermuxActivity, "chmod $octal: ${item.name}", Toast.LENGTH_SHORT).show()
+                                        refreshSftpListInPlace(true, null)
+                                    }
+                                }.start()
+                            }
+                            pDlg.dismiss()
+                        }
+                    }
+                    chmodRow.addView(chip)
+                }
+                pSheet.addView(chmodRow)
+
+                val quickToolsCol = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        bottomMargin = dp(10)
+                    }
+                }
+                val propActions = ArrayList<Triple<M3Icon, String, () -> Unit>>()
+                propActions.add(Triple(M3Icon.COPY, tr("Скопировать путь", "Copy path")) {
+                    pDlg.dismiss()
+                    copyToClipboard(item.path, true)
+                })
+                propActions.add(Triple(M3Icon.TERMINAL, tr("Открыть папку в терминале", "Open folder in terminal")) {
+                    pDlg.dismiss()
+                    val targetDir = if (item.isDirectory) item.path else item.path.substringBeforeLast('/').ifEmpty { "/" }
+                    if (srv == null) {
+                        dlg.dismiss()
+                        nativeSendText("cd ${shellEscapeSingle(targetDir)}\n", false)
+                    } else {
+                        val cdCmd = "cd ${shellEscapeSingle(targetDir)}"
+                        val srvWithCd = if (srv.startupCommand.isBlank()) {
+                            srv.copy(startupCommand = "$cdCmd && exec \${'$'}SHELL -l")
+                        } else {
+                            srv.copy(startupCommand = "$cdCmd && ${srv.startupCommand}")
+                        }
+                        connectToSshServerInTerminal(srvWithCd, dlg)
+                    }
+                })
+                if (!item.isDirectory) {
+                    propActions.add(Triple(M3Icon.DOWNLOAD, tr("Сохранить в Загрузки (/sdcard/Download)", "Save to /sdcard/Download")) {
+                        pDlg.dismiss()
+                        val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                        if (!dlDir.exists()) dlDir.mkdirs()
+                        val dst = File(dlDir, item.name)
+                        if (srv == null) {
+                            try {
+                                val srcFile = File(item.path)
+                                if (srcFile.canRead()) {
+                                    srcFile.copyTo(dst, overwrite = true)
+                                    Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Thread {
+                                        nativeExecLocalRootCmd("cp -f -- ${shellEscapeSingle(item.path)} ${shellEscapeSingle(dst.absolutePath)}")
+                                        runOnUiThread {
+                                            Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_SHORT).show()
+                                        }
+                                    }.start()
+                                }
+                            } catch (e: Throwable) {
+                                Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            Toast.makeText(this@TermuxActivity, tr("Скачивание ${item.name}…", "Downloading ${item.name}…"), Toast.LENGTH_SHORT).show()
+                            Thread {
+                                val (ok, out) = runRemoteSftpViaCpp23(srv, "base64 -- ${shellEscapeSingle(item.path)}")
+                                runOnUiThread {
+                                    if (ok) {
+                                        try {
+                                            val cleanB64 = out.replace("\\s".toRegex(), "")
+                                            val bytes = android.util.Base64.decode(cleanB64, android.util.Base64.DEFAULT)
+                                            dst.writeBytes(bytes)
+                                            Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_LONG).show()
+                                        } catch (e: Throwable) {
+                                            Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        Toast.makeText(this@TermuxActivity, "SSH error: ${out.take(120)}", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }.start()
+                        }
+                    })
+                }
+                for ((pIdx, pa) in propActions.withIndex()) {
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(12), dp(10), dp(12), dp(10))
+                        background = segmentedCardBg(pIdx, propActions.size, uiSurfaceLow, 0, 16f, 4f)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            if (pIdx < propActions.lastIndex) bottomMargin = dp(2)
+                        }
+                        attachSmoothPressAnimation(this, 0.98f)
+                        setOnClickListener {
+                            triggerHaptic(0.8f)
+                            pa.third()
+                        }
+                    }
+                    row.addView(
+                        FrameLayout(this).apply {
+                            background = tonalBg(uiAccentContainer, dp(10))
+                            layoutParams = LinearLayout.LayoutParams(dp(32), dp(32)).apply {
+                                marginEnd = dp(12)
+                            }
+                            addView(MaterialIconView(this@TermuxActivity, pa.first, uiAccent, 17.5f, 2.0f))
+                        }
+                    )
+                    row.addView(TextView(this).apply {
+                        text = pa.second
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.8f)
+                    })
+                    quickToolsCol.addView(row)
+                }
+                pSheet.addView(quickToolsCol)
+
+                val closeBtn = TextView(this).apply {
+                    text = tr("Закрыть", "Close")
+                    gravity = Gravity.CENTER
+                    setTextColor(COLOR_TEXT_BRIGHT)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                    background = tonalBg(uiSurfaceLow, dp(16))
+                    setPadding(dp(16), dp(11), dp(16), dp(11))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                    attachSmoothPressAnimation(this, 0.97f)
+                    setOnClickListener {
+                        triggerHaptic(0.75f)
+                        pDlg.dismiss()
+                    }
+                }
+                pSheet.addView(closeBtn)
+                pDlg.show()
+            }
+
             fun openEntryMenu(item: SftpItemEntry) {
                 val srv = activeSftpServer
                 val (mDlg, mSheet) = createExpressiveDialog(390)
@@ -9632,7 +10223,7 @@ class TermuxActivity : Activity() {
 
                 val actions = ArrayList<Triple<M3Icon, String, () -> Unit>>()
                 if (!item.isDirectory) {
-                    actions.add(Triple(M3Icon.EDIT, tr("Редактировать текст", "Edit file")) {
+                    actions.add(Triple(M3Icon.EDIT, tr("Изменить текст", "Edit text")) {
                         mDlg.dismiss()
                         if (srv == null) {
                             val f = File(item.path)
@@ -9674,13 +10265,13 @@ class TermuxActivity : Activity() {
                                 }.start()
                             }
                         } else {
-                            Toast.makeText(this@TermuxActivity, tr("Загрузка содержимого…", "Loading content…"), Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@TermuxActivity, tr("Загрузка файла…", "Loading file…"), Toast.LENGTH_SHORT).show()
                             Thread {
                                 val (ok, content) = runRemoteSftpViaCpp23(srv, "head -c 262144 -- ${shellEscapeSingle(item.path)}")
                                 runOnUiThread {
                                     if (ok) {
                                         openCodeViewerAndEditorSubPage(item.name, "${srv.label}:${item.path}", content) { updated ->
-                                            Toast.makeText(this@TermuxActivity, tr("Сохранение на сервере…", "Saving to server…"), Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(this@TermuxActivity, tr("Сохранение…", "Saving…"), Toast.LENGTH_SHORT).show()
                                             Thread {
                                                 val b64 = android.util.Base64.encodeToString(updated.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
                                                 val (sOk, sErr) = runRemoteSftpViaCpp23(
@@ -9706,17 +10297,6 @@ class TermuxActivity : Activity() {
                     })
                 }
 
-                actions.add(Triple(M3Icon.CHECK, if (selectedSftpPaths.contains(item.path)) tr("Снять выделение", "Deselect") else tr("Выделить объект", "Select item")) {
-                    mDlg.dismiss()
-                    if (selectedSftpPaths.contains(item.path)) {
-                        selectedSftpPaths.remove(item.path)
-                    } else {
-                        selectedSftpPaths.add(item.path)
-                    }
-                    rebuildClipBanner()
-                    populateEntriesIntoRowsCol(null, lastRenderedEntries)
-                })
-
                 if (srv == null) {
                     actions.add(Triple(M3Icon.COPY, tr("Копировать", "Copy")) {
                         batchClipSources.clear()
@@ -9725,105 +10305,12 @@ class TermuxActivity : Activity() {
                         mDlg.dismiss()
                         rebuildClipBanner()
                     })
-                    actions.add(Triple(M3Icon.FOLDER_OPEN, tr("Вырезать (Переместить)", "Cut (Move)")) {
+                    actions.add(Triple(M3Icon.CUT, tr("Вырезать", "Cut")) {
                         batchClipSources.clear()
                         fileClipSource = File(item.path)
                         fileClipIsMove = true
                         mDlg.dismiss()
                         rebuildClipBanner()
-                    })
-                }
-
-                actions.add(Triple(M3Icon.STORAGE, tr("Упаковать в .tar.gz", "Compress to .tar.gz")) {
-                    mDlg.dismiss()
-                    val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
-                    val outArchive = if (parentDir == "/") "/${item.name}.tar.gz" else "$parentDir/${item.name}.tar.gz"
-                    val tarCmd = "cd -- ${shellEscapeSingle(parentDir)} && tar -czf ${shellEscapeSingle(outArchive)} -- ${shellEscapeSingle(item.name)}"
-                    Thread {
-                        if (srv == null) {
-                            nativeExecLocalRootCmd(tarCmd)
-                        } else {
-                            runRemoteSftpViaCpp23(srv, tarCmd)
-                        }
-                        runOnUiThread {
-                            Toast.makeText(this@TermuxActivity, tr("Архив создан: ${item.name}.tar.gz", "Archived: ${item.name}.tar.gz"), Toast.LENGTH_SHORT).show()
-                            refreshSftpListInPlace(true, null)
-                        }
-                    }.start()
-                })
-
-                val lowerFileName = item.name.lowercase()
-                if (!item.isDirectory && (lowerFileName.endsWith(".tar.gz") || lowerFileName.endsWith(".tgz") || lowerFileName.endsWith(".tar") || lowerFileName.endsWith(".zip"))) {
-                    actions.add(Triple(M3Icon.FOLDER_OPEN, tr("Распаковать архив здесь", "Extract archive here")) {
-                        mDlg.dismiss()
-                        val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
-                        val extractCmd = if (lowerFileName.endsWith(".zip")) {
-                            "cd -- ${shellEscapeSingle(parentDir)} && unzip -o -- ${shellEscapeSingle(item.path)}"
-                        } else {
-                            "cd -- ${shellEscapeSingle(parentDir)} && tar -xf ${shellEscapeSingle(item.path)}"
-                        }
-                        Thread {
-                            if (srv == null) {
-                                nativeExecLocalRootCmd(extractCmd)
-                            } else {
-                                runRemoteSftpViaCpp23(srv, extractCmd)
-                            }
-                            runOnUiThread {
-                                Toast.makeText(this@TermuxActivity, tr("Распаковано: ${item.name}", "Extracted: ${item.name}"), Toast.LENGTH_SHORT).show()
-                                refreshSftpListInPlace(true, null)
-                            }
-                        }.start()
-                    })
-                }
-
-                actions.add(Triple(M3Icon.COPY, tr("Скопировать полный путь", "Copy full path")) {
-                    mDlg.dismiss()
-                    copyToClipboard(item.path, true)
-                })
-
-                if (!item.isDirectory) {
-                    actions.add(Triple(M3Icon.DOWNLOAD, tr("Скачать в Загрузки", "Download to /sdcard/Download")) {
-                        mDlg.dismiss()
-                        val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                        if (!dlDir.exists()) dlDir.mkdirs()
-                        val dst = File(dlDir, item.name)
-                        if (srv == null) {
-                            try {
-                                val src = File(item.path)
-                                if (src.canRead()) {
-                                    src.copyTo(dst, overwrite = true)
-                                    Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Thread {
-                                        nativeExecLocalRootCmd("cp -f -- ${shellEscapeSingle(item.path)} ${shellEscapeSingle(dst.absolutePath)}")
-                                        runOnUiThread {
-                                            Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_SHORT).show()
-                                        }
-                                    }.start()
-                                }
-                            } catch (e: Throwable) {
-                                Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                            }
-                        } else {
-                            Toast.makeText(this@TermuxActivity, tr("Скачивание ${item.name}…", "Downloading ${item.name}…"), Toast.LENGTH_SHORT).show()
-                            Thread {
-                                val (ok, out) = runRemoteSftpViaCpp23(srv, "base64 -- ${shellEscapeSingle(item.path)}")
-                                runOnUiThread {
-                                    if (ok) {
-                                        try {
-                                            val cleanB64 = out.replace("\\s".toRegex(), "")
-                                            val bytes = android.util.Base64.decode(cleanB64, android.util.Base64.DEFAULT)
-                                            dst.writeBytes(bytes)
-                                            Toast.makeText(this@TermuxActivity, tr("Сохранено: ${dst.absolutePath}", "Saved: ${dst.absolutePath}"), Toast.LENGTH_LONG).show()
-                                        } catch (e: Throwable) {
-                                            Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                                        }
-                                    } else {
-                                        Toast.makeText(this@TermuxActivity, "SSH error: ${out.take(120)}", Toast.LENGTH_LONG).show()
-                                    }
-                                }
-                            }.start()
-                        }
                     })
                 }
 
@@ -9859,9 +10346,9 @@ class TermuxActivity : Activity() {
                             val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
                             val newTarget = if (parentDir == "/") "/$newName" else "$parentDir/$newName"
                             if (srv == null) {
-                                val src = File(item.path)
+                                val srcFile = File(item.path)
                                 val dst = File(newTarget)
-                                if (src.renameTo(dst)) {
+                                if (srcFile.renameTo(dst)) {
                                     refreshSftpListInPlace(false, null)
                                 } else {
                                     Thread {
@@ -9882,51 +10369,43 @@ class TermuxActivity : Activity() {
                     rDlg.show()
                 })
 
-                actions.add(Triple(M3Icon.KEY, tr("Права доступа (chmod)", "Permissions (chmod)")) {
+                actions.add(Triple(M3Icon.ARCHIVE_ZIP, tr("Упаковать в .zip", "Compress to .zip")) {
                     mDlg.dismiss()
-                    val modes = listOf("755 (rwxr-xr-x)", "644 (rw-r--r--)", "700 (rwx------)", "600 (rw-------)", "777 (rwxrwxrwx)")
-                    showBakaSuChooseDialog(
-                        title = "chmod: ${item.name}",
-                        items = modes,
-                        selectedIndex = 0
-                    ) { chosen ->
-                        val octal = modes[chosen].substringBefore(' ')
-                        if (srv == null) {
-                            Thread {
-                                try {
-                                    val p = Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", octal, item.path))
-                                    if (p.waitFor() != 0) {
-                                        nativeExecLocalRootCmd("chmod $octal -- ${shellEscapeSingle(item.path)}")
-                                    }
-                                } catch (_: Throwable) {
-                                    nativeExecLocalRootCmd("chmod $octal -- ${shellEscapeSingle(item.path)}")
-                                }
-                                runOnUiThread { refreshSftpListInPlace(false, null) }
-                            }.start()
-                        } else {
-                            Thread {
-                                runRemoteSftpViaCpp23(srv, "chmod $octal -- ${shellEscapeSingle(item.path)}")
-                                runOnUiThread { refreshSftpListInPlace(true, null) }
-                            }.start()
-                        }
+                    val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
+                    val outZip = if (parentDir == "/") "/${item.name}.zip" else "$parentDir/${item.name}.zip"
+                    compressPathsToZipAsync(srv, parentDir, listOf(item.path), outZip) { _, createdName ->
+                        Toast.makeText(this@TermuxActivity, tr("Архив создан: $createdName", "Archived: $createdName"), Toast.LENGTH_SHORT).show()
+                        refreshSftpListInPlace(true, null)
                     }
                 })
 
-                actions.add(Triple(M3Icon.TERMINAL, tr("Открыть путь в Терминале", "Open path in Terminal")) {
-                    mDlg.dismiss()
-                    val targetDir = if (item.isDirectory) item.path else item.path.substringBeforeLast('/').ifEmpty { "/" }
-                    if (srv == null) {
-                        dlg.dismiss()
-                        nativeSendText("cd ${shellEscapeSingle(targetDir)}\n", false)
-                    } else {
-                        val cdCmd = "cd ${shellEscapeSingle(targetDir)}"
-                        val srvWithCd = if (srv.startupCommand.isBlank()) {
-                            srv.copy(startupCommand = "$cdCmd && exec \${'$'}SHELL -l")
+                val lowerFileName = item.name.lowercase()
+                if (!item.isDirectory && (lowerFileName.endsWith(".zip") || lowerFileName.endsWith(".tar.gz") || lowerFileName.endsWith(".tgz") || lowerFileName.endsWith(".tar"))) {
+                    actions.add(Triple(M3Icon.FOLDER_OPEN, tr("Распаковать здесь", "Extract here")) {
+                        mDlg.dismiss()
+                        val parentDir = item.path.substringBeforeLast('/').ifEmpty { "/" }
+                        val extractCmd = if (lowerFileName.endsWith(".zip")) {
+                            "cd -- ${shellEscapeSingle(parentDir)} && (unzip -o -- ${shellEscapeSingle(item.path)} || python3 -m zipfile -e ${shellEscapeSingle(item.path)} .)"
                         } else {
-                            srv.copy(startupCommand = "$cdCmd && ${srv.startupCommand}")
+                            "cd -- ${shellEscapeSingle(parentDir)} && tar -xf ${shellEscapeSingle(item.path)}"
                         }
-                        connectToSshServerInTerminal(srvWithCd, dlg)
-                    }
+                        Thread {
+                            if (srv == null) {
+                                nativeExecLocalRootCmd(extractCmd)
+                            } else {
+                                runRemoteSftpViaCpp23(srv, extractCmd)
+                            }
+                            runOnUiThread {
+                                Toast.makeText(this@TermuxActivity, tr("Распаковано: ${item.name}", "Extracted: ${item.name}"), Toast.LENGTH_SHORT).show()
+                                refreshSftpListInPlace(true, null)
+                            }
+                        }.start()
+                    })
+                }
+
+                actions.add(Triple(M3Icon.INFO, tr("Свойства", "Properties")) {
+                    mDlg.dismiss()
+                    openItemPropertiesDialog(item)
                 })
 
                 actions.add(Triple(M3Icon.TRASH, tr("Удалить", "Delete")) {
@@ -11559,17 +12038,83 @@ class TermuxActivity : Activity() {
             }
             pkgScroll.addView(pkgCol)
 
+            lateinit var populatePackagesInPlace: () -> Unit
+
             fun makePkgCard(pkg: DpkgPackageInfo, idx: Int, total: Int, allowDelete: Boolean): LinearLayout {
+                val isPkgSelected = allowDelete && selectedPackageNames.contains(pkg.name)
+                val rowFill = if (isPkgSelected) blendColor(uiSurfaceLow, uiAccentContainer, 0.55f) else uiSurfaceLow
                 return LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(14), dp(11), dp(12), dp(11))
-                    background = segmentedCardBg(idx, total, uiSurfaceLow, 0, 20f, 5f)
+                    background = segmentedCardBg(idx, total, rowFill, 0, 20f, 5f)
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
                     ).apply {
                         bottomMargin = if (idx < total - 1) dp(2) else dp(10)
+                    }
+
+                    if (allowDelete) {
+                        val badge = FrameLayout(this@TermuxActivity).apply {
+                            background = tonalBg(
+                                if (isPkgSelected) uiAccent else uiAccentContainer,
+                                dp(11)
+                            )
+                            layoutParams = LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                                marginEnd = dp(12)
+                            }
+                            addView(
+                                MaterialIconView(
+                                    this@TermuxActivity,
+                                    if (isPkgSelected) M3Icon.CHECK else M3Icon.ALL_PACKAGES,
+                                    if (isPkgSelected) uiOnAccent else uiAccent,
+                                    19f,
+                                    2.0f
+                                )
+                            )
+                        }
+                        if (isPkgSelected) {
+                            badge.scaleX = 0.84f
+                            badge.scaleY = 0.84f
+                            badge.animate()
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(220L)
+                                .setInterpolator(OvershootInterpolator(2.0f))
+                                .start()
+                        }
+                        addView(badge)
+
+                        attachSmoothPressAnimation(this, 0.97f)
+                        setOnClickListener {
+                            if (selectedPackageNames.isNotEmpty()) {
+                                triggerHaptic(0.85f)
+                                if (selectedPackageNames.contains(pkg.name)) {
+                                    selectedPackageNames.remove(pkg.name)
+                                } else {
+                                    selectedPackageNames.add(pkg.name)
+                                }
+                                trashConfirmExpanded = false
+                                rebuildUniversalTermPill(true)
+                                populatePackagesInPlace()
+                            } else {
+                                triggerHaptic(0.75f)
+                                copyToClipboard(pkg.name, true)
+                            }
+                        }
+                        setOnLongClickListener {
+                            triggerHaptic(1.25f)
+                            if (selectedPackageNames.contains(pkg.name)) {
+                                selectedPackageNames.remove(pkg.name)
+                            } else {
+                                selectedPackageNames.add(pkg.name)
+                            }
+                            trashConfirmExpanded = false
+                            rebuildUniversalTermPill(true)
+                            populatePackagesInPlace()
+                            true
+                        }
                     }
 
                     val infoCol = LinearLayout(this@TermuxActivity).apply {
@@ -11594,7 +12139,7 @@ class TermuxActivity : Activity() {
                     })
                     addView(infoCol)
 
-                    if (allowDelete) {
+                    if (allowDelete && selectedPackageNames.isEmpty()) {
                         addView(
                             FrameLayout(this@TermuxActivity).apply {
                                 background = tonalBg(COLOR_ROOT_CONTAINER, dp(12))
@@ -11612,22 +12157,26 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            fun populatePackagesInPlace() {
+            populatePackagesInPlace = {
                 val installed = parseInstalledDpkgPackagesViaCpp23()
                 val totalKb = installed.sumOf { it.sizeKb }
                 val userPackages = installed.filter { !it.isCore }
                 val corePackages = installed.filter { it.isCore }
+                lastUserPackageNames = userPackages.map { it.name }
 
-                allBadgeTv.text = "${tr("Все", "All")}: ${installed.size}"
+                allBadgeTv.text = "${tr("Всего", "Total")}: ${installed.size}"
                 sizeBadgeTv.text = formatSize(totalKb * 1024L)
 
                 pkgCol.removeAllViews()
                 if (userPackages.isNotEmpty()) {
                     pkgCol.addView(TextView(this).apply {
-                        text = tr("Установленные пакеты (${userPackages.size})", "Installed packages (${userPackages.size})")
+                        text = tr(
+                            "Установленные пакеты (${userPackages.size}) • зажмите для выбора",
+                            "Installed packages (${userPackages.size}) • hold to select"
+                        )
                         setTextColor(uiAccent)
                         typeface = Typeface.DEFAULT_BOLD
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         setPadding(dp(8), dp(4), dp(8), dp(6))
                     })
                     for ((idx, pkg) in userPackages.withIndex()) {
@@ -11636,16 +12185,17 @@ class TermuxActivity : Activity() {
                 }
 
                 pkgCol.addView(TextView(this).apply {
-                    text = tr("Основные системные пакеты (${corePackages.size})", "Core system packages (${corePackages.size})")
+                    text = tr("Системные пакеты (${corePackages.size})", "Core system packages (${corePackages.size})")
                     setTextColor(COLOR_TEXT_DIM)
                     typeface = Typeface.DEFAULT_BOLD
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     setPadding(dp(8), dp(8), dp(8), dp(6))
                 })
                 for ((idx, pkg) in corePackages.withIndex()) {
                     pkgCol.addView(makePkgCard(pkg, idx, corePackages.size, allowDelete = false))
                 }
             }
+            activePackagesPopulateCallback = populatePackagesInPlace
 
             val ptrPackages = BakaSuPullToRefreshLayout(this, pkgScroll) { finishPtr ->
                 Thread {
