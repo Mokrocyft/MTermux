@@ -7369,7 +7369,7 @@ class TermuxActivity : Activity() {
                                     fileClipSource = null
                                     selectedSftpPaths.clear()
                                     triggerHaptic(0.9f)
-                                    toast(tr("Скопировано в буфер", "Copied to clipboard"))
+                                    Toast.makeText(this@TermuxActivity, tr("Скопировано в буфер", "Copied to clipboard"), Toast.LENGTH_SHORT).show()
                                     rebuildUniversalTermPill(true)
                                     activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
                                 }
@@ -7391,7 +7391,7 @@ class TermuxActivity : Activity() {
                                     fileClipSource = null
                                     selectedSftpPaths.clear()
                                     triggerHaptic(0.9f)
-                                    toast(tr("Вырезано в буфер", "Cut to clipboard"))
+                                    Toast.makeText(this@TermuxActivity, tr("Вырезано в буфер", "Cut to clipboard"), Toast.LENGTH_SHORT).show()
                                     rebuildUniversalTermPill(true)
                                     activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
                                 }
