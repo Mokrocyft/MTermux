@@ -12847,9 +12847,9 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 )
             }
-            ViewCompat.setOnApplyWindowInsetsListener(bottomBarRow) { v, insets ->
-                val imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-                val navBottom = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            bottomBarRow.setOnApplyWindowInsetsListener { v, insets ->
+                val imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom
+                val navBottom = insets.getInsets(WindowInsets.Type.navigationBars()).bottom
                 val lift = (imeBottom - navBottom).coerceAtLeast(0).toFloat()
                 if (v.translationY != -lift) {
                     v.animate()
