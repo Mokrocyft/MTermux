@@ -340,6 +340,7 @@ class TermuxActivity : Activity() {
     private lateinit var tabStrip: LinearLayout
     private lateinit var tabSlidingIndicator: View
     private var prevActiveSessionIdx: Int = 0
+    private val prevSessionRootStates = HashMap<Int, Boolean>()
     private lateinit var extraKeysRoot: LinearLayout
     private var isImeCurrentlyOpen: Boolean = false
     private var isExtraKeysScrollHidden: Boolean = false
@@ -5929,13 +5930,15 @@ class TermuxActivity : Activity() {
         }
 
         val root = FrameLayout(this).apply {
-            setBackgroundColor(uiSurface)
+            setBackgroundColor(COLOR_AMOLED_BG)
         }
-        applySafeWindowInsets(root, extraLeftDp = 0, extraTopDp = 8, extraRightDp = 0, extraBottomDp = 6)
+        // Exact same extraTopDp = 4 as headerBar on Terminal screen so "Терминал" and Sessions align 1-to-1!
+        applySafeWindowInsets(root, extraLeftDp = 0, extraTopDp = 4, extraRightDp = 0, extraBottomDp = 6)
 
-        // Layer 1: Main Hub view (Top Nav + Tab Content)
+        // Layer 1: Main Hub view (Top Nav + Tab Content) — pitch-black AMOLED background
         val mainCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setBackgroundColor(COLOR_AMOLED_BG)
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -5943,10 +5946,10 @@ class TermuxActivity : Activity() {
         }
         root.addView(mainCol)
 
-        // Layer 2: Full-screen Sub-Page Layer (for Material 3 SSH Server Settings Page & Code Editor)
+        // Layer 2: Full-screen Sub-Page Layer (for SSH Server Settings, SSH Key Vault & Code Editor)
         val subPageLayer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(uiSurface)
+            setBackgroundColor(COLOR_AMOLED_BG)
             visibility = View.GONE
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5956,18 +5959,23 @@ class TermuxActivity : Activity() {
         root.addView(subPageLayer)
 
         var inHubSubPage = false
-        var activeTab = initialTab.coerceIn(0, 2) // 0 = Servers, 1 = SFTP, 2 = Packages
+        var activeTab = initialTab.coerceIn(0, 2) // 0 = SSH, 1 = Файлы, 2 = Пакеты
         var previousTab = activeTab
         var activeSftpServer: SshServerProfile? = null
-        val homeDir = File("/data/data/com.termuxx/file/home").let {
+        // Unified App root directory (/data/data/com.termuxx/file) containing both home and usr!
+        val appRootDir = File("/data/data/com.termuxx/file").let {
+            if (!it.exists()) it.mkdirs()
             if (it.exists()) it else File(applicationInfo.dataDir)
         }
-        var localCurrentDir = homeDir
+        val sdDirGlobal = Environment.getExternalStorageDirectory()
+        val fsRootDir = File("/")
+        var localCurrentDir = appRootDir
         var remoteCurrentPath = "/root"
         var sftpTreeMode = false
         var sftpShowHidden = true
         val expandedTreePaths = HashSet<String>()
         var newlyExpandedTreePath: String? = null
+        var justToggledTreeFolderPath: String? = null
         val selectedSftpPaths = LinkedHashSet<String>()
         var lastRenderedEntries: List<SftpItemEntry> = emptyList()
         val batchClipSources = ArrayList<String>()
@@ -5976,6 +5984,16 @@ class TermuxActivity : Activity() {
         var sftpSearchQuery = ""
         var prevSftpSourceIdx = 0
         var sftpTransitionDir = 0 // -1 = backward/left, 0 = none, +1 = forward/right
+        var termDrawerExpanded = false
+        var trashConfirmExpanded = false
+
+        lateinit var renderActiveTab: () -> Unit
+        lateinit var rebuildUniversalTermPill: (Boolean) -> Unit
+        lateinit var openSshKeyVaultSubPage: (() -> Unit) -> Unit
+        lateinit var openSshServerSubPageRef: (SshServerProfile?, () -> Unit) -> Unit
+        var activeSftpRefreshCallback: ((Boolean, (() -> Unit)?) -> Unit)? = null
+        var activeSftpBreadcrumbsCallback: ((Boolean) -> Unit)? = null
+        var activeSftpPopulateRowsCallback: ((String?, List<SftpItemEntry>) -> Unit)? = null
 
         fun openHubSubPage(populateSubPage: (LinearLayout, () -> Unit) -> Unit) {
             inHubSubPage = true
@@ -6043,29 +6061,25 @@ class TermuxActivity : Activity() {
                 .start()
         }
 
+        // Exact same padding (dp(10), 0, dp(10), dp(4)) as headerBar on Terminal screen!
         val topNavRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(uiSurface)
-            setPadding(dp(12), dp(2), dp(12), dp(6))
+            setBackgroundColor(0x00000000)
+            setPadding(dp(10), 0, dp(10), dp(4))
+            clipChildren = false
+            clipToPadding = false
         }
 
         val sessionsOuterPillView: View? = if (::tabOuterContainer.isInitialized) tabOuterContainer else (tabStrip.parent as? View)
         val startSessionsPillWidth = (sessionsOuterPillView?.width ?: 0).takeIf { it > 0 } ?: dp(68)
+        val pillInnerH = dp(31) // Exact same 31dp inner height (+ 4dp*2 outer padding = 39dp total) as Sessions!
+        val pillOuterR = pillInnerH * 0.5f
+        val pillInnerR = dpF(5f)
 
-        val termBackIcon = MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiOnAccentContainer, 18.5f, 2.0f).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(20), dp(20)).apply {
-                marginEnd = dp(6)
-            }
-        }
-        val termBackLabel = TextView(this@TermuxActivity).apply {
-            text = tr("Терминал", "Terminal")
-            setSingleLine(true)
-            setTextColor(uiOnAccentContainer)
-            typeface = Typeface.DEFAULT_BOLD
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        }
-        val termOuterFrame = FrameLayout(this).apply {
+        val termOuterFrame = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             background = tonalBg(uiSurfaceLow, dp(22))
             setPadding(dp(4), dp(4), dp(4), dp(4))
             layoutParams = LinearLayout.LayoutParams(
@@ -6075,60 +6089,799 @@ class TermuxActivity : Activity() {
                 marginEnd = dp(8)
             }
         }
-        val termBackChip = LinearLayout(this).apply {
+
+        // Right-side Material 3 Expressive Connected Tab Capsule: [ SSH | Файлы | Пакеты ]
+        val hubTabsOuter = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = tonalBg(uiAccentContainer, dp(18))
-            setPadding(dp(13), dp(6), dp(15), dp(6))
-            layoutParams = FrameLayout.LayoutParams(
+            gravity = Gravity.CENTER_VERTICAL
+            background = tonalBg(uiSurfaceLow, dp(22))
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            layoutParams = LinearLayout.LayoutParams(
+                0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                dp(32)
+                1f
             )
-            addView(termBackIcon)
-            addView(termBackLabel)
-            attachSmoothPressAnimation(this, 0.93f)
-            setOnClickListener {
-                triggerHaptic(0.85f)
-                val curOuterW = termOuterFrame.width.toFloat().coerceAtLeast(dpF(88f))
-                val targetSessW = startSessionsPillWidth.toFloat().coerceAtLeast(dpF(58f))
-                ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 190L
-                    interpolator = predictiveCommitInterpolator
+        }
+
+        val hubTabTitles = listOf("SSH", tr("Файлы", "Files"), tr("Пакеты", "Packages"))
+        val hubTabViews = ArrayList<TextView>(3)
+        val hubTabBgs = ArrayList<GradientDrawable>(3)
+        val hubTabSelProg = FloatArray(3) { idx -> if (idx == activeTab) 1f else 0f }
+        val hubTabPressProg = FloatArray(3)
+        val hubTabPressAnims = arrayOfNulls<ValueAnimator>(3)
+        var hubTabSwitchAnim: ValueAnimator? = null
+
+        fun updateHubTabsBentoGeometry() {
+            for (i in 0 until 3) {
+                val selF = safeClamp(hubTabSelProg[i], 0f, 1f)
+                val pF = safeClamp(hubTabPressProg[i], 0f, 1f)
+                val morph = max(selF, pF)
+                val restL = if (i == 0) pillOuterR else pillInnerR
+                val restR = if (i == 2) pillOuterR else pillInnerR
+                val curL = restL + (pillOuterR - restL) * morph
+                val curR = restR + (pillOuterR - restR) * morph
+
+                val bg = hubTabBgs[i]
+                bg.setColor(blendColor(uiSurfaceHigh, uiAccentContainer, max(selF, pF * 0.75f)))
+                bg.cornerRadii = floatArrayOf(curL, curL, curR, curR, curR, curR, curL, curL)
+
+                val tv = hubTabViews[i]
+                tv.setTextColor(blendColor(COLOR_TEXT_BRIGHT, uiOnAccentContainer, morph))
+                val lp = tv.layoutParams as LinearLayout.LayoutParams
+                val targetWeight = 1.0f + 0.16f * selF + 0.12f * pF
+                if (abs(lp.weight - targetWeight) > 0.005f) {
+                    lp.weight = targetWeight
+                    tv.layoutParams = lp
+                }
+            }
+        }
+
+        for (i in 0 until 3) {
+            val tabIdx = i
+            val bg = makeConnectedSegmentDrawable(uiSurfaceHigh, pillOuterR, pillOuterR)
+            hubTabBgs.add(bg)
+            var downMs = 0L
+            fun animateHubTabPress(holding: Boolean) {
+                hubTabPressAnims[tabIdx]?.cancel()
+                val startP = hubTabPressProg[tabIdx]
+                val endP = if (holding) 1f else 0f
+                hubTabPressAnims[tabIdx] = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = if (holding) 120L else 260L
+                    interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
                     addUpdateListener { va ->
                         val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                        val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                        lp.width = (curOuterW + (targetSessW - curOuterW) * t).roundToInt()
-                        termOuterFrame.layoutParams = lp
-                        termBackLabel.alpha = (1f - t * 1.4f).coerceIn(0f, 1f)
+                        hubTabPressProg[tabIdx] = startP + (endP - startP) * t
+                        updateHubTabsBentoGeometry()
                     }
                     start()
                 }
-                ensureCenteredPivot(root)
-                root.animate()
-                    .scaleX(0.90f)
-                    .scaleY(0.90f)
-                    .alpha(0f)
-                    .setDuration(195L)
-                    .setInterpolator(predictiveCommitInterpolator)
-                    .withEndAction {
-                        dlg.dismiss()
-                        sessionsOuterPillView?.let { pill ->
-                            pill.scaleX = 0.92f
-                            pill.scaleY = 0.88f
-                            pill.animate()
-                                .scaleX(1f)
-                                .scaleY(1f)
-                                .setDuration(260L)
-                                .setInterpolator(OvershootInterpolator(1.8f))
-                                .start()
+            }
+            val relRun = Runnable { animateHubTabPress(false) }
+
+            val tv = TextView(this).apply {
+                text = hubTabTitles[i]
+                gravity = Gravity.CENTER
+                setSingleLine(true)
+                typeface = Typeface.DEFAULT_BOLD
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f)
+                background = bg
+                layoutParams = LinearLayout.LayoutParams(0, pillInnerH, if (i == activeTab) 1.16f else 1f).apply {
+                    if (i < 2) marginEnd = dp(2)
+                }
+                setOnTouchListener { v, ev ->
+                    when (ev.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            v.removeCallbacks(relRun)
+                            downMs = SystemClock.uptimeMillis()
+                            triggerHaptic(0.8f)
+                            animateHubTabPress(true)
+                            false
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            val held = SystemClock.uptimeMillis() - downMs
+                            if (held < 110L) {
+                                v.postDelayed(relRun, (110L - held).coerceIn(35L, 100L))
+                            } else {
+                                relRun.run()
+                            }
+                            false
+                        }
+                        else -> false
+                    }
+                }
+                setOnClickListener {
+                    if (activeTab != tabIdx) {
+                        previousTab = activeTab
+                        activeTab = tabIdx
+                        termDrawerExpanded = false
+                        trashConfirmExpanded = false
+                        renderActiveTab()
+                    }
+                }
+            }
+            hubTabViews.add(tv)
+            hubTabsOuter.addView(tv)
+        }
+        updateHubTabsBentoGeometry()
+
+        fun exitToTerminalAnimated() {
+            triggerHaptic(0.85f)
+            val curOuterW = termOuterFrame.width.toFloat().coerceAtLeast(dpF(76f))
+            val targetSessW = startSessionsPillWidth.toFloat().coerceAtLeast(dpF(54f))
+            ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 190L
+                interpolator = predictiveCommitInterpolator
+                addUpdateListener { va ->
+                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                    val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                    lp.width = (curOuterW + (targetSessW - curOuterW) * t).roundToInt()
+                    lp.weight = 0f
+                    termOuterFrame.layoutParams = lp
+                }
+                start()
+            }
+            ensureCenteredPivot(root)
+            root.animate()
+                .scaleX(0.90f)
+                .scaleY(0.90f)
+                .alpha(0f)
+                .setDuration(195L)
+                .setInterpolator(predictiveCommitInterpolator)
+                .withEndAction {
+                    dlg.dismiss()
+                    sessionsOuterPillView?.let { pill ->
+                        pill.scaleX = 0.92f
+                        pill.scaleY = 0.88f
+                        pill.animate()
+                            .scaleX(1f)
+                            .scaleY(1f)
+                            .setDuration(260L)
+                            .setInterpolator(OvershootInterpolator(1.8f))
+                            .start()
+                    }
+                }
+                .start()
+        }
+
+        fun currentSftpSourceCode(): Int = when {
+            activeSftpServer != null -> 3
+            localCurrentDir.absolutePath.startsWith(sdDirGlobal.absolutePath) ||
+                localCurrentDir.absolutePath.startsWith("/sdcard") ||
+                localCurrentDir.absolutePath.startsWith("/storage") -> 1
+            localCurrentDir.absolutePath.startsWith(appRootDir.absolutePath) -> 0
+            else -> 2
+        }
+
+        // Universal Right-Expanding "Терминал" Capsule:
+        // - Normal state: [ >_ Терминал ] (or with connected source indicator [ 📁 ▸ ] in Файлы / paste badge).
+        //   Swipe right, long-press, or tap the right segment to smoothly unfold to the right!
+        // - Selection state (Item 9): automatically unfolds to the right into the Icon Toolbar
+        //   [ >_ | N | Все | Копировать | Вырезать | .tar.gz | 🗑️ (expands to "🗑️ Уверены?") | ✕ ]!
+        // - Drawer state (Item 8): unfolds to the right with contextual options for SSH / Файлы / Пакеты!
+        rebuildUniversalTermPill = { animateMorph ->
+            val oldWidth = termOuterFrame.width
+            termOuterFrame.removeAllViews()
+            val isSelectionMode = (activeTab == 1 && selectedSftpPaths.isNotEmpty())
+            val isExpandedRight = isSelectionMode || termDrawerExpanded
+
+            fun makeSegmentPill(
+                icon: M3Icon?,
+                label: String?,
+                leftR: Float,
+                rightR: Float,
+                fillCol: Int,
+                tintCol: Int,
+                marginEndDp: Int = 2,
+                weightVal: Float = 0f,
+                minW: Int = dp(34),
+                onClick: () -> Unit
+            ): LinearLayout {
+                return LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    minimumWidth = minW
+                    background = makeConnectedSegmentDrawable(fillCol, leftR, rightR)
+                    val hPad = if (label.isNullOrEmpty()) dp(9) else dp(11)
+                    setPadding(hPad, 0, hPad, 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        if (weightVal > 0f) 0 else ViewGroup.LayoutParams.WRAP_CONTENT,
+                        pillInnerH,
+                        weightVal
+                    ).apply {
+                        if (marginEndDp > 0) marginEnd = dp(marginEndDp)
+                    }
+                    if (icon != null) {
+                        addView(
+                            MaterialIconView(this@TermuxActivity, icon, tintCol, 17.5f, 2.0f).apply {
+                                layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                                    if (!label.isNullOrEmpty()) marginEnd = dp(5)
+                                }
+                            }
+                        )
+                    }
+                    if (!label.isNullOrEmpty()) {
+                        addView(TextView(this@TermuxActivity).apply {
+                            text = label
+                            setSingleLine(true)
+                            setTextColor(tintCol)
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        })
+                    }
+                    attachSmoothPressAnimation(this, 0.93f)
+                    setOnClickListener {
+                        triggerHaptic(0.8f)
+                        onClick()
+                    }
+                }
+            }
+
+            if (isSelectionMode) {
+                // Item 9: Right-expanded File/Folder Selection Icon Toolbar!
+                val srv = activeSftpServer
+                val activeDirStr = if (srv == null) localCurrentDir.absolutePath else remoteCurrentPath
+
+                // 1. Compact Terminal icon button on the left
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.TERMINAL,
+                        label = "${selectedSftpPaths.size}",
+                        leftR = pillOuterR,
+                        rightR = pillInnerR,
+                        fillCol = uiAccentContainer,
+                        tintCol = uiOnAccentContainer,
+                        weightVal = 1f
+                    ) {
+                        exitToTerminalAnimated()
+                    }
+                )
+                // 2. Select All icon
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.ALL_PACKAGES,
+                        label = null,
+                        leftR = pillInnerR,
+                        rightR = pillInnerR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        weightVal = 0.85f
+                    ) {
+                        trashConfirmExpanded = false
+                        for (e in lastRenderedEntries) {
+                            selectedSftpPaths.add(e.path)
+                        }
+                        rebuildUniversalTermPill(false)
+                        activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                    }
+                )
+                if (srv == null) {
+                    // 3. Copy icon
+                    termOuterFrame.addView(
+                        makeSegmentPill(
+                            icon = M3Icon.COPY,
+                            label = null,
+                            leftR = pillInnerR,
+                            rightR = pillInnerR,
+                            fillCol = uiSurfaceHigh,
+                            tintCol = COLOR_TEXT_BRIGHT,
+                            weightVal = 0.85f
+                        ) {
+                            trashConfirmExpanded = false
+                            batchClipSources.clear()
+                            batchClipSources.addAll(selectedSftpPaths)
+                            batchClipIsMove = false
+                            fileClipSource = null
+                            selectedSftpPaths.clear()
+                            rebuildUniversalTermPill(true)
+                            activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                        }
+                    )
+                    // 4. Cut/Move icon
+                    termOuterFrame.addView(
+                        makeSegmentPill(
+                            icon = M3Icon.FOLDER_OPEN,
+                            label = null,
+                            leftR = pillInnerR,
+                            rightR = pillInnerR,
+                            fillCol = uiSurfaceHigh,
+                            tintCol = COLOR_TEXT_BRIGHT,
+                            weightVal = 0.85f
+                        ) {
+                            trashConfirmExpanded = false
+                            batchClipSources.clear()
+                            batchClipSources.addAll(selectedSftpPaths)
+                            batchClipIsMove = true
+                            fileClipSource = null
+                            selectedSftpPaths.clear()
+                            rebuildUniversalTermPill(true)
+                            activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                        }
+                    )
+                }
+                // 5. Compress to .tar.gz icon
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.STORAGE,
+                        label = null,
+                        leftR = pillInnerR,
+                        rightR = pillInnerR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        weightVal = 0.85f
+                    ) {
+                        trashConfirmExpanded = false
+                        val targets = selectedSftpPaths.toList()
+                        val archiveName = "archive_${System.currentTimeMillis() / 1000}.tar.gz"
+                        val archivePath = if (activeDirStr == "/") "/$archiveName" else "$activeDirStr/$archiveName"
+                        val relNames = targets.map { it.substringAfterLast('/') }.filter { it.isNotEmpty() }
+                        val joinedArgs = relNames.joinToString(" ") { shellEscapeSingle(it) }
+                        val tarCmd = "cd -- ${shellEscapeSingle(activeDirStr)} && tar -czf ${shellEscapeSingle(archivePath)} -- $joinedArgs"
+                        selectedSftpPaths.clear()
+                        rebuildUniversalTermPill(true)
+                        Thread {
+                            if (srv == null) {
+                                nativeExecLocalRootCmd(tarCmd)
+                            } else {
+                                runRemoteSftpViaCpp23(srv, tarCmd)
+                            }
+                            runOnUiThread {
+                                Toast.makeText(this, tr("Создан архив: $archiveName", "Created: $archiveName"), Toast.LENGTH_SHORT).show()
+                                activeSftpRefreshCallback?.invoke(true, null)
+                            }
+                        }.start()
+                    }
+                )
+                // 6. Expandable Trash Icon -> on 1st tap smoothly unfolds to the right with "Уверены?"!
+                val trashBtn = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    background = makeConnectedSegmentDrawable(
+                        COLOR_ROOT_CONTAINER,
+                        if (trashConfirmExpanded) pillOuterR else pillInnerR,
+                        if (trashConfirmExpanded) pillOuterR else pillInnerR
+                    )
+                    setPadding(dp(10), 0, dp(10), 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        pillInnerH,
+                        if (trashConfirmExpanded) 2.15f else 0.9f
+                    ).apply {
+                        marginEnd = dp(2)
+                    }
+                    addView(
+                        MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                                if (trashConfirmExpanded) marginEnd = dp(5)
+                            }
+                        }
+                    )
+                    if (trashConfirmExpanded) {
+                        addView(TextView(this@TermuxActivity).apply {
+                            text = tr("Уверены?", "Sure?")
+                            setSingleLine(true)
+                            setTextColor(COLOR_ROOT)
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
+                        })
+                    }
+                    attachSmoothPressAnimation(this, 0.93f)
+                    setOnClickListener {
+                        if (!trashConfirmExpanded) {
+                            triggerHaptic(1.1f)
+                            trashConfirmExpanded = true
+                            rebuildUniversalTermPill(true)
+                        } else {
+                            triggerHaptic(1.35f)
+                            trashConfirmExpanded = false
+                            val toDel = selectedSftpPaths.toList()
+                            selectedSftpPaths.clear()
+                            rebuildUniversalTermPill(true)
+                            val joined = toDel.joinToString(" ") { shellEscapeSingle(it) }
+                            Thread {
+                                if (srv == null) {
+                                    var allDeleted = true
+                                    for (p in toDel) {
+                                        if (!File(p).deleteRecursively()) allDeleted = false
+                                    }
+                                    if (!allDeleted) {
+                                        nativeExecLocalRootCmd("rm -rf -- $joined")
+                                    }
+                                } else {
+                                    runRemoteSftpViaCpp23(srv, "rm -rf -- $joined")
+                                }
+                                runOnUiThread { activeSftpRefreshCallback?.invoke(true, null) }
+                            }.start()
                         }
                     }
-                    .start()
+                }
+                termOuterFrame.addView(trashBtn)
+
+                // 7. Close/Clear selection icon
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.CLOSE,
+                        label = null,
+                        leftR = pillInnerR,
+                        rightR = pillOuterR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        marginEndDp = 0,
+                        weightVal = 0.85f
+                    ) {
+                        trashConfirmExpanded = false
+                        selectedSftpPaths.clear()
+                        rebuildUniversalTermPill(true)
+                        activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                    }
+                )
+            } else if (termDrawerExpanded) {
+                // Item 8: Right-expanded contextual menu inside "Терминал" capsule!
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.TERMINAL,
+                        label = null,
+                        leftR = pillOuterR,
+                        rightR = pillInnerR,
+                        fillCol = uiAccentContainer,
+                        tintCol = uiOnAccentContainer,
+                        weightVal = 0.85f
+                    ) {
+                        exitToTerminalAnimated()
+                    }
+                )
+
+                when (activeTab) {
+                    1 -> {
+                        // Файлы sources: [ Termux (/data/data/com.termuxx/file) | SD (/sdcard) | / (Root) | SSH ]
+                        val curSrc = currentSftpSourceCode()
+                        val sources = listOf(
+                            Triple(0, M3Icon.TERMINAL, "Termux"),
+                            Triple(1, M3Icon.STORAGE, "SD"),
+                            Triple(2, M3Icon.ROOT_HASH, "/"),
+                            Triple(3, M3Icon.SERVER, "SSH")
+                        )
+                        for ((sCode, sIcon, sLbl) in sources) {
+                            val isSel = (curSrc == sCode)
+                            termOuterFrame.addView(
+                                makeSegmentPill(
+                                    icon = sIcon,
+                                    label = sLbl,
+                                    leftR = if (isSel) pillOuterR else pillInnerR,
+                                    rightR = if (isSel) pillOuterR else pillInnerR,
+                                    fillCol = if (isSel) uiAccentContainer else uiSurfaceHigh,
+                                    tintCol = if (isSel) uiOnAccentContainer else COLOR_TEXT_BRIGHT,
+                                    weightVal = if (isSel) 1.25f else 1.05f
+                                ) {
+                                    when (sCode) {
+                                        0 -> {
+                                            activeSftpServer = null
+                                            localCurrentDir = appRootDir
+                                            termDrawerExpanded = false
+                                            rebuildUniversalTermPill(true)
+                                            activeSftpBreadcrumbsCallback?.invoke(true)
+                                            activeSftpRefreshCallback?.invoke(false, null)
+                                        }
+                                        1 -> {
+                                            val switchToSd = {
+                                                activeSftpServer = null
+                                                localCurrentDir = sdDirGlobal
+                                                termDrawerExpanded = false
+                                                rebuildUniversalTermPill(true)
+                                                activeSftpBreadcrumbsCallback?.invoke(true)
+                                                activeSftpRefreshCallback?.invoke(false, null)
+                                            }
+                                            if (!hasAllFilesAccessPermission() && !hasStandardStoragePermission()) {
+                                                showStoragePermissionsModal { switchToSd() }
+                                            } else {
+                                                switchToSd()
+                                            }
+                                        }
+                                        2 -> {
+                                            activeSftpServer = null
+                                            localCurrentDir = fsRootDir
+                                            termDrawerExpanded = false
+                                            rebuildUniversalTermPill(true)
+                                            activeSftpBreadcrumbsCallback?.invoke(true)
+                                            activeSftpRefreshCallback?.invoke(false, null)
+                                        }
+                                        3 -> {
+                                            val saved = loadSshServers()
+                                            if (saved.isEmpty()) {
+                                                Toast.makeText(this, tr("Сначала добавьте SSH-сервер во вкладке SSH", "Add an SSH server in the SSH tab first"), Toast.LENGTH_SHORT).show()
+                                            } else if (saved.size == 1 && activeSftpServer == null) {
+                                                val srv = saved[0]
+                                                activeSftpServer = srv
+                                                remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                                                termDrawerExpanded = false
+                                                rebuildUniversalTermPill(true)
+                                                activeSftpBreadcrumbsCallback?.invoke(true)
+                                                activeSftpRefreshCallback?.invoke(false, null)
+                                            } else {
+                                                val curIdx = saved.indexOfFirst { it.id == activeSftpServer?.id }.coerceAtLeast(0)
+                                                showBakaSuChooseDialog(
+                                                    title = tr("Выберите SSH-сервер", "Select SSH Server"),
+                                                    items = saved.map { it.label },
+                                                    descriptions = saved.map { "${it.username}@${it.host}:${it.port}" },
+                                                    selectedIndex = curIdx
+                                                ) { chosen ->
+                                                    val srv = saved[chosen]
+                                                    activeSftpServer = srv
+                                                    remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                                                    termDrawerExpanded = false
+                                                    rebuildUniversalTermPill(true)
+                                                    activeSftpBreadcrumbsCallback?.invoke(true)
+                                                    activeSftpRefreshCallback?.invoke(false, null)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
+                    0 -> {
+                        // SSH quick actions: [ + Сервер | SSH-ключи ]
+                        termOuterFrame.addView(
+                            makeSegmentPill(
+                                icon = M3Icon.ADD,
+                                label = tr("Сервер", "Server"),
+                                leftR = pillInnerR,
+                                rightR = pillInnerR,
+                                fillCol = uiSurfaceHigh,
+                                tintCol = COLOR_TEXT_BRIGHT,
+                                weightVal = 1.2f
+                            ) {
+                                termDrawerExpanded = false
+                                rebuildUniversalTermPill(false)
+                                openSshServerSubPageRef(null) { renderActiveTab() }
+                            }
+                        )
+                        termOuterFrame.addView(
+                            makeSegmentPill(
+                                icon = M3Icon.KEY,
+                                label = tr("SSH-ключи", "SSH Keys"),
+                                leftR = pillInnerR,
+                                rightR = pillInnerR,
+                                fillCol = uiSurfaceHigh,
+                                tintCol = COLOR_TEXT_BRIGHT,
+                                weightVal = 1.3f
+                            ) {
+                                termDrawerExpanded = false
+                                rebuildUniversalTermPill(false)
+                                openSshKeyVaultSubPage { renderActiveTab() }
+                            }
+                        )
+                    }
+                    else -> {
+                        // Пакеты quick actions: [ Обновить (pkg upgrade) | Очистить кэш ]
+                        termOuterFrame.addView(
+                            makeSegmentPill(
+                                icon = M3Icon.REFRESH,
+                                label = "pkg upgrade",
+                                leftR = pillInnerR,
+                                rightR = pillInnerR,
+                                fillCol = uiSurfaceHigh,
+                                tintCol = COLOR_TEXT_BRIGHT,
+                                weightVal = 1.3f
+                            ) {
+                                dlg.dismiss()
+                                nativeSendText("pkg upgrade -y\n", false)
+                            }
+                        )
+                        termOuterFrame.addView(
+                            makeSegmentPill(
+                                icon = M3Icon.TRASH,
+                                label = "apt clean",
+                                leftR = pillInnerR,
+                                rightR = pillInnerR,
+                                fillCol = uiSurfaceHigh,
+                                tintCol = COLOR_TEXT_BRIGHT,
+                                weightVal = 1.2f
+                            ) {
+                                dlg.dismiss()
+                                nativeSendText("apt clean\n", false)
+                            }
+                        )
+                    }
+                }
+
+                // Collapse drawer button
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.CLOSE,
+                        label = null,
+                        leftR = pillInnerR,
+                        rightR = pillOuterR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        marginEndDp = 0,
+                        weightVal = 0.8f
+                    ) {
+                        termDrawerExpanded = false
+                        rebuildUniversalTermPill(true)
+                    }
+                )
+            } else {
+                // Collapsed Default State: [ >_ Терминал ] (or with connected source/paste pill in Файлы!)
+                val hasPasteClipboard = (activeTab == 1 && activeSftpServer == null && (fileClipSource != null || batchClipSources.isNotEmpty()))
+                val showSourceAccessory = (activeTab == 1)
+
+                val mainLeftR = pillOuterR
+                val mainRightR = if (hasPasteClipboard || showSourceAccessory) pillInnerR else pillOuterR
+
+                val termBackIcon = MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiOnAccentContainer, 18f, 2.0f).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(19), dp(19)).apply {
+                        marginEnd = dp(5)
+                    }
+                }
+                val termBackLabel = TextView(this@TermuxActivity).apply {
+                    text = tr("Терминал", "Terminal")
+                    setSingleLine(true)
+                    setTextColor(uiOnAccentContainer)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                }
+                var swipeStartX = 0f
+                var swipeTriggered = false
+                val termBackChip = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    background = makeConnectedSegmentDrawable(uiAccentContainer, mainLeftR, mainRightR)
+                    setPadding(dp(12), 0, dp(13), 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        pillInnerH
+                    ).apply {
+                        if (hasPasteClipboard || showSourceAccessory) marginEnd = dp(2)
+                    }
+                    addView(termBackIcon)
+                    addView(termBackLabel)
+                    attachSmoothPressAnimation(this, 0.94f)
+                    setOnTouchListener { _, ev ->
+                        when (ev.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> {
+                                swipeStartX = ev.rawX
+                                swipeTriggered = false
+                                false
+                            }
+                            MotionEvent.ACTION_MOVE -> {
+                                if (!swipeTriggered && (ev.rawX - swipeStartX) > dpF(26f)) {
+                                    swipeTriggered = true
+                                    triggerHaptic(1.0f)
+                                    termDrawerExpanded = true
+                                    rebuildUniversalTermPill(true)
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            else -> swipeTriggered
+                        }
+                    }
+                    setOnClickListener {
+                        if (!swipeTriggered) {
+                            exitToTerminalAnimated()
+                        }
+                    }
+                    setOnLongClickListener {
+                        triggerHaptic(1.15f)
+                        termDrawerExpanded = true
+                        rebuildUniversalTermPill(true)
+                        true
+                    }
+                }
+                termOuterFrame.addView(termBackChip)
+
+                if (hasPasteClipboard) {
+                    val countClip = if (batchClipSources.isNotEmpty()) batchClipSources.size else 1
+                    termOuterFrame.addView(
+                        makeSegmentPill(
+                            icon = M3Icon.COPY,
+                            label = tr("Вставить ($countClip)", "Paste ($countClip)"),
+                            leftR = pillInnerR,
+                            rightR = pillOuterR,
+                            fillCol = uiSurfaceHigh,
+                            tintCol = uiAccent,
+                            marginEndDp = 0
+                        ) {
+                            val sources = if (batchClipSources.isNotEmpty()) {
+                                batchClipSources.map { File(it) }
+                            } else {
+                                listOfNotNull(fileClipSource)
+                            }
+                            val isMove = if (batchClipSources.isNotEmpty()) batchClipIsMove else fileClipIsMove
+                            Thread {
+                                for (srcFile in sources) {
+                                    val dst = File(localCurrentDir, srcFile.name)
+                                    var handledDirect = false
+                                    try {
+                                        if (srcFile.exists() && localCurrentDir.canWrite()) {
+                                            if (srcFile.isDirectory) srcFile.copyRecursively(dst, overwrite = true)
+                                            else srcFile.copyTo(dst, overwrite = true)
+                                            if (isMove) srcFile.deleteRecursively()
+                                            handledDirect = true
+                                        }
+                                    } catch (_: Throwable) {}
+                                    if (!handledDirect) {
+                                        val op = if (isMove) "mv -f" else "cp -rf"
+                                        nativeExecLocalRootCmd("$op -- ${shellEscapeSingle(srcFile.absolutePath)} ${shellEscapeSingle(dst.absolutePath)}")
+                                    }
+                                }
+                                runOnUiThread {
+                                    fileClipSource = null
+                                    batchClipSources.clear()
+                                    rebuildUniversalTermPill(true)
+                                    activeSftpRefreshCallback?.invoke(true, null)
+                                }
+                            }.start()
+                        }
+                    )
+                } else if (showSourceAccessory) {
+                    val srcCode = currentSftpSourceCode()
+                    val srcIcon = when (srcCode) {
+                        0 -> M3Icon.FOLDER
+                        1 -> M3Icon.STORAGE
+                        2 -> M3Icon.ROOT_HASH
+                        else -> M3Icon.SERVER
+                    }
+                    termOuterFrame.addView(
+                        makeSegmentPill(
+                            icon = srcIcon,
+                            label = "▸",
+                            leftR = pillInnerR,
+                            rightR = pillOuterR,
+                            fillCol = uiSurfaceHigh,
+                            tintCol = uiAccent,
+                            marginEndDp = 0,
+                            minW = dp(38)
+                        ) {
+                            termDrawerExpanded = true
+                            rebuildUniversalTermPill(true)
+                        }
+                    )
+                }
+            }
+
+            // Smooth horizontal expansion/collapse of termOuterFrame to the right!
+            if (isExpandedRight) {
+                hubTabsOuter.visibility = View.GONE
+                val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                lp.width = 0
+                lp.weight = 1f
+                lp.marginEnd = 0
+                termOuterFrame.layoutParams = lp
+                if (animateMorph && oldWidth > 0) {
+                    termOuterFrame.scaleX = 0.94f
+                    termOuterFrame.pivotX = 0f
+                    termOuterFrame.animate()
+                        .scaleX(1f)
+                        .setDuration(250L)
+                        .setInterpolator(PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f))
+                        .start()
+                }
+            } else {
+                hubTabsOuter.visibility = View.VISIBLE
+                val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
+                lp.weight = 0f
+                lp.marginEnd = dp(8)
+                termOuterFrame.layoutParams = lp
+                if (animateMorph) {
+                    hubTabsOuter.alpha = 0f
+                    hubTabsOuter.translationX = dpF(16f)
+                    hubTabsOuter.animate()
+                        .alpha(1f)
+                        .translationX(0f)
+                        .setDuration(240L)
+                        .setInterpolator(PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f))
+                        .start()
+                }
             }
         }
-        termOuterFrame.addView(termBackChip)
 
-        // Morph from the top-left Sessions pill (with outer background frame!) into the rounded "Терминал" capsule
+        rebuildUniversalTermPill(false)
+
+        // Initial shared-element morph from top-left Sessions pill into "Терминал" capsule
         termOuterFrame.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
             override fun onPreDraw(): Boolean {
                 if (termOuterFrame.viewTreeObserver.isAlive) {
@@ -6137,31 +6890,24 @@ class TermuxActivity : Activity() {
                 val finalOuterW = termOuterFrame.width.takeIf { it > 0 } ?: dp(124)
                 val fromW = startSessionsPillWidth.toFloat()
                 val toW = finalOuterW.toFloat()
-                termBackLabel.alpha = 0f
-                termBackIcon.scaleX = 0.75f
-                termBackIcon.scaleY = 0.75f
                 ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 340L
-                    interpolator = LinearInterpolator()
+                    duration = 280L
+                    interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
                     addUpdateListener { va ->
                         val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                        val spring = 1f - kotlin.math.exp(-3.6f * t) * kotlin.math.cos(5.6f * t)
-                        val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                        lp.width = (fromW + (toW - fromW) * spring).roundToInt().coerceAtLeast(dp(56))
-                        termOuterFrame.layoutParams = lp
-                        val fadeT = ((t - 0.15f) / 0.85f).coerceIn(0f, 1f)
-                        termBackLabel.alpha = fadeT
-                        termBackIcon.scaleX = (0.75f + 0.25f * spring).coerceIn(0.7f, 1.1f)
-                        termBackIcon.scaleY = (0.75f + 0.25f * spring).coerceIn(0.7f, 1.1f)
+                        if (!termDrawerExpanded && selectedSftpPaths.isEmpty()) {
+                            val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                            lp.width = (fromW + (toW - fromW) * t).roundToInt().coerceAtLeast(dp(56))
+                            termOuterFrame.layoutParams = lp
+                        }
                     }
                     addListener(object : android.animation.AnimatorListenerAdapter() {
                         override fun onAnimationEnd(animation: android.animation.Animator) {
-                            val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
-                            lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
-                            termOuterFrame.layoutParams = lp
-                            termBackLabel.alpha = 1f
-                            termBackIcon.scaleX = 1f
-                            termBackIcon.scaleY = 1f
+                            if (!termDrawerExpanded && selectedSftpPaths.isEmpty()) {
+                                val lp = termOuterFrame.layoutParams as LinearLayout.LayoutParams
+                                lp.width = ViewGroup.LayoutParams.WRAP_CONTENT
+                                termOuterFrame.layoutParams = lp
+                            }
                         }
                     })
                     start()
@@ -6169,61 +6915,9 @@ class TermuxActivity : Activity() {
                 return true
             }
         })
+
         topNavRow.addView(termOuterFrame)
-
-        fun makeTopNavTab(title: String, onSelect: () -> Unit): Pair<LinearLayout, View> {
-            val col = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                setPadding(dp(4), dp(8), dp(4), dp(2))
-                attachSmoothPressAnimation(this, 0.94f)
-                setOnClickListener {
-                    triggerHaptic(0.8f)
-                    onSelect()
-                }
-            }
-            val tv = TextView(this).apply {
-                text = title
-                gravity = Gravity.CENTER
-                typeface = Typeface.MONOSPACE
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-                setPadding(0, 0, 0, dp(7))
-            }
-            val indicator = View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(32), dp(4))
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.RECTANGLE
-                    cornerRadius = dpF(99f)
-                    setColor(uiAccent)
-                }
-            }
-            col.addView(tv)
-            col.addView(indicator)
-            return col to indicator
-        }
-
-        lateinit var renderActiveTab: () -> Unit
-
-        val (tabServersCol, indServers) = makeTopNavTab("SSH") {
-            previousTab = activeTab
-            activeTab = 0
-            renderActiveTab()
-        }
-        val (tabSftpCol, indSftp) = makeTopNavTab(tr("Файлы", "Files")) {
-            previousTab = activeTab
-            activeTab = 1
-            renderActiveTab()
-        }
-        val (tabPkgsCol, indPkgs) = makeTopNavTab(tr("Пакеты", "Packages")) {
-            previousTab = activeTab
-            activeTab = 2
-            renderActiveTab()
-        }
-
-        topNavRow.addView(tabServersCol)
-        topNavRow.addView(tabSftpCol)
-        topNavRow.addView(tabPkgsCol)
+        topNavRow.addView(hubTabsOuter)
         mainCol.addView(topNavRow)
 
         val contentFrame = FrameLayout(this).apply {
@@ -6419,6 +7113,767 @@ class TermuxActivity : Activity() {
         }
 
         // ====================================================================
+        // SSH Key Vault Helper & Full-Screen Sub-Page (Item 6)
+        // ====================================================================
+        val sshVaultDir = File(appRootDir, "home/.ssh").apply {
+            if (!exists()) mkdirs()
+            try {
+                Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", "700", absolutePath)).waitFor()
+            } catch (_: Throwable) {}
+        }
+
+        fun listSshVaultPrivateKeys(): List<File> {
+            if (!sshVaultDir.exists()) sshVaultDir.mkdirs()
+            val ignoredNames = setOf("known_hosts", "known_hosts.old", "authorized_keys", "config", "environment")
+            return sshVaultDir.listFiles()
+                ?.filter { f ->
+                    f.isFile &&
+                        !f.name.endsWith(".pub", ignoreCase = true) &&
+                        !f.name.startsWith(".") &&
+                        f.name !in ignoredNames
+                }
+                ?.sortedByDescending { it.lastModified() }
+                ?: emptyList()
+        }
+
+        fun detectSshKeyAlgorithmBadge(privFile: File): String {
+            val pubFile = File(privFile.parentFile, "${privFile.name}.pub")
+            val pubTxt = try { if (pubFile.exists()) pubFile.readText() else "" } catch (_: Throwable) { "" }
+            val nameLow = privFile.name.lowercase()
+            return when {
+                pubTxt.startsWith("ssh-ed25519") || nameLow.contains("ed25519") -> "ED25519"
+                pubTxt.startsWith("ssh-rsa") || nameLow.contains("rsa") -> "RSA"
+                pubTxt.startsWith("ecdsa-") || nameLow.contains("ecdsa") -> "ECDSA"
+                else -> "SSH KEY"
+            }
+        }
+
+        fun generateSshKeyPairInVault(
+            keyFileName: String,
+            algo: String,
+            comment: String,
+            onDone: (Boolean, String, File?) -> Unit
+        ) {
+            val cleanName = keyFileName.trim().replace("[^a-zA-Z0-9._-]".toRegex(), "_").ifEmpty {
+                if (algo == "rsa") "id_rsa" else "id_ed25519"
+            }
+            val targetPriv = File(sshVaultDir, cleanName)
+            val targetPub = File(sshVaultDir, "$cleanName.pub")
+            Thread {
+                try {
+                    if (!sshVaultDir.exists()) sshVaultDir.mkdirs()
+                    if (targetPriv.exists()) targetPriv.delete()
+                    if (targetPub.exists()) targetPub.delete()
+                    val usrPrefix = File(appRootDir, "usr")
+                    val keygenBin = File(usrPrefix, "bin/ssh-keygen")
+                    val args = if (algo == "rsa") {
+                        arrayOf(
+                            keygenBin.absolutePath,
+                            "-t", "rsa",
+                            "-b", "4096",
+                            "-N", "",
+                            "-C", comment.ifEmpty { "termux@android" },
+                            "-f", targetPriv.absolutePath
+                        )
+                    } else {
+                        arrayOf(
+                            keygenBin.absolutePath,
+                            "-t", "ed25519",
+                            "-N", "",
+                            "-C", comment.ifEmpty { "termux@android" },
+                            "-f", targetPriv.absolutePath
+                        )
+                    }
+                    val env = arrayOf(
+                        "HOME=${File(appRootDir, "home").absolutePath}",
+                        "PREFIX=${usrPrefix.absolutePath}",
+                        "PATH=${usrPrefix.absolutePath}/bin:/system/bin",
+                        "LD_LIBRARY_PATH=${usrPrefix.absolutePath}/lib"
+                    )
+                    val proc = Runtime.getRuntime().exec(args, env, sshVaultDir)
+                    val errOut = proc.errorStream.bufferedReader().readText()
+                    val stdOut = proc.inputStream.bufferedReader().readText()
+                    val code = proc.waitFor()
+                    if (code == 0 && targetPriv.exists()) {
+                        try {
+                            Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", "600", targetPriv.absolutePath)).waitFor()
+                            if (targetPub.exists()) {
+                                Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", "644", targetPub.absolutePath)).waitFor()
+                            }
+                        } catch (_: Throwable) {}
+                        runOnUiThread {
+                            onDone(true, targetPriv.absolutePath, targetPriv)
+                        }
+                    } else {
+                        runOnUiThread {
+                            onDone(false, (errOut + "
+" + stdOut).trim().ifEmpty { "ssh-keygen exit $code" }, null)
+                        }
+                    }
+                } catch (e: Throwable) {
+                    runOnUiThread {
+                        onDone(false, e.message ?: "ssh-keygen error", null)
+                    }
+                }
+            }.start()
+        }
+
+        openSshKeyVaultSubPage = { onVaultClosed ->
+            openHubSubPage { pageCol, closeSubPage ->
+                val toolbar = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(16), dp(8), dp(16), dp(10))
+                }
+                val backBtn = FrameLayout(this).apply {
+                    background = tonalBg(uiSurfaceContainer, dp(20))
+                    layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                        marginEnd = dp(14)
+                    }
+                    addView(MaterialIconView(this@TermuxActivity, M3Icon.ARROW_BACK, COLOR_TEXT_BRIGHT, 21f, 2.15f))
+                    attachSmoothPressAnimation(this, 0.90f)
+                    setOnClickListener {
+                        triggerHaptic(0.8f)
+                        closeSubPage()
+                        onVaultClosed()
+                    }
+                }
+                val titleCol = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                titleCol.addView(TextView(this).apply {
+                    text = tr("Хранилище ключей SSH", "SSH Key Vault")
+                    setTextColor(COLOR_TEXT_BRIGHT)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 19.5f)
+                    typeface = Typeface.DEFAULT_BOLD
+                })
+                titleCol.addView(TextView(this).apply {
+                    text = sshVaultDir.absolutePath
+                    setSingleLine(true)
+                    setTextColor(uiAccent)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                })
+                toolbar.addView(backBtn)
+                toolbar.addView(titleCol)
+                pageCol.addView(toolbar)
+
+                val vaultScroll = ScrollView(this).apply {
+                    isVerticalScrollBarEnabled = false
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f
+                    )
+                }
+                val vaultCol = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(16), dp(4), dp(16), dp(36))
+                }
+                vaultScroll.addView(vaultCol)
+                pageCol.addView(vaultScroll)
+
+                lateinit var rebuildVaultList: () -> Unit
+
+                fun openGenerateKeySheet() {
+                    val (gDlg, gSheet) = createExpressiveDialog(420)
+                    var selectedAlgo = "ed25519"
+
+                    val hero = FrameLayout(this).apply {
+                        background = tonalBg(uiAccentContainer, dp(18))
+                        layoutParams = LinearLayout.LayoutParams(dp(54), dp(54)).apply {
+                            gravity = Gravity.CENTER_HORIZONTAL
+                            bottomMargin = dp(10)
+                        }
+                        addView(MaterialIconView(this@TermuxActivity, M3Icon.KEY, uiAccent, 26f, 2.15f))
+                    }
+                    gSheet.addView(hero)
+                    gSheet.addView(TextView(this).apply {
+                        text = tr("Создать новый SSH-ключ", "Generate new SSH key")
+                        gravity = Gravity.CENTER
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18.5f)
+                        setPadding(0, 0, 0, dp(12))
+                    })
+
+                    val algoRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        background = tonalBg(uiSurfaceLow, dp(16))
+                        setPadding(dp(4), dp(4), dp(4), dp(4))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(10)
+                        }
+                    }
+
+                    val nameBox = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        background = tonalBg(uiSurfaceLow, dp(16))
+                        setPadding(dp(14), dp(10), dp(14), dp(10))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(8)
+                        }
+                    }
+                    nameBox.addView(TextView(this).apply {
+                        text = tr("Имя файла ключа в ~/.ssh", "Key filename in ~/.ssh")
+                        setTextColor(uiAccent)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    })
+                    val nameEt = EditText(this).apply {
+                        setText("id_ed25519")
+                        hint = "id_ed25519"
+                        setHintTextColor(COLOR_TEXT_DIM)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                        setSingleLine(true)
+                        background = null
+                        setPadding(0, dp(4), 0, 0)
+                    }
+                    nameBox.addView(nameEt)
+
+                    val commentBox = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        background = tonalBg(uiSurfaceLow, dp(16))
+                        setPadding(dp(14), dp(10), dp(14), dp(10))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(14)
+                        }
+                    }
+                    commentBox.addView(TextView(this).apply {
+                        text = tr("Комментарий (-C)", "Comment (-C)")
+                        setTextColor(uiAccent)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    })
+                    val commentEt = EditText(this).apply {
+                        setText("termux@android")
+                        hint = "user@device"
+                        setHintTextColor(COLOR_TEXT_DIM)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setSingleLine(true)
+                        background = null
+                        setPadding(0, dp(4), 0, 0)
+                    }
+                    commentBox.addView(commentEt)
+
+                    val algoBtns = ArrayList<TextView>(2)
+                    val algos = listOf("ed25519" to "Ed25519 (Быстрый)", "rsa" to "RSA 4096")
+                    fun syncAlgoTabs() {
+                        for ((idx, pair) in algos.withIndex()) {
+                            val isSel = (selectedAlgo == pair.first)
+                            val tv = algoBtns[idx]
+                            tv.background = makeConnectedSegmentDrawable(
+                                if (isSel) uiAccentContainer else uiSurfaceHigh,
+                                if (idx == 0 || isSel) dpF(12f) else dpF(4f),
+                                if (idx == 1 || isSel) dpF(12f) else dpF(4f)
+                            )
+                            tv.setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
+                        }
+                    }
+                    for ((idx, pair) in algos.withIndex()) {
+                        val tv = TextView(this).apply {
+                            text = pair.second
+                            gravity = Gravity.CENTER
+                            setSingleLine(true)
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            setPadding(dp(10), dp(9), dp(10), dp(9))
+                            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                                if (idx == 0) marginEnd = dp(3)
+                            }
+                            attachSmoothPressAnimation(this, 0.95f)
+                            setOnClickListener {
+                                triggerHaptic(0.8f)
+                                selectedAlgo = pair.first
+                                val curName = nameEt.text.toString().trim()
+                                if (curName == "id_ed25519" || curName == "id_rsa" || curName.isEmpty()) {
+                                    nameEt.setText(if (selectedAlgo == "rsa") "id_rsa" else "id_ed25519")
+                                }
+                                syncAlgoTabs()
+                            }
+                        }
+                        algoBtns.add(tv)
+                        algoRow.addView(tv)
+                    }
+                    syncAlgoTabs()
+
+                    gSheet.addView(algoRow)
+                    gSheet.addView(nameBox)
+                    gSheet.addView(commentBox)
+
+                    val btnRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.END
+                    }
+                    btnRow.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { gDlg.dismiss() })
+                    btnRow.addView(makeExpressiveChip(tr("Создать ключ", "Generate key"), true) {
+                        val keyName = nameEt.text.toString().trim().ifEmpty {
+                            if (selectedAlgo == "rsa") "id_rsa" else "id_ed25519"
+                        }
+                        val commentStr = commentEt.text.toString().trim()
+                        gDlg.dismiss()
+                        Toast.makeText(this, tr("Генерация ключа $keyName…", "Generating $keyName…"), Toast.LENGTH_SHORT).show()
+                        generateSshKeyPairInVault(keyName, selectedAlgo, commentStr) { ok, msg, _ ->
+                            if (ok) {
+                                Toast.makeText(this, tr("Ключ создан: $keyName", "Created key: $keyName"), Toast.LENGTH_SHORT).show()
+                                rebuildVaultList()
+                            } else {
+                                Toast.makeText(this, "Error: $msg", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    })
+                    gSheet.addView(btnRow)
+                    gDlg.show()
+                }
+
+                fun openImportKeySheet() {
+                    val (iDlg, iSheet) = createExpressiveDialog(430)
+                    val hero = FrameLayout(this).apply {
+                        background = tonalBg(uiAccentContainer, dp(18))
+                        layoutParams = LinearLayout.LayoutParams(dp(54), dp(54)).apply {
+                            gravity = Gravity.CENTER_HORIZONTAL
+                            bottomMargin = dp(10)
+                        }
+                        addView(MaterialIconView(this@TermuxActivity, M3Icon.UPLOAD, uiAccent, 26f, 2.15f))
+                    }
+                    iSheet.addView(hero)
+                    iSheet.addView(TextView(this).apply {
+                        text = tr("Импорт SSH-ключа в хранилище", "Import SSH key into vault")
+                        gravity = Gravity.CENTER
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                        setPadding(0, 0, 0, dp(12))
+                    })
+
+                    val pickFileCard = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(14), dp(12), dp(14), dp(12))
+                        background = tonalBg(uiAccentContainer, dp(18))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(10)
+                        }
+                        attachSmoothPressAnimation(this, 0.97f)
+                        setOnClickListener {
+                            triggerHaptic(0.85f)
+                            iDlg.dismiss()
+                            launchSystemFilePickerForImport { uri ->
+                                Thread {
+                                    try {
+                                        val rawName = queryUriDisplayName(uri).replace("[^a-zA-Z0-9._-]".toRegex(), "_").ifEmpty { "imported_key" }
+                                        val content = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                                        if (content.contains("PRIVATE KEY")) {
+                                            val dst = File(sshVaultDir, rawName.removeSuffix(".pem").removeSuffix(".key"))
+                                            dst.writeText(if (content.endsWith("
+")) content else "$content
+")
+                                            Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", "600", dst.absolutePath)).waitFor()
+                                            // Derive public key if possible
+                                            try {
+                                                val usrPrefix = File(appRootDir, "usr")
+                                                val keygenBin = File(usrPrefix, "bin/ssh-keygen")
+                                                val env = arrayOf(
+                                                    "HOME=${File(appRootDir, "home").absolutePath}",
+                                                    "PREFIX=${usrPrefix.absolutePath}",
+                                                    "PATH=${usrPrefix.absolutePath}/bin:/system/bin",
+                                                    "LD_LIBRARY_PATH=${usrPrefix.absolutePath}/lib"
+                                                )
+                                                val p = Runtime.getRuntime().exec(arrayOf(keygenBin.absolutePath, "-y", "-f", dst.absolutePath), env, sshVaultDir)
+                                                val pubOut = p.inputStream.bufferedReader().readText().trim()
+                                                if (p.waitFor() == 0 && pubOut.startsWith("ssh-")) {
+                                                    File(sshVaultDir, "${dst.name}.pub").writeText("$pubOut
+")
+                                                }
+                                            } catch (_: Throwable) {}
+                                            runOnUiThread {
+                                                Toast.makeText(this@TermuxActivity, tr("Импортирован ключ: ${dst.name}", "Imported key: ${dst.name}"), Toast.LENGTH_SHORT).show()
+                                                rebuildVaultList()
+                                            }
+                                        } else {
+                                            val staged = nativeStageKeyOrParseFileZillaXml(content, false)
+                                            runOnUiThread {
+                                                if (staged.isNotEmpty()) {
+                                                    Toast.makeText(this@TermuxActivity, tr("Ключ добавлен в хранилище", "Key staged in vault"), Toast.LENGTH_SHORT).show()
+                                                    rebuildVaultList()
+                                                } else {
+                                                    Toast.makeText(this@TermuxActivity, tr("Файл не содержит приватного SSH-ключа", "File is not a private SSH key"), Toast.LENGTH_LONG).show()
+                                                }
+                                            }
+                                        }
+                                    } catch (e: Throwable) {
+                                        runOnUiThread {
+                                            Toast.makeText(this@TermuxActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }.start()
+                            }
+                        }
+                    }
+                    pickFileCard.addView(
+                        FrameLayout(this).apply {
+                            background = tonalBg(blendColor(uiAccentContainer, uiAccent, 0.22f), dp(12))
+                            layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
+                                marginEnd = dp(12)
+                            }
+                            addView(MaterialIconView(this@TermuxActivity, M3Icon.FOLDER_OPEN, uiOnAccentContainer, 20f, 2.0f))
+                        }
+                    )
+                    val pfCol = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    }
+                    pfCol.addView(TextView(this).apply {
+                        text = tr("Выбрать файл ключа через проводник", "Select key file via Android picker")
+                        setTextColor(uiOnAccentContainer)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                    })
+                    pfCol.addView(TextView(this).apply {
+                        text = tr("Поддерживаются OpenSSH, PEM, id_ed25519, id_rsa", "Supports OpenSSH, PEM, id_ed25519, id_rsa")
+                        setTextColor(uiAccent)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    })
+                    pickFileCard.addView(pfCol)
+                    iSheet.addView(pickFileCard)
+
+                    val nameInputBox = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        background = tonalBg(uiSurfaceLow, dp(16))
+                        setPadding(dp(14), dp(10), dp(14), dp(10))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(8)
+                        }
+                    }
+                    nameInputBox.addView(TextView(this).apply {
+                        text = tr("Имя ключа в хранилище", "Key name in vault")
+                        setTextColor(uiAccent)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    })
+                    val nameEt = EditText(this).apply {
+                        setText("imported_ed25519")
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setSingleLine(true)
+                        background = null
+                        setPadding(0, dp(3), 0, 0)
+                    }
+                    nameInputBox.addView(nameEt)
+                    iSheet.addView(nameInputBox)
+
+                    val pemBox = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        background = tonalBg(uiSurfaceLow, dp(16))
+                        setPadding(dp(14), dp(10), dp(14), dp(10))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(12)
+                        }
+                    }
+                    pemBox.addView(TextView(this).apply {
+                        text = tr("Или вставьте приватный ключ (PEM / OpenSSH)", "Or paste private key text (PEM / OpenSSH)")
+                        setTextColor(uiAccent)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    })
+                    val pemEt = EditText(this).apply {
+                        hint = "-----BEGIN OPENSSH PRIVATE KEY-----\n..."
+                        setHintTextColor(COLOR_TEXT_DIM)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.MONOSPACE
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        minLines = 3
+                        maxLines = 6
+                        gravity = Gravity.TOP or Gravity.START
+                        background = null
+                        setPadding(0, dp(4), 0, 0)
+                    }
+                    pemBox.addView(pemEt)
+                    iSheet.addView(pemBox)
+
+                    val bRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.END
+                    }
+                    bRow.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) { iDlg.dismiss() })
+                    bRow.addView(makeExpressiveChip(tr("Сохранить в хранилище", "Save to vault"), true) {
+                        val pem = pemEt.text.toString().trim()
+                        val kName = nameEt.text.toString().trim().replace("[^a-zA-Z0-9._-]".toRegex(), "_").ifEmpty { "imported_key" }
+                        if (!pem.contains("PRIVATE KEY")) {
+                            Toast.makeText(this, tr("Вставьте корректный приватный ключ", "Paste a valid private key"), Toast.LENGTH_SHORT).show()
+                            return@makeExpressiveChip
+                        }
+                        val dst = File(sshVaultDir, kName)
+                        dst.writeText(if (pem.endsWith("
+")) pem else "$pem
+")
+                        try {
+                            Runtime.getRuntime().exec(arrayOf("/system/bin/chmod", "600", dst.absolutePath)).waitFor()
+                        } catch (_: Throwable) {}
+                        iDlg.dismiss()
+                        Toast.makeText(this, tr("Ключ сохранён: ${dst.name}", "Saved key: ${dst.name}"), Toast.LENGTH_SHORT).show()
+                        rebuildVaultList()
+                    })
+                    iSheet.addView(bRow)
+                    iDlg.show()
+                }
+
+                rebuildVaultList = {
+                    vaultCol.removeAllViews()
+
+                    // Connected Material 3 Expressive Top Action Capsule: [ + Создать ключ | Импорт ключа ]
+                    val topActionsGroup = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        background = tonalBg(uiSurfaceLow, dp(22))
+                        setPadding(dp(4), dp(4), dp(4), dp(4))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(14)
+                        }
+                    }
+
+                    val createKeyBtn = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER
+                        background = makeConnectedSegmentDrawable(uiAccentContainer, dpF(18f), dpF(5f))
+                        setPadding(dp(14), dp(11), dp(14), dp(11))
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginEnd = dp(3)
+                        }
+                        attachSmoothPressAnimation(this, 0.95f)
+                        setOnClickListener {
+                            triggerHaptic(0.85f)
+                            openGenerateKeySheet()
+                        }
+                    }
+                    createKeyBtn.addView(
+                        MaterialIconView(this, M3Icon.ADD, uiAccent, 18.5f, 2.15f).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(19), dp(19)).apply {
+                                marginEnd = dp(6)
+                            }
+                        }
+                    )
+                    createKeyBtn.addView(TextView(this).apply {
+                        text = tr("Создать ключ", "Generate key")
+                        setSingleLine(true)
+                        setTextColor(uiOnAccentContainer)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    })
+
+                    val importKeyBtn = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER
+                        background = makeConnectedSegmentDrawable(uiSurfaceHigh, dpF(5f), dpF(18f))
+                        setPadding(dp(14), dp(11), dp(14), dp(11))
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                        attachSmoothPressAnimation(this, 0.95f)
+                        setOnClickListener {
+                            triggerHaptic(0.85f)
+                            openImportKeySheet()
+                        }
+                    }
+                    importKeyBtn.addView(
+                        MaterialIconView(this, M3Icon.UPLOAD, uiAccent, 18f, 2.0f).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(19), dp(19)).apply {
+                                marginEnd = dp(6)
+                            }
+                        }
+                    )
+                    importKeyBtn.addView(TextView(this).apply {
+                        text = tr("Импортировать", "Import key")
+                        setSingleLine(true)
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    })
+
+                    topActionsGroup.addView(createKeyBtn)
+                    topActionsGroup.addView(importKeyBtn)
+                    vaultCol.addView(topActionsGroup)
+
+                    val keys = listSshVaultPrivateKeys()
+                    if (keys.isEmpty()) {
+                        val emptyCard = LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            gravity = Gravity.CENTER
+                            background = tonalBg(uiSurfaceLow, dp(24))
+                            setPadding(dp(24), dp(36), dp(24), dp(36))
+                        }
+                        emptyCard.addView(
+                            FrameLayout(this).apply {
+                                background = tonalBg(uiAccentContainer, dp(16))
+                                layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)).apply {
+                                    bottomMargin = dp(12)
+                                }
+                                addView(MaterialIconView(this@TermuxActivity, M3Icon.KEY, uiAccent, 25f, 2.1f))
+                            }
+                        )
+                        emptyCard.addView(TextView(this).apply {
+                            text = tr("Хранилище SSH-ключей пусто", "SSH Key Vault is empty")
+                            gravity = Gravity.CENTER
+                            setTextColor(COLOR_TEXT_BRIGHT)
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
+                        })
+                        emptyCard.addView(TextView(this).apply {
+                            text = tr(
+                                "Создайте новый ключ Ed25519 / RSA 4096 или импортируйте готовый ключ. Все ключи из хранилища доступны при создании SSH-сервера.",
+                                "Generate a new Ed25519 / RSA 4096 key or import an existing private key. All vault keys are offered when creating an SSH server."
+                            )
+                            gravity = Gravity.CENTER
+                            setTextColor(COLOR_TEXT_DIM)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            setPadding(0, dp(6), 0, 0)
+                        })
+                        vaultCol.addView(emptyCard)
+                    } else {
+                        vaultCol.addView(makeSectionLabel(tr("Сохранённые ключи (${keys.size})", "Saved keys (${keys.size})")))
+                        for ((kIdx, privFile) in keys.withIndex()) {
+                            val pubFile = File(sshVaultDir, "${privFile.name}.pub")
+                            val pubTxt = try { if (pubFile.exists()) pubFile.readText().trim() else "" } catch (_: Throwable) { "" }
+                            val algoBadge = detectSshKeyAlgorithmBadge(privFile)
+
+                            val card = LinearLayout(this).apply {
+                                orientation = LinearLayout.VERTICAL
+                                setPadding(dp(16), dp(14), dp(14), dp(14))
+                                background = segmentedCardBg(kIdx, keys.size, uiSurfaceLow, 0, 22f, 5f)
+                                layoutParams = LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT
+                                ).apply {
+                                    bottomMargin = if (kIdx < keys.lastIndex) dp(3) else dp(12)
+                                }
+                            }
+
+                            val topRow = LinearLayout(this).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER_VERTICAL
+                            }
+                            topRow.addView(
+                                FrameLayout(this).apply {
+                                    background = tonalBg(uiAccentContainer, dp(13))
+                                    layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                                        marginEnd = dp(12)
+                                    }
+                                    addView(MaterialIconView(this@TermuxActivity, M3Icon.KEY, uiAccent, 20f, 2.05f))
+                                }
+                            )
+                            val metaCol = LinearLayout(this).apply {
+                                orientation = LinearLayout.VERTICAL
+                                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                            }
+                            metaCol.addView(TextView(this).apply {
+                                text = privFile.name
+                                setSingleLine(true)
+                                setTextColor(COLOR_TEXT_BRIGHT)
+                                typeface = Typeface.DEFAULT_BOLD
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            })
+                            metaCol.addView(TextView(this).apply {
+                                text = privFile.absolutePath
+                                setSingleLine(true)
+                                ellipsize = TextUtils.TruncateAt.START
+                                setTextColor(COLOR_TEXT_DIM)
+                                typeface = Typeface.MONOSPACE
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                            })
+                            topRow.addView(metaCol)
+
+                            topRow.addView(TextView(this).apply {
+                                text = algoBadge
+                                setTextColor(uiAccent)
+                                typeface = Typeface.MONOSPACE
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                                background = tonalBg(uiAccentContainer, dp(8))
+                                setPadding(dp(9), dp(4), dp(9), dp(4))
+                            })
+                            card.addView(topRow)
+
+                            if (pubTxt.isNotEmpty()) {
+                                card.addView(TextView(this).apply {
+                                    text = pubTxt
+                                    maxLines = 2
+                                    ellipsize = TextUtils.TruncateAt.MIDDLE
+                                    setTextIsSelectable(true)
+                                    setTextColor(uiAccent)
+                                    typeface = Typeface.MONOSPACE
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                                    background = tonalBg(uiSurfaceContainer, dp(12))
+                                    setPadding(dp(11), dp(8), dp(11), dp(8))
+                                    layoutParams = LinearLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.WRAP_CONTENT
+                                    ).apply {
+                                        topMargin = dp(10)
+                                    }
+                                })
+                            }
+
+                            val actionsRow = LinearLayout(this).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                                setPadding(0, dp(10), 0, 0)
+                            }
+                            if (pubTxt.isNotEmpty()) {
+                                actionsRow.addView(makeExpressiveChip(tr("Копировать .pub", "Copy .pub"), true) {
+                                    copyToClipboard(pubTxt, true)
+                                })
+                            }
+                            actionsRow.addView(makeExpressiveChip(tr("Путь", "Copy path"), false) {
+                                copyToClipboard(privFile.absolutePath, true)
+                            })
+                            actionsRow.addView(
+                                makeExpressiveChip(
+                                    title = tr("Удалить", "Delete"),
+                                    selected = false,
+                                    accentColor = COLOR_ROOT,
+                                    containerColor = COLOR_ROOT_CONTAINER
+                                ) {
+                                    privFile.delete()
+                                    if (pubFile.exists()) pubFile.delete()
+                                    rebuildVaultList()
+                                }
+                            )
+                            card.addView(actionsRow)
+                            vaultCol.addView(card)
+                        }
+                    }
+                }
+
+                rebuildVaultList()
+            }
+        }
+
+        // ====================================================================
         // Full-Screen Material Design 3 SSH Server Configuration Page
         // (Replaces floating dialog; default command is strictly `ssh root@ip`!)
         // ====================================================================
@@ -6602,26 +8057,28 @@ class TermuxActivity : Activity() {
 
                 // Section 2: Main Connection Parameters
                 form.addView(makeSectionLabel(tr("Подключение и авторизация", "Connection & authentication")))
-                val (labelCard, labelEt) = makeM3InputCard(M3Icon.SERVER, tr("Название профиля", "Profile name"), existing?.label ?: "", tr("Мой сервер", "My Server"), 0, 6)
-                val (hostCard, hostEt) = makeM3InputCard(M3Icon.PING, tr("Адрес сервера (IP или домен)", "Host (IP or domain)"), existing?.host ?: "", "192.168.1.10", 1, 6)
-                val (userCard, userEt) = makeM3InputCard(M3Icon.TERMINAL, tr("Пользователь", "Username"), existing?.username ?: "root", "root", 2, 6)
-                val (portCard, portEt) = makeM3InputCard(M3Icon.SLIDERS, tr("Порт SSH (-p добавляется только если != 22)", "SSH Port (-p added only if != 22)"), (existing?.port ?: 22).toString(), "22", 3, 6, isNumeric = true)
+                val (labelCard, labelEt) = makeM3InputCard(M3Icon.SERVER, tr("Название профиля", "Profile name"), existing?.label ?: "", tr("Мой сервер", "My Server"), 0, 7)
+                val (hostCard, hostEt) = makeM3InputCard(M3Icon.PING, tr("Адрес сервера (IP или домен)", "Host (IP or domain)"), existing?.host ?: "", "192.168.1.10", 1, 7)
+                val (userCard, userEt) = makeM3InputCard(M3Icon.TERMINAL, tr("Пользователь", "Username"), existing?.username ?: "root", "root", 2, 7)
+                val (portCard, portEt) = makeM3InputCard(M3Icon.SLIDERS, tr("Порт SSH (-p добавляется только если != 22)", "SSH Port (-p added only if != 22)"), (existing?.port ?: 22).toString(), "22", 3, 7, isNumeric = true)
 
                 var selectedAuth = existing?.authType ?: 0
-                val defaultKeyPath = "/data/data/com.termuxx/file/home/.ssh/id_ed25519"
+                val vaultKeysInitial = listSshVaultPrivateKeys()
+                val defaultKeyPath = vaultKeysInitial.firstOrNull()?.absolutePath ?: File(sshVaultDir, "id_ed25519").absolutePath
                 val authOptions = listOf(
                     tr("Пароль или без флагов (по умолчанию)", "Password or default (no extra flags)"),
                     tr("Приватный SSH-ключ (-i)", "Private SSH key (-i)"),
                     tr("Проброс SSH-агента (-A)", "SSH Agent forwarding (-A)")
                 )
                 val authCardHolder = FrameLayout(this)
+                val vaultKeySelectorHolder = FrameLayout(this)
                 val (secretCard, secretEt) = makeM3InputCard(
                     M3Icon.KEY,
                     if (selectedAuth == 1) tr("Путь к приватному ключу (-i)", "Private key path (-i)") else tr("Пароль (для авто-ввода)", "Password (for auto-login)"),
                     existing?.secretOrKeyPath ?: "",
                     if (selectedAuth == 1) defaultKeyPath else tr("Необязательно", "Optional"),
-                    5,
-                    6
+                    6,
+                    7
                 )
 
                 lateinit var rebuildAuthCard: () -> Unit
@@ -6635,16 +8092,128 @@ class TermuxActivity : Activity() {
                             items = authOptions,
                             selectedIndex = selectedAuth,
                             index = 4,
-                            total = 6
+                            total = 7
                         ) { chosen ->
                             selectedAuth = chosen
                             if (chosen == 1 && secretEt.text.isNullOrBlank()) {
-                                secretEt.setText(defaultKeyPath)
+                                val latestVault = listSshVaultPrivateKeys()
+                                secretEt.setText(latestVault.firstOrNull()?.absolutePath ?: defaultKeyPath)
                             }
                             rebuildAuthCard()
                             updateLivePreview()
                         }
                     )
+
+                    // Item 6: Offer selecting a key from the SSH Key Vault when creating/editing an SSH server!
+                    vaultKeySelectorHolder.removeAllViews()
+                    val vaultKeys = listSshVaultPrivateKeys()
+                    val curPath = secretEt.text.toString().trim()
+                    val matchedKey = vaultKeys.firstOrNull { it.absolutePath == curPath }
+                    val vaultCard = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(16), dp(12), dp(16), dp(12))
+                        background = segmentedCardBg(5, 7, uiSurfaceLow, 0, 20f, 5f)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(2)
+                        }
+                        attachSmoothPressAnimation(this, 0.98f)
+                        setOnClickListener {
+                            triggerHaptic(0.85f)
+                            val latestKeys = listSshVaultPrivateKeys()
+                            if (latestKeys.isEmpty()) {
+                                // Offer one-tap generation of id_ed25519 or opening the full vault
+                                showBakaSuChooseDialog(
+                                    title = tr("Хранилище ключей SSH", "SSH Key Vault"),
+                                    items = listOf(
+                                        tr("Создать ключ Ed25519 (id_ed25519) автоматически", "Auto-generate Ed25519 key (id_ed25519)"),
+                                        tr("Открыть хранилище ключей SSH…", "Open SSH Key Vault…")
+                                    ),
+                                    descriptions = listOf(
+                                        File(sshVaultDir, "id_ed25519").absolutePath,
+                                        tr("Импортировать или создать ключ вручную", "Import or generate key manually")
+                                    ),
+                                    selectedIndex = 0
+                                ) { actIdx ->
+                                    if (actIdx == 0) {
+                                        generateSshKeyPairInVault("id_ed25519", "ed25519", "termux@android") { ok, pathOrErr, _ ->
+                                            if (ok) {
+                                                selectedAuth = 1
+                                                secretEt.setText(pathOrErr)
+                                                rebuildAuthCard()
+                                                updateLivePreview()
+                                                Toast.makeText(this@TermuxActivity, tr("Ключ id_ed25519 создан и выбран", "Key id_ed25519 generated & selected"), Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(this@TermuxActivity, "Error: $pathOrErr", Toast.LENGTH_LONG).show()
+                                            }
+                                        }
+                                    } else {
+                                        openSshKeyVaultSubPage {
+                                            openSshServerSubPage(existing, onSaved)
+                                        }
+                                    }
+                                }
+                            } else {
+                                val titles = latestKeys.map { "${it.name} (${detectSshKeyAlgorithmBadge(it)})" } +
+                                    listOf(tr("Открыть хранилище ключей SSH…", "Open SSH Key Vault…"))
+                                val descs = latestKeys.map { it.absolutePath } +
+                                    listOf(tr("Создать новый или импортировать ключ", "Create new or import key"))
+                                val selIdx = latestKeys.indexOfFirst { it.absolutePath == secretEt.text.toString().trim() }.coerceAtLeast(0)
+                                showBakaSuChooseDialog(
+                                    title = tr("Выбрать ключ из хранилища SSH", "Choose key from SSH Vault"),
+                                    items = titles,
+                                    descriptions = descs,
+                                    selectedIndex = selIdx
+                                ) { chosenIdx ->
+                                    if (chosenIdx in latestKeys.indices) {
+                                        val chosenKey = latestKeys[chosenIdx]
+                                        selectedAuth = 1
+                                        secretEt.setText(chosenKey.absolutePath)
+                                        rebuildAuthCard()
+                                        updateLivePreview()
+                                    } else {
+                                        openSshKeyVaultSubPage {
+                                            openSshServerSubPage(existing, onSaved)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    vaultCard.addView(
+                        FrameLayout(this).apply {
+                            background = tonalBg(uiAccentContainer, dp(12))
+                            layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
+                                marginEnd = dp(14)
+                            }
+                            addView(MaterialIconView(this@TermuxActivity, M3Icon.KEY, uiAccent, 20f, 2.0f))
+                        }
+                    )
+                    val vCol = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    }
+                    vCol.addView(TextView(this).apply {
+                        text = tr("Ключ из хранилища SSH", "SSH Vault Key")
+                        setTextColor(COLOR_TEXT_BRIGHT)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                    })
+                    vCol.addView(TextView(this).apply {
+                        text = when {
+                            matchedKey != null -> "${matchedKey.name} (${detectSshKeyAlgorithmBadge(matchedKey)})"
+                            vaultKeys.isNotEmpty() -> tr("Доступно ключей в хранилище: ${vaultKeys.size} (нажмите для выбора)", "${vaultKeys.size} keys in vault (tap to choose)")
+                            else -> tr("Хранилище пусто — нажмите, чтобы создать или импортировать ключ", "Vault empty — tap to generate or import a key")
+                        }
+                        setTextColor(uiAccent)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                        setPadding(0, dp(2), 0, 0)
+                    })
+                    vaultCard.addView(vCol)
+                    vaultKeySelectorHolder.addView(vaultCard)
                 }
                 rebuildAuthCard()
 
@@ -6653,6 +8222,7 @@ class TermuxActivity : Activity() {
                 form.addView(userCard)
                 form.addView(portCard)
                 form.addView(authCardHolder)
+                form.addView(vaultKeySelectorHolder)
                 form.addView(secretCard)
 
                 // Section 3: Port Forwarding & Tunneling (-L, -R, -D, -J)
@@ -6850,7 +8420,7 @@ class TermuxActivity : Activity() {
                                             secretEt.setText(stagedPath)
                                             rebuildAuthCard()
                                             updateLivePreview()
-                                            Toast.makeText(this@TermuxActivity, tr("Ключ сохранён (chmod 600): $stagedPath", "Key staged (chmod 600): $stagedPath"), Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(this@TermuxActivity, tr("Ключ сохранён в хранилище: $stagedPath", "Key saved in vault: $stagedPath"), Toast.LENGTH_SHORT).show()
                                         }
                                     } else {
                                         runOnUiThread {
@@ -6946,6 +8516,7 @@ class TermuxActivity : Activity() {
                 }
             }
         }
+        openSshServerSubPageRef = ::openSshServerSubPage
 
         fun pingServerAsync(srv: SshServerProfile, badgeTv: TextView?) {
             badgeTv?.text = tr("Пинг…", "Ping…")
@@ -6988,7 +8559,7 @@ class TermuxActivity : Activity() {
             }
             val listCol = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), dp(12), dp(16), dp(104))
+                setPadding(dp(16), dp(8), dp(16), dp(108))
             }
             scroll.addView(listCol)
 
@@ -7033,193 +8604,6 @@ class TermuxActivity : Activity() {
                 FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             )
 
-            val titleRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                setPadding(dp(2), 0, dp(2), dp(10))
-            }
-
-            // Material 3 Expressive icon-only connected button group for [Пинг (M3Icon.PING) | SSH-ключи (M3Icon.KEY)]
-            val sshTopActionsGroup = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                background = tonalBg(uiSurfaceLow, dp(22))
-                setPadding(dp(4), dp(4), dp(4), dp(4))
-            }
-            val sshBtnH = dp(33)
-            val sshBaseW = dpF(44f)
-            val sshOuterR = sshBtnH * 0.5f
-            val sshInnerR = dpF(5f)
-            val sshPressProg = FloatArray(2)
-            val sshPressAnims = arrayOfNulls<ValueAnimator>(2)
-            val sshBtnViews = ArrayList<FrameLayout>(2)
-            val sshBtnBgs = ArrayList<GradientDrawable>(2)
-
-            fun updateSshTopActionsGeometry() {
-                val p0 = sshPressProg[0]
-                val p1 = sshPressProg[1]
-                val expMax = dpF(10f)
-                val d0 = expMax * p0 - expMax * p1
-                val d1 = expMax * p1 - expMax * p0
-
-                val w0 = (sshBaseW + d0).roundToInt().coerceAtLeast(dp(32))
-                val w1 = (sshBaseW + d1).roundToInt().coerceAtLeast(dp(32))
-
-                val m0 = safeClamp(p0, 0f, 1f)
-                val m1 = safeClamp(p1, 0f, 1f)
-                val r0Right = sshInnerR + (sshOuterR - sshInnerR) * m0
-                val r1Left = sshInnerR + (sshOuterR - sshInnerR) * m1
-
-                sshBtnBgs[0].setColor(blendColor(uiSurfaceHigh, uiAccentContainer, m0 * 0.85f))
-                sshBtnBgs[0].cornerRadii = floatArrayOf(
-                    sshOuterR, sshOuterR,
-                    r0Right, r0Right,
-                    r0Right, r0Right,
-                    sshOuterR, sshOuterR
-                )
-                sshBtnBgs[1].setColor(blendColor(uiSurfaceHigh, uiAccentContainer, m1 * 0.85f))
-                sshBtnBgs[1].cornerRadii = floatArrayOf(
-                    r1Left, r1Left,
-                    sshOuterR, sshOuterR,
-                    sshOuterR, sshOuterR,
-                    r1Left, r1Left
-                )
-
-                val lp0 = sshBtnViews[0].layoutParams as LinearLayout.LayoutParams
-                if (lp0.width != w0) {
-                    lp0.width = w0
-                    sshBtnViews[0].layoutParams = lp0
-                }
-                val lp1 = sshBtnViews[1].layoutParams as LinearLayout.LayoutParams
-                if (lp1.width != w1) {
-                    lp1.width = w1
-                    sshBtnViews[1].layoutParams = lp1
-                }
-            }
-
-            val sshTopSpecs = listOf<Pair<M3Icon, () -> Unit>>(
-                M3Icon.PING to {
-                    if (servers.isEmpty()) {
-                        Toast.makeText(this, tr("Нет серверов для пинга", "No servers to ping"), Toast.LENGTH_SHORT).show()
-                    } else {
-                        for (s in servers) {
-                            pingServerAsync(s, pingBadgeViews[s.id])
-                        }
-                    }
-                },
-                M3Icon.KEY to {
-                    val sshDir = File("/data/data/com.termuxx/file/home/.ssh").apply { mkdirs() }
-                    val pubFile = File(sshDir, "id_ed25519.pub")
-                    val privFile = File(sshDir, "id_ed25519")
-                    val (kDlg, kSheet) = createExpressiveDialog(420)
-                    kSheet.addView(TextView(this).apply {
-                        text = tr("SSH-ключи (ed25519)", "SSH Keys (ed25519)")
-                        setTextColor(COLOR_TEXT_BRIGHT)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
-                        typeface = Typeface.DEFAULT_BOLD
-                        setPadding(0, 0, 0, dp(8))
-                    })
-                    val pubText = if (pubFile.exists()) pubFile.readText().trim() else tr("Ключ ~/.ssh/id_ed25519.pub ещё не создан.", "Key ~/.ssh/id_ed25519.pub not generated yet.")
-                    kSheet.addView(TextView(this).apply {
-                        text = pubText
-                        setTextIsSelectable(true)
-                        setTextColor(if (pubFile.exists()) uiAccent else COLOR_TEXT_DIM)
-                        typeface = Typeface.MONOSPACE
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                        background = tonalBg(uiSurfaceLow, dp(14))
-                        setPadding(dp(12), dp(10), dp(12), dp(10))
-                    })
-                    val actRow = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.END
-                        setPadding(0, dp(12), 0, 0)
-                    }
-                    if (pubFile.exists()) {
-                        actRow.addView(makeExpressiveChip(tr("Копировать", "Copy key"), false) {
-                            copyToClipboard(pubText, true)
-                        })
-                    }
-                    actRow.addView(makeExpressiveChip(
-                        if (privFile.exists()) tr("Пересоздать", "Regenerate") else tr("Создать ed25519", "Generate ed25519"),
-                        true
-                    ) {
-                        kDlg.dismiss()
-                        dlg.dismiss()
-                        nativeSendText(
-                            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && rm -f ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub && ssh-keygen -t ed25519 -N \"\" -f ~/.ssh/id_ed25519 && cat ~/.ssh/id_ed25519.pub\n",
-                            false
-                        )
-                    })
-                    kSheet.addView(actRow)
-                    kDlg.show()
-                }
-            )
-
-            for ((bIdx, pair) in sshTopSpecs.withIndex()) {
-                val bg = makeConnectedSegmentDrawable(uiSurfaceHigh, sshOuterR, sshOuterR)
-                sshBtnBgs.add(bg)
-                var downMs = 0L
-                fun animateBtnPress(holding: Boolean) {
-                    sshPressAnims[bIdx]?.cancel()
-                    val startP = sshPressProg[bIdx]
-                    val targetP = if (holding) 1f else 0f
-                    val anim = ValueAnimator.ofFloat(0f, 1f).apply {
-                        duration = if (holding) 125L else 330L
-                        interpolator = LinearInterpolator()
-                        addUpdateListener { va ->
-                            val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                            val eased = if (holding) {
-                                1f - (1f - t) * (1f - t)
-                            } else {
-                                1f - kotlin.math.exp(-3.4f * t) * kotlin.math.cos(6.0f * t)
-                            }
-                            sshPressProg[bIdx] = safeClamp(startP + (targetP - startP) * eased, 0f, 1.25f)
-                            updateSshTopActionsGeometry()
-                        }
-                    }
-                    sshPressAnims[bIdx] = anim
-                    anim.start()
-                }
-                val releaseTask = Runnable { animateBtnPress(false) }
-
-                val btn = FrameLayout(this).apply {
-                    background = bg
-                    layoutParams = LinearLayout.LayoutParams(sshBaseW.roundToInt(), sshBtnH).apply {
-                        if (bIdx == 0) marginEnd = dp(3)
-                    }
-                    addView(MaterialIconView(this@TermuxActivity, pair.first, uiAccent, 18.5f, 2.0f))
-                    setOnTouchListener { v, ev ->
-                        when (ev.actionMasked) {
-                            MotionEvent.ACTION_DOWN -> {
-                                v.removeCallbacks(releaseTask)
-                                downMs = SystemClock.uptimeMillis()
-                                triggerHaptic(0.85f)
-                                animateBtnPress(true)
-                                false
-                            }
-                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                val held = SystemClock.uptimeMillis() - downMs
-                                if (held < 115L) {
-                                    v.postDelayed(releaseTask, safeClamp((115L - held).toFloat(), 35f, 105f).toLong())
-                                } else {
-                                    releaseTask.run()
-                                }
-                                false
-                            }
-                            else -> false
-                        }
-                    }
-                    setOnClickListener {
-                        pair.second()
-                    }
-                }
-                sshBtnViews.add(btn)
-                sshTopActionsGroup.addView(btn)
-            }
-            updateSshTopActionsGeometry()
-            titleRow.addView(sshTopActionsGroup)
-            listCol.addView(titleRow)
-
             if (servers.isEmpty()) {
                 val emptyBox = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
@@ -7245,8 +8629,8 @@ class TermuxActivity : Activity() {
                 })
                 emptyBox.addView(TextView(this).apply {
                     text = tr(
-                        "Нажмите «+» внизу справа, чтобы открыть страницу настройки нового SSH-сервера.",
-                        "Tap '+' at the bottom right to open the new SSH server configuration page."
+                        "Используйте нижнюю панель, чтобы открыть хранилище «SSH-ключи» или добавить новый сервер.",
+                        "Use the bottom dock to open the 'SSH Keys' vault or add a new SSH server."
                     )
                     gravity = Gravity.CENTER
                     setTextColor(COLOR_TEXT_DIM)
@@ -7487,7 +8871,10 @@ class TermuxActivity : Activity() {
                     }
                     badgeRow.addView(makeMiniBadge(when (srv.authType) {
                         0 -> tr("Пароль", "Pass")
-                        1 -> tr("Ключ", "Key")
+                        1 -> {
+                            val kName = srv.secretOrKeyPath.substringAfterLast('/').ifEmpty { tr("Ключ", "Key") }
+                            "🔑 $kName"
+                        }
                         else -> "Agent"
                     }))
                     if (srv.localForwards.isNotBlank()) {
@@ -7502,7 +8889,7 @@ class TermuxActivity : Activity() {
                     badgeScroll.addView(badgeRow)
                     bottomRow.addView(badgeScroll)
 
-                    // Connected M3 Expressive Action Group (like image_602ce1.png) for [Ping | SFTP]
+                    // Connected M3 Expressive Action Group for [Ping | Файлы]
                     val actionsGroup = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
@@ -7561,7 +8948,7 @@ class TermuxActivity : Activity() {
                         }
                     )
                     sftpPill.addView(TextView(this).apply {
-                        text = "SFTP"
+                        text = tr("Файлы", "Files")
                         setSingleLine(true)
                         setTextColor(uiOnAccentContainer)
                         typeface = Typeface.DEFAULT_BOLD
@@ -7575,21 +8962,187 @@ class TermuxActivity : Activity() {
                 }
             }
 
-            val addFab = FrameLayout(this).apply {
-                background = tonalBg(uiAccentContainer, dp(20))
-                elevation = dpF(8f)
-                layoutParams = FrameLayout.LayoutParams(dp(58), dp(58), Gravity.BOTTOM or Gravity.END).apply {
-                    marginEnd = dp(20)
-                    bottomMargin = dp(18)
+            // Item 6 & Item 7: Unified Material 3 Expressive Floating Bottom Dock
+            // Eliminates the empty space at the top of the SSH tab and places
+            // [ 📡 Пинг | 🔑 SSH-ключи | ＋ ] in a convenient centered floating capsule!
+            val sshBottomDockWrap = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                clipChildren = false
+                clipToPadding = false
+                setPadding(dp(24), dp(4), dp(24), dp(24))
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                )
+            }
+            val sshFloatingDock = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = makeM3FloatingSurfaceDrawable(dp(32), tintWithAccent = false)
+                elevation = dpF(12f)
+                setPadding(dp(6), dp(6), dp(6), dp(6))
+            }
+
+            val dockBtnH = dp(46)
+            val dockOuterR = dockBtnH * 0.5f
+            val dockInnerR = dpF(8f)
+            val dockBaseWidths = floatArrayOf(dpF(50f), dpF(132f), dpF(58f))
+            val dockPressProg = FloatArray(3)
+            val dockPressAnims = arrayOfNulls<ValueAnimator>(3)
+            val dockViews = ArrayList<LinearLayout>(3)
+            val dockBgs = ArrayList<GradientDrawable>(3)
+
+            fun updateSshDockGeometry() {
+                val delta = FloatArray(3)
+                val expMax = dpF(12f)
+                for (i in 0 until 3) {
+                    val p = dockPressProg[i]
+                    if (p <= 0.001f) continue
+                    val e = expMax * p
+                    when (i) {
+                        0 -> {
+                            delta[0] += e
+                            delta[1] -= e
+                        }
+                        1 -> {
+                            delta[1] += e
+                            delta[0] -= e * 0.5f
+                            delta[2] -= e * 0.5f
+                        }
+                        2 -> {
+                            delta[2] += e
+                            delta[1] -= e
+                        }
+                    }
                 }
-                addView(MaterialIconView(this@TermuxActivity, M3Icon.ADD, uiAccent, 26f, 2.35f))
-                attachSmoothPressAnimation(this, 0.90f)
-                setOnClickListener {
-                    triggerHaptic(1.0f)
-                    openSshServerSubPage(null) { renderServersTab() }
+                for (i in 0 until 3) {
+                    val m = safeClamp(dockPressProg[i], 0f, 1f)
+                    val restL = if (i == 0) dockOuterR else dockInnerR
+                    val restR = if (i == 2) dockOuterR else dockInnerR
+                    val curL = restL + (dockOuterR - restL) * m
+                    val curR = restR + (dockOuterR - restR) * m
+                    val baseFill = when (i) {
+                        2 -> uiAccent
+                        1 -> uiAccentContainer
+                        else -> blendColor(uiSurfaceHigh, uiAccentContainer, 0.28f)
+                    }
+                    val pressedFill = when (i) {
+                        2 -> blendColor(uiAccent, COLOR_TEXT_BRIGHT, 0.16f)
+                        else -> uiAccentContainer
+                    }
+                    dockBgs[i].setColor(blendColor(baseFill, pressedFill, m))
+                    dockBgs[i].cornerRadii = floatArrayOf(curL, curL, curR, curR, curR, curR, curL, curL)
+                    val wPx = (dockBaseWidths[i] + delta[i]).roundToInt().coerceAtLeast(dp(38))
+                    val lp = dockViews[i].layoutParams as LinearLayout.LayoutParams
+                    if (lp.width != wPx) {
+                        lp.width = wPx
+                        dockViews[i].layoutParams = lp
+                    }
                 }
             }
-            contentFrame.addView(addFab)
+
+            data class SshDockSpec(val icon: M3Icon, val label: String?, val tint: Int, val onClick: () -> Unit)
+            val dockSpecs = listOf(
+                SshDockSpec(M3Icon.PING, null, COLOR_TEXT_BRIGHT) {
+                    if (servers.isEmpty()) {
+                        Toast.makeText(this, tr("Нет серверов для пинга", "No servers to ping"), Toast.LENGTH_SHORT).show()
+                    } else {
+                        for (s in servers) {
+                            pingServerAsync(s, pingBadgeViews[s.id])
+                        }
+                    }
+                },
+                SshDockSpec(M3Icon.KEY, tr("SSH-ключи", "SSH Keys"), uiOnAccentContainer) {
+                    openSshKeyVaultSubPage { renderServersTab() }
+                },
+                SshDockSpec(M3Icon.ADD, null, uiSurface) {
+                    openSshServerSubPage(null) { renderServersTab() }
+                }
+            )
+
+            for ((dIdx, spec) in dockSpecs.withIndex()) {
+                val bg = makeConnectedSegmentDrawable(uiSurfaceHigh, dockOuterR, dockOuterR)
+                dockBgs.add(bg)
+                var downMs = 0L
+                fun animateDockHold(holding: Boolean) {
+                    dockPressAnims[dIdx]?.cancel()
+                    val startP = dockPressProg[dIdx]
+                    val targetP = if (holding) 1f else 0f
+                    dockPressAnims[dIdx] = ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = if (holding) 120L else 300L
+                        interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                        addUpdateListener { va ->
+                            val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                            dockPressProg[dIdx] = startP + (targetP - startP) * t
+                            updateSshDockGeometry()
+                        }
+                        start()
+                    }
+                }
+                val relTask = Runnable { animateDockHold(false) }
+
+                val btn = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    background = bg
+                    layoutParams = LinearLayout.LayoutParams(dockBaseWidths[dIdx].roundToInt(), dockBtnH).apply {
+                        if (dIdx < 2) marginEnd = dp(3)
+                    }
+                    addView(
+                        MaterialIconView(
+                            this@TermuxActivity,
+                            spec.icon,
+                            spec.tint,
+                            if (dIdx == 2) 23f else 20f,
+                            2.15f
+                        ).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(21), dp(21)).apply {
+                                if (!spec.label.isNullOrEmpty()) marginEnd = dp(7)
+                            }
+                        }
+                    )
+                    if (!spec.label.isNullOrEmpty()) {
+                        addView(TextView(this@TermuxActivity).apply {
+                            text = spec.label
+                            setSingleLine(true)
+                            setTextColor(spec.tint)
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.8f)
+                        })
+                    }
+                    setOnTouchListener { v, ev ->
+                        when (ev.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> {
+                                v.removeCallbacks(relTask)
+                                downMs = SystemClock.uptimeMillis()
+                                triggerHaptic(0.85f)
+                                animateDockHold(true)
+                                false
+                            }
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                val held = SystemClock.uptimeMillis() - downMs
+                                if (held < 115L) {
+                                    v.postDelayed(relTask, (115L - held).coerceIn(35L, 100L))
+                                } else {
+                                    relTask.run()
+                                }
+                                false
+                            }
+                            else -> false
+                        }
+                    }
+                    setOnClickListener {
+                        spec.onClick()
+                    }
+                }
+                dockViews.add(btn)
+                sshFloatingDock.addView(btn)
+            }
+            updateSshDockGeometry()
+            sshBottomDockWrap.addView(sshFloatingDock)
+            contentFrame.addView(sshBottomDockWrap)
         }
 
         // ====================================================================
@@ -7786,55 +9339,10 @@ class TermuxActivity : Activity() {
             }
             contentFrame.addView(mainSftpCol)
 
-            val usrDir = File("/data/data/com.termuxx/file/usr")
-            val sdDir = Environment.getExternalStorageDirectory()
-            val savedServers = loadSshServers()
-
-            fun computeSftpSourceIdx(): Int = when {
-                activeSftpServer != null -> 3
-                localCurrentDir.absolutePath.startsWith(usrDir.absolutePath) -> 1
-                localCurrentDir.absolutePath.startsWith(sdDir.absolutePath) ||
-                    localCurrentDir.absolutePath.startsWith("/sdcard") ||
-                    localCurrentDir.absolutePath.startsWith("/storage") -> 2
-                else -> 0
-            }
+            fun computeSftpSourceIdx(): Int = currentSftpSourceCode()
 
             fun currentActivePathStr(): String =
                 if (activeSftpServer == null) localCurrentDir.absolutePath else remoteCurrentPath
-
-            var currentSftpSourceIdx = computeSftpSourceIdx()
-
-            val sourceBarOuter = FrameLayout(this).apply {
-                background = tonalBg(uiSurfaceLow, dp(16))
-                setPadding(dp(4), dp(4), dp(4), dp(4))
-                clipChildren = true
-                clipToPadding = true
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    setMargins(dp(14), dp(8), dp(14), dp(4))
-                }
-            }
-            val slidingSourcePill = View(this).apply {
-                background = makeLiquidGlassPillDrawable(uiAccentContainer, dp(12))
-                layoutParams = FrameLayout.LayoutParams(0, 0)
-            }
-            sourceBarOuter.addView(slidingSourcePill)
-
-            val sourceBarWrap = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                layoutParams = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-            }
-            sourceBarOuter.addView(sourceBarWrap)
-
-            val segTabs = ArrayList<LinearLayout>()
-            val segIcons = ArrayList<MaterialIconView>()
-            val segLabels = ArrayList<TextView>()
 
             lateinit var rebuildBreadcrumbs: (Boolean) -> Unit
             lateinit var rebuildClipBanner: () -> Unit
@@ -7844,198 +9352,18 @@ class TermuxActivity : Activity() {
             lateinit var openMaterialImportSheet: () -> Unit
 
             fun updateSourceBarSelection(newIdx: Int, animate: Boolean) {
-                val prevIdx = currentSftpSourceIdx
-                val dir = if (newIdx >= prevIdx) 1 else -1
-                currentSftpSourceIdx = newIdx
                 prevSftpSourceIdx = newIdx
-                for (i in 0 until segTabs.size) {
-                    val isSel = (i == newIdx)
-                    segIcons[i].tintColor = if (isSel) uiAccent else COLOR_TEXT_DIM
-                    segIcons[i].invalidate()
-                    segLabels[i].setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                    segLabels[i].typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                    if (i == 3 && activeSftpServer != null) {
-                        segLabels[i].text = activeSftpServer!!.label
-                    } else if (i == 3) {
-                        segLabels[i].text = "SSH"
-                    }
-                    if (animate) {
-                        if (isSel && prevIdx != newIdx) {
-                            triggerFolderShakeAnimation(segIcons[i], dir)
-                        }
-                        segTabs[i].animate()
-                            .scaleX(if (isSel) 1.04f else 1.0f)
-                            .scaleY(if (isSel) 1.04f else 1.0f)
-                            .setDuration(220L)
-                            .setInterpolator(aosp17SpatialInterpolator)
-                            .start()
-                    } else {
-                        segTabs[i].scaleX = if (isSel) 1.04f else 1.0f
-                        segTabs[i].scaleY = if (isSel) 1.04f else 1.0f
-                    }
-                }
-                val targetTab = segTabs.getOrNull(newIdx) ?: return
-                if (targetTab.width > 0) {
-                    animateLiquidSegmentedPill(slidingSourcePill, sourceBarOuter, targetTab, animate)
-                }
+                rebuildUniversalTermPill(animate)
             }
 
-            val localGroups = listOf(
-                Quadruple("Home", M3Icon.FOLDER, homeDir, false),
-                Quadruple("Usr", M3Icon.FOLDER, usrDir, false),
-                Quadruple("Storage", M3Icon.STORAGE, sdDir, true)
-            )
-            for ((gIdx, grp) in localGroups.withIndex()) {
-                val (lbl, ic, dir, requiresPerm) = grp
-                val isSel = (currentSftpSourceIdx == gIdx)
-                val icView = MaterialIconView(
-                    this,
-                    ic,
-                    if (isSel) uiAccent else COLOR_TEXT_DIM,
-                    15.5f,
-                    1.95f
-                ).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply {
-                        marginEnd = dp(4)
-                    }
-                }
-                val lblView = TextView(this).apply {
-                    text = lbl
-                    gravity = Gravity.CENTER
-                    setSingleLine(true)
-                    typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                }
-                val segTab = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER
-                    setPadding(dp(6), dp(9), dp(6), dp(9))
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                    addView(icView)
-                    addView(lblView)
-                    attachSmoothPressAnimation(this, 0.95f)
-                    setOnClickListener {
-                        triggerHaptic(0.8f)
-                        val switchToDir = {
-                            if (currentSftpSourceIdx != gIdx || localCurrentDir != dir || activeSftpServer != null) {
-                                sftpTransitionDir = if (gIdx >= currentSftpSourceIdx) 1 else -1
-                                activeSftpServer = null
-                                localCurrentDir = dir
-                                updateSourceBarSelection(gIdx, animate = true)
-                                rebuildBreadcrumbs(true)
-                                rebuildClipBanner()
-                                refreshSftpListInPlace(false, null)
-                            } else {
-                                triggerFolderShakeAnimation(icView, 1)
-                            }
-                        }
-                        if (requiresPerm && !hasAllFilesAccessPermission() && !hasStandardStoragePermission()) {
-                            showStoragePermissionsModal {
-                                switchToDir()
-                            }
-                            return@setOnClickListener
-                        }
-                        if (!dir.exists()) dir.mkdirs()
-                        switchToDir()
-                    }
-                }
-                segTabs.add(segTab)
-                segIcons.add(icView)
-                segLabels.add(lblView)
-                sourceBarWrap.addView(segTab)
-            }
-
-            if (savedServers.isNotEmpty()) {
-                val isRemoteSel = (currentSftpSourceIdx == 3)
-                val sshIcView = MaterialIconView(
-                    this,
-                    M3Icon.SERVER,
-                    if (isRemoteSel) uiAccent else COLOR_TEXT_DIM,
-                    15.5f,
-                    1.6f
-                ).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply {
-                        marginEnd = dp(4)
-                    }
-                }
-                val sshLblView = TextView(this).apply {
-                    text = if (isRemoteSel && activeSftpServer != null) activeSftpServer!!.label else "SSH"
-                    gravity = Gravity.CENTER
-                    setSingleLine(true)
-                    typeface = if (isRemoteSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    setTextColor(if (isRemoteSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                }
-                val sshSegTab = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER
-                    setPadding(dp(6), dp(9), dp(6), dp(9))
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.08f)
-                    addView(sshIcView)
-                    addView(sshLblView)
-                    attachSmoothPressAnimation(this, 0.95f)
-                    setOnClickListener {
-                        triggerHaptic(0.8f)
-                        val connectToSrv: (SshServerProfile) -> Unit = { srv ->
-                            sftpTransitionDir = 1
-                            activeSftpServer = srv
-                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
-                            updateSourceBarSelection(3, animate = true)
-                            rebuildBreadcrumbs(true)
-                            rebuildClipBanner()
-                            refreshSftpListInPlace(false, null)
-                        }
-                        if (savedServers.size == 1 && activeSftpServer == null) {
-                            connectToSrv(savedServers[0])
-                        } else {
-                            val curIdx = savedServers.indexOfFirst { it.id == activeSftpServer?.id }.coerceAtLeast(0)
-                            showBakaSuChooseDialog(
-                                title = tr("Выберите SSH-сервер", "Select SSH Server"),
-                                items = savedServers.map { it.label },
-                                descriptions = savedServers.map { "${it.username}@${it.host}:${it.port}" },
-                                selectedIndex = curIdx
-                            ) { chosen ->
-                                connectToSrv(savedServers[chosen])
-                            }
-                        }
-                    }
-                }
-                segTabs.add(sshSegTab)
-                segIcons.add(sshIcView)
-                segLabels.add(sshLblView)
-                sourceBarWrap.addView(sshSegTab)
-            }
-
-            val maxSegIdx = max(0, segTabs.lastIndex)
-            val fromIdx = safeClampInt(prevSftpSourceIdx, 0, maxSegIdx)
-            val toIdx = safeClampInt(currentSftpSourceIdx, 0, maxSegIdx)
-            prevSftpSourceIdx = toIdx
-            sourceBarWrap.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
-                override fun onPreDraw(): Boolean {
-                    if (sourceBarWrap.viewTreeObserver.isAlive) {
-                        sourceBarWrap.viewTreeObserver.removeOnPreDrawListener(this)
-                    }
-                    val targetView = segTabs.getOrNull(toIdx) ?: return true
-                    val fromView = segTabs.getOrNull(fromIdx) ?: targetView
-                    slidingSourcePill.layoutParams = FrameLayout.LayoutParams(fromView.width, fromView.height)
-                    slidingSourcePill.translationX = fromView.left.toFloat()
-                    if (fromIdx != toIdx) {
-                        animateLiquidSegmentedPill(slidingSourcePill, sourceBarOuter, targetView, animate = true)
-                    } else {
-                        animateLiquidSegmentedPill(slidingSourcePill, sourceBarOuter, targetView, animate = false)
-                    }
-                    return true
-                }
-            })
-            mainSftpCol.addView(sourceBarOuter)
-
+            // Item 8: Clean single breadcrumb path row directly below top navigation
+            // (no redundant Home/Usr/Storage source bar sandwich!)
             val bcScroll = HorizontalScrollView(this).apply {
                 isHorizontalScrollBarEnabled = false
                 overScrollMode = View.OVER_SCROLL_NEVER
                 clipChildren = false
                 clipToPadding = false
-                setPadding(dp(14), dp(4), dp(14), dp(6))
+                setPadding(dp(14), dp(6), dp(14), dp(6))
             }
             val bcContainer = FrameLayout(this).apply {
                 clipChildren = false
@@ -8072,7 +9400,6 @@ class TermuxActivity : Activity() {
                     segments.add(p to built)
                 }
 
-                // Determine how many prefix segments were ALREADY present before this transition
                 var commonPrefixCount = 0
                 while (
                     commonPrefixCount < segments.size &&
@@ -8087,7 +9414,6 @@ class TermuxActivity : Activity() {
 
                 for ((idx, seg) in segments.withIndex()) {
                     val isLast = (idx == segments.lastIndex)
-                    // Only animate newly added segments (never re-animate existing prefix segments!)
                     val isNewlyAddedSegment = animateChips && idx >= commonPrefixCount
 
                     if (idx > 0) {
@@ -8228,169 +9554,12 @@ class TermuxActivity : Activity() {
                 })
             }
 
-            val clipBannerHolder = FrameLayout(this)
-            mainSftpCol.addView(clipBannerHolder)
-
+            // Item 8 & Item 9: Selection & clipboard tools are integrated into the right-expanding "Терминал" capsule!
             rebuildClipBanner = {
-                clipBannerHolder.removeAllViews()
-                val srv = activeSftpServer
-                val activeDirStr = currentActivePathStr()
-
-                if (selectedSftpPaths.isNotEmpty()) {
-                    val (selScroll, selRow) = makeHorizontalChipRow()
-                    selScroll.setPadding(dp(14), dp(2), dp(14), dp(6))
-                    selRow.addView(
-                        TextView(this).apply {
-                            text = tr("Выбрано: ${selectedSftpPaths.size}", "Selected: ${selectedSftpPaths.size}")
-                            setTextColor(uiOnAccentContainer)
-                            typeface = Typeface.DEFAULT_BOLD
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                            background = tonalBg(uiAccentContainer, dp(12))
-                            setPadding(dp(12), dp(7), dp(12), dp(7))
-                            layoutParams = LinearLayout.LayoutParams(
-                                ViewGroup.LayoutParams.WRAP_CONTENT,
-                                ViewGroup.LayoutParams.WRAP_CONTENT
-                            ).apply {
-                                marginEnd = dp(6)
-                            }
-                        }
-                    )
-                    selRow.addView(makeExpressiveChip(tr("Все", "All"), false) {
-                        for (e in lastRenderedEntries) {
-                            selectedSftpPaths.add(e.path)
-                        }
-                        rebuildClipBanner()
-                        populateEntriesIntoRowsCol(null, lastRenderedEntries)
-                    })
-                    if (srv == null) {
-                        selRow.addView(makeExpressiveChip(tr("Копировать", "Copy"), false) {
-                            batchClipSources.clear()
-                            batchClipSources.addAll(selectedSftpPaths)
-                            batchClipIsMove = false
-                            fileClipSource = null
-                            selectedSftpPaths.clear()
-                            rebuildClipBanner()
-                            populateEntriesIntoRowsCol(null, lastRenderedEntries)
-                        })
-                        selRow.addView(makeExpressiveChip(tr("Вырезать", "Cut"), false) {
-                            batchClipSources.clear()
-                            batchClipSources.addAll(selectedSftpPaths)
-                            batchClipIsMove = true
-                            fileClipSource = null
-                            selectedSftpPaths.clear()
-                            rebuildClipBanner()
-                            populateEntriesIntoRowsCol(null, lastRenderedEntries)
-                        })
-                    }
-                    selRow.addView(makeExpressiveChip(tr("В .tar.gz", "Archive .tar.gz"), false) {
-                        val targets = selectedSftpPaths.toList()
-                        val archiveName = "archive_${System.currentTimeMillis() / 1000}.tar.gz"
-                        val archivePath = if (activeDirStr == "/") "/$archiveName" else "$activeDirStr/$archiveName"
-                        val relNames = targets.map { it.substringAfterLast('/') }.filter { it.isNotEmpty() }
-                        val joinedArgs = relNames.joinToString(" ") { shellEscapeSingle(it) }
-                        val tarCmd = "cd -- ${shellEscapeSingle(activeDirStr)} && tar -czf ${shellEscapeSingle(archivePath)} -- $joinedArgs"
-                        selectedSftpPaths.clear()
-                        rebuildClipBanner()
-                        Thread {
-                            if (srv == null) {
-                                nativeExecLocalRootCmd(tarCmd)
-                                runOnUiThread {
-                                    Toast.makeText(this, tr("Создан архив: $archiveName", "Created: $archiveName"), Toast.LENGTH_SHORT).show()
-                                    refreshSftpListInPlace(true, null)
-                                }
-                            } else {
-                                runRemoteSftpViaCpp23(srv, tarCmd)
-                                runOnUiThread {
-                                    Toast.makeText(this, tr("Создан архив: $archiveName", "Created: $archiveName"), Toast.LENGTH_SHORT).show()
-                                    refreshSftpListInPlace(true, null)
-                                }
-                            }
-                        }.start()
-                    })
-                    selRow.addView(
-                        makeExpressiveChip(
-                            title = tr("Удалить (${selectedSftpPaths.size})", "Delete (${selectedSftpPaths.size})"),
-                            selected = true,
-                            accentColor = COLOR_ROOT,
-                            containerColor = COLOR_ROOT_CONTAINER
-                        ) {
-                            val toDel = selectedSftpPaths.toList()
-                            selectedSftpPaths.clear()
-                            rebuildClipBanner()
-                            val joined = toDel.joinToString(" ") { shellEscapeSingle(it) }
-                            Thread {
-                                if (srv == null) {
-                                    var allDeleted = true
-                                    for (p in toDel) {
-                                        if (!File(p).deleteRecursively()) allDeleted = false
-                                    }
-                                    if (!allDeleted) {
-                                        nativeExecLocalRootCmd("rm -rf -- $joined")
-                                    }
-                                    runOnUiThread { refreshSftpListInPlace(true, null) }
-                                } else {
-                                    runRemoteSftpViaCpp23(srv, "rm -rf -- $joined")
-                                    runOnUiThread { refreshSftpListInPlace(true, null) }
-                                }
-                            }.start()
-                        }
-                    )
-                    selRow.addView(makeExpressiveChip(tr("Сброс ✕", "Clear ✕"), false) {
-                        selectedSftpPaths.clear()
-                        rebuildClipBanner()
-                        populateEntriesIntoRowsCol(null, lastRenderedEntries)
-                    })
-                    clipBannerHolder.addView(selScroll)
-                } else if (srv == null && (fileClipSource != null || batchClipSources.isNotEmpty())) {
-                    val clipBanner = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                        setPadding(dp(14), dp(4), dp(14), dp(4))
-                    }
-                    val labelTxt = if (batchClipSources.isNotEmpty()) {
-                        tr("Вставить (${batchClipSources.size})", "Paste (${batchClipSources.size})")
-                    } else {
-                        tr("Вставить «${fileClipSource!!.name}»", "Paste '${fileClipSource!!.name}'")
-                    }
-                    clipBanner.addView(makeExpressiveChip(labelTxt, true) {
-                        val sources = if (batchClipSources.isNotEmpty()) {
-                            batchClipSources.map { File(it) }
-                        } else {
-                            listOfNotNull(fileClipSource)
-                        }
-                        val isMove = if (batchClipSources.isNotEmpty()) batchClipIsMove else fileClipIsMove
-                        Thread {
-                            for (src in sources) {
-                                val dst = File(localCurrentDir, src.name)
-                                var handledDirect = false
-                                try {
-                                    if (src.exists() && localCurrentDir.canWrite()) {
-                                        if (src.isDirectory) src.copyRecursively(dst, overwrite = true)
-                                        else src.copyTo(dst, overwrite = true)
-                                        if (isMove) src.deleteRecursively()
-                                        handledDirect = true
-                                    }
-                                } catch (_: Throwable) {}
-                                if (!handledDirect) {
-                                    val op = if (isMove) "mv -f" else "cp -rf"
-                                    nativeExecLocalRootCmd("$op -- ${shellEscapeSingle(src.absolutePath)} ${shellEscapeSingle(dst.absolutePath)}")
-                                }
-                            }
-                            runOnUiThread {
-                                fileClipSource = null
-                                batchClipSources.clear()
-                                rebuildClipBanner()
-                                refreshSftpListInPlace(true, null)
-                            }
-                        }.start()
-                    })
-                    clipBanner.addView(makeExpressiveChip(tr("Отмена", "Cancel"), false) {
-                        fileClipSource = null
-                        batchClipSources.clear()
-                        rebuildClipBanner()
-                    })
-                    clipBannerHolder.addView(clipBanner)
+                if (selectedSftpPaths.isEmpty()) {
+                    trashConfirmExpanded = false
                 }
+                rebuildUniversalTermPill(true)
             }
 
             val listScroll = ScrollView(this).apply {
@@ -8844,6 +10013,8 @@ class TermuxActivity : Activity() {
                 val animateDir = sftpTransitionDir
                 val expandedTreePrefix = newlyExpandedTreePath?.let { if (it == "/") "/" else "$it/" }
                 newlyExpandedTreePath = null
+                val toggledTreeFolder = justToggledTreeFolderPath
+                justToggledTreeFolderPath = null
 
                 rowsCol.removeAllViews()
                 if (animateDir != 0) {
@@ -9009,16 +10180,30 @@ class TermuxActivity : Activity() {
                             item.isDirectory -> uiAccentContainer
                             else -> uiSurfaceContainer
                         }
+                        val itemIconView = MaterialIconView(this@TermuxActivity, iconType, iconTint, 20.5f, 2.0f)
                         val itemIconBadge = FrameLayout(this).apply {
                             background = tonalBg(badgeFill, dp(11))
                             layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply {
                                 marginEnd = dp(12)
                             }
-                            addView(MaterialIconView(this@TermuxActivity, iconType, iconTint, 20.5f, 2.0f))
+                            addView(itemIconView)
                         }
 
+                        val isJustToggledFolder = (toggledTreeFolder != null && item.path == toggledTreeFolder)
                         val isExpandedChild = expandedTreePrefix != null && item.path.startsWith(expandedTreePrefix)
-                        if ((animateDir != 0 || isExpandedChild) && animatedFolderCount < 16) {
+                        if (isJustToggledFolder) {
+                            // Item 11: Animate folder icon morphing between closed & open in tree mode!
+                            itemIconBadge.scaleX = 0.72f
+                            itemIconBadge.scaleY = 0.72f
+                            itemIconBadge.rotation = if (item.isExpanded) -14f else 14f
+                            itemIconBadge.animate()
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .rotation(0f)
+                                .setDuration(280L)
+                                .setInterpolator(OvershootInterpolator(2.2f))
+                                .start()
+                        } else if ((animateDir != 0 || isExpandedChild) && animatedFolderCount < 16) {
                             animatedFolderCount++
                             val delayMs = (animatedFolderCount * 14L).coerceAtMost(130L)
                             val shakeDir = if (animateDir != 0) animateDir else 1
@@ -9039,15 +10224,18 @@ class TermuxActivity : Activity() {
                             ).apply {
                                 bottomMargin = dp(2)
                             }
-                            attachSmoothPressAnimation(this, 0.985f)
+                            attachSmoothPressAnimation(this, 0.968f)
                             setOnClickListener {
                                 if (selectedSftpPaths.isNotEmpty()) {
                                     triggerHaptic(0.85f)
-                                    if (selectedSftpPaths.contains(item.path)) {
+                                    val nowSel = if (selectedSftpPaths.contains(item.path)) {
                                         selectedSftpPaths.remove(item.path)
+                                        false
                                     } else {
                                         selectedSftpPaths.add(item.path)
+                                        true
                                     }
+                                    trashConfirmExpanded = false
                                     rebuildClipBanner()
                                     populateEntriesIntoRowsCol(null, lastRenderedEntries)
                                     return@setOnClickListener
@@ -9056,6 +10244,7 @@ class TermuxActivity : Activity() {
                                 if (item.isDirectory) {
                                     triggerFolderShakeAnimation(itemIconBadge, 1)
                                     if (srv == null && sftpTreeMode) {
+                                        justToggledTreeFolderPath = item.path
                                         if (expandedTreePaths.contains(item.path)) {
                                             expandedTreePaths.remove(item.path)
                                             newlyExpandedTreePath = null
@@ -9082,33 +10271,52 @@ class TermuxActivity : Activity() {
                                 }
                             }
                             setOnLongClickListener {
+                                // Item 9: Smooth press-and-hold selection animation + unfold "Терминал" toolbar to the right!
                                 triggerHaptic(1.25f)
                                 if (selectedSftpPaths.contains(item.path)) {
                                     selectedSftpPaths.remove(item.path)
                                 } else {
                                     selectedSftpPaths.add(item.path)
                                 }
+                                trashConfirmExpanded = false
                                 rebuildClipBanner()
                                 populateEntriesIntoRowsCol(null, lastRenderedEntries)
                                 true
                             }
                         }
+                        if (isItemSelected) {
+                            itemIconBadge.scaleX = 0.84f
+                            itemIconBadge.scaleY = 0.84f
+                            itemIconBadge.animate()
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(220L)
+                                .setInterpolator(OvershootInterpolator(2.0f))
+                                .start()
+                        }
                         currentCardIdx++
 
                         if (sftpTreeMode && srv == null && item.isDirectory) {
-                            row.addView(
-                                MaterialIconView(
-                                    this,
-                                    if (item.isExpanded) M3Icon.CHEVRON_DOWN else M3Icon.CHEVRON_RIGHT,
-                                    COLOR_TEXT_DIM,
-                                    17f,
-                                    2.0f
-                                ).apply {
-                                    layoutParams = LinearLayout.LayoutParams(dp(20), dp(20)).apply {
-                                        marginEnd = dp(4)
-                                    }
+                            val chevView = MaterialIconView(
+                                this,
+                                if (item.isExpanded) M3Icon.CHEVRON_DOWN else M3Icon.CHEVRON_RIGHT,
+                                if (item.isExpanded) uiAccent else COLOR_TEXT_DIM,
+                                17f,
+                                2.0f
+                            ).apply {
+                                layoutParams = LinearLayout.LayoutParams(dp(20), dp(20)).apply {
+                                    marginEnd = dp(4)
                                 }
-                            )
+                            }
+                            if (isJustToggledFolder) {
+                                chevView.rotation = if (item.isExpanded) -90f else 90f
+                                chevView.animate()
+                                    .rotation(0f)
+                                    .setDuration(240L)
+                                    .setInterpolator(PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f))
+                                    .start()
+                            }
+                            row.addView(chevView)
                         }
 
                         row.addView(itemIconBadge)
@@ -9278,33 +10486,52 @@ class TermuxActivity : Activity() {
                 }
             }
 
+            activeSftpRefreshCallback = refreshSftpListInPlace
+            activeSftpBreadcrumbsCallback = rebuildBreadcrumbs
+            activeSftpPopulateRowsCallback = populateEntriesIntoRowsCol
+
             rebuildBreadcrumbs(false)
-            rebuildClipBanner()
+            rebuildUniversalTermPill(false)
             refreshSftpListInPlace(forceRemoteRefresh, null)
 
+            // Item 10: Streamlined Create Folder / File Dialog
+            // - Removed "Скрипт .sh" and removed the mode-switcher bar (`segBarOuter`)
+            // - The large top icon (`heroBadge`) itself toggles between Folder and File on tap!
+            // - Default permissions are strictly `chmod 755` for both folders and files.
             openMaterialCreateItemSheet = {
                 val srv = activeSftpServer
                 val activePathStr = currentActivePathStr()
                 val (cDlg, cSheet) = createExpressiveDialog(430)
-                var createMode = 0
+                var createMode = 0 // 0 = Folder, 1 = File
                 var selectedChmod = "755"
 
                 val heroBadge = FrameLayout(this).apply {
-                    background = tonalBg(uiAccentContainer, dp(18))
-                    layoutParams = LinearLayout.LayoutParams(dp(54), dp(54)).apply {
+                    background = tonalBg(uiAccentContainer, dp(22))
+                    layoutParams = LinearLayout.LayoutParams(dp(68), dp(68)).apply {
                         gravity = Gravity.CENTER_HORIZONTAL
-                        bottomMargin = dp(10)
+                        bottomMargin = dp(6)
                     }
+                    attachSmoothPressAnimation(this, 0.90f)
                 }
-                val heroIcon = MaterialIconView(this, M3Icon.CREATE_FOLDER, uiAccent, 26f, 2.15f)
+                val heroIcon = MaterialIconView(this, M3Icon.CREATE_FOLDER, uiAccent, 31f, 2.2f)
                 heroBadge.addView(heroIcon)
                 cSheet.addView(heroBadge)
+
+                val toggleHintTv = TextView(this).apply {
+                    text = tr("Нажмите на иконку сверху: Папка ⇄ Файл", "Tap icon above: Folder ⇄ File")
+                    gravity = Gravity.CENTER
+                    setTextColor(uiAccent)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    setPadding(0, 0, 0, dp(4))
+                }
+                cSheet.addView(toggleHintTv)
 
                 val hdrTitle = TextView(this).apply {
                     text = tr("Новая папка", "New folder")
                     gravity = Gravity.CENTER
                     setTextColor(COLOR_TEXT_BRIGHT)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 19.5f)
                     typeface = Typeface.DEFAULT_BOLD
                 }
                 cSheet.addView(hdrTitle)
@@ -9328,35 +10555,6 @@ class TermuxActivity : Activity() {
                     }
                 }
                 cSheet.addView(hdrPathChip)
-
-                val segBarOuter = FrameLayout(this).apply {
-                    background = tonalBg(uiSurfaceLow, dp(16))
-                    setPadding(dp(4), dp(4), dp(4), dp(4))
-                    clipChildren = true
-                    clipToPadding = true
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply {
-                        bottomMargin = dp(12)
-                    }
-                }
-                val segIndicatorPill = View(this).apply {
-                    background = makeLiquidGlassPillDrawable(uiAccentContainer, dp(12))
-                    layoutParams = FrameLayout.LayoutParams(0, 0)
-                }
-                segBarOuter.addView(segIndicatorPill)
-
-                val segBarRow = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    )
-                }
-                segBarOuter.addView(segBarRow)
-                cSheet.addView(segBarOuter)
 
                 val nameBox = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
@@ -9456,9 +10654,6 @@ class TermuxActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL
                 }
 
-                val modeTabs = ArrayList<LinearLayout>(3)
-                val modeIcons = ArrayList<MaterialIconView>(3)
-                val modeLabels = ArrayList<TextView>(3)
                 val chmodModes = listOf("755", "644", "700", "600")
                 val chmodTabs = ArrayList<TextView>(4)
 
@@ -9492,36 +10687,8 @@ class TermuxActivity : Activity() {
                     val dir = if (newMode >= prevMode) 1 else -1
                     createMode = newMode
 
-                    for (idx in 0 until modeTabs.size) {
-                        val isSel = (idx == newMode)
-                        modeIcons[idx].tintColor = if (isSel) uiAccent else COLOR_TEXT_DIM
-                        modeIcons[idx].invalidate()
-                        modeLabels[idx].setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                        modeLabels[idx].typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                        if (animate) {
-                            modeTabs[idx].animate()
-                                .scaleX(if (isSel) 1.04f else 1.0f)
-                                .scaleY(if (isSel) 1.04f else 1.0f)
-                                .setDuration(220L)
-                                .setInterpolator(aosp17SpatialInterpolator)
-                                .start()
-                        } else {
-                            modeTabs[idx].scaleX = if (isSel) 1.04f else 1.0f
-                            modeTabs[idx].scaleY = if (isSel) 1.04f else 1.0f
-                        }
-                    }
-
-                    val targetTab = modeTabs.getOrNull(newMode)
-                    if (targetTab != null && targetTab.width > 0) {
-                        animateLiquidSegmentedPill(segIndicatorPill, segBarOuter, targetTab, animate)
-                    }
-
                     val isFolder = (newMode == 0)
-                    heroIcon.icon = when (newMode) {
-                        0 -> M3Icon.CREATE_FOLDER
-                        1 -> M3Icon.FILE
-                        else -> M3Icon.TERMINAL
-                    }
+                    heroIcon.icon = if (isFolder) M3Icon.CREATE_FOLDER else M3Icon.FILE
                     heroIcon.invalidate()
 
                     if (animate && prevMode != newMode) {
@@ -9546,25 +10713,13 @@ class TermuxActivity : Activity() {
                             .start()
                     }
 
-                    hdrTitle.text = when (newMode) {
-                        0 -> tr("Новая папка", "New folder")
-                        1 -> tr("Новый файл", "New file")
-                        else -> tr("Новый исполняемый скрипт", "New shell script")
-                    }
+                    hdrTitle.text = if (isFolder) tr("Новая папка", "New folder") else tr("Новый файл", "New file")
                     nameBoxLabel.text = if (isFolder) {
                         tr("Имя папки (поддерживается вложенность a/b)", "Folder name (supports nested a/b)")
                     } else {
                         tr("Имя файла", "File name")
                     }
-                    nameEt.hint = when (newMode) {
-                        0 -> "scripts"
-                        1 -> "config.json"
-                        else -> "deploy.sh"
-                    }
-                    contentEt.hint = when (newMode) {
-                        2 -> "#!/usr/bin/env bash\nset -euo pipefail\n..."
-                        else -> tr("Необязательно…", "Optional…")
-                    }
+                    nameEt.hint = if (isFolder) "scripts" else "config.json"
 
                     contentBox.animate().cancel()
                     val wasVisible = (contentBox.visibility == View.VISIBLE)
@@ -9589,65 +10744,18 @@ class TermuxActivity : Activity() {
                                 .setDuration(210L)
                                 .setInterpolator(aosp17SpatialInterpolator)
                                 .start()
-                        } else if (animate && prevMode != newMode) {
-                            contentBox.alpha = 0.5f
-                            contentBox.translationX = dir * dpF(12f)
-                            contentBox.animate()
-                                .alpha(1f)
-                                .translationX(0f)
-                                .setDuration(210L)
-                                .setInterpolator(aosp17SpatialInterpolator)
-                                .start()
                         }
                     }
                     cSheet.requestLayout()
                 }
 
-                val modes = listOf(
-                    Triple(0, M3Icon.FOLDER, tr("Папка", "Folder")),
-                    Triple(1, M3Icon.FILE, tr("Файл", "File")),
-                    Triple(2, M3Icon.TERMINAL, tr("Скрипт .sh", "Script .sh"))
-                )
-                for ((mCode, ic, lbl) in modes) {
-                    val isSel = (createMode == mCode)
-                    val icView = MaterialIconView(
-                        this,
-                        ic,
-                        if (isSel) uiAccent else COLOR_TEXT_DIM,
-                        17f,
-                        2.0f
-                    ).apply {
-                        layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
-                            marginEnd = dp(5)
-                        }
-                    }
-                    val lblView = TextView(this).apply {
-                        text = lbl
-                        setSingleLine(true)
-                        setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                        typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    }
-                    val tab = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER
-                        setPadding(dp(8), dp(9), dp(8), dp(9))
-                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                        addView(icView)
-                        addView(lblView)
-                        attachSmoothPressAnimation(this, 0.95f)
-                        setOnClickListener {
-                            if (createMode == mCode) return@setOnClickListener
-                            triggerHaptic(0.85f)
-                            val targetChmod = if (mCode == 1) "644" else "755"
-                            updateModeSelection(mCode, animate = true)
-                            updateChmodSelection(targetChmod, animate = true)
-                        }
-                    }
-                    modeTabs.add(tab)
-                    modeIcons.add(icView)
-                    modeLabels.add(lblView)
-                    segBarRow.addView(tab)
+                // Tapping the large top heroBadge toggles between Folder (0) and File (1)
+                // while keeping chmod 755 as default!
+                heroBadge.setOnClickListener {
+                    triggerHaptic(0.95f)
+                    val nextMode = if (createMode == 0) 1 else 0
+                    updateModeSelection(nextMode, animate = true)
+                    updateChmodSelection("755", animate = true)
                 }
 
                 for (mode in chmodModes) {
@@ -9672,14 +10780,10 @@ class TermuxActivity : Activity() {
                     chmodBarRow.addView(mBtn)
                 }
 
-                segBarRow.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+                chmodBarRow.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
                     override fun onPreDraw(): Boolean {
-                        if (segBarRow.viewTreeObserver.isAlive) {
-                            segBarRow.viewTreeObserver.removeOnPreDrawListener(this)
-                        }
-                        val firstModeTab = modeTabs.getOrNull(createMode)
-                        if (firstModeTab != null) {
-                            animateLiquidSegmentedPill(segIndicatorPill, segBarOuter, firstModeTab, animate = false)
+                        if (chmodBarRow.viewTreeObserver.isAlive) {
+                            chmodBarRow.viewTreeObserver.removeOnPreDrawListener(this)
                         }
                         val chmodIdx = chmodModes.indexOf(selectedChmod).coerceAtLeast(0)
                         val firstChmodTab = chmodTabs.getOrNull(chmodIdx)
@@ -10565,31 +11669,23 @@ class TermuxActivity : Activity() {
         }
 
         renderActiveTab = {
-            val tabs = listOf(
-                Triple(tabServersCol, indServers, 0),
-                Triple(tabSftpCol, indSftp, 1),
-                Triple(tabPkgsCol, indPkgs, 2)
-            )
-            for ((col, ind, idx) in tabs) {
-                val isSel = (activeTab == idx)
-                val tv = col.getChildAt(0) as? TextView
-                tv?.setTextColor(if (isSel) uiAccent else COLOR_TEXT_DIM)
-                tv?.typeface = if (isSel) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
-                if (isSel) {
-                    ind.visibility = View.VISIBLE
-                    (ind.background as? GradientDrawable)?.setColor(uiAccent)
-                    ind.scaleX = 0.35f
-                    ind.alpha = 0.3f
-                    ind.animate()
-                        .scaleX(1f)
-                        .alpha(1f)
-                        .setDuration(220L)
-                        .setInterpolator(OvershootInterpolator(2.0f))
-                        .start()
-                } else {
-                    ind.visibility = View.INVISIBLE
+            hubTabSwitchAnim?.cancel()
+            val startProgs = FloatArray(3) { hubTabSelProg[it] }
+            val targetTab = activeTab
+            hubTabSwitchAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 250L
+                interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                addUpdateListener { va ->
+                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                    for (i in 0 until 3) {
+                        val goal = if (i == targetTab) 1f else 0f
+                        hubTabSelProg[i] = startProgs[i] + (goal - startProgs[i]) * t
+                    }
+                    updateHubTabsBentoGeometry()
                 }
+                start()
             }
+            rebuildUniversalTermPill(false)
             when (activeTab) {
                 0 -> renderServersTab()
                 1 -> renderSftpTab(animateTab = true)
@@ -10772,6 +11868,8 @@ class TermuxActivity : Activity() {
         val tabViews = ArrayList<TextView>(count)
         val tabBgs = ArrayList<GradientDrawable>(count)
         val tabIsRootArr = BooleanArray(count)
+        val rootColorProg = FloatArray(count)
+        val rootChangedIndices = ArrayList<Int>()
         val pressProg = FloatArray(count)
         val pressAnims = arrayOfNulls<ValueAnimator>(count)
         val switchProg = FloatArray(count) { idx -> if (idx == active) 1f else 0f }
@@ -10814,9 +11912,9 @@ class TermuxActivity : Activity() {
             }
 
             for (i in 0 until count) {
-                val selF = safeClamp(switchProg[i], 0f, 1.15f)
+                val selF = safeClamp(switchProg[i], 0f, 1f)
                 val pSelf = pressProg[i]
-                val isRoot = tabIsRootArr[i]
+                val rProg = safeClamp(rootColorProg[i], 0f, 1f)
 
                 val baseW = inactiveTabW + (activeTabW - inactiveTabW) * selF
                 val wPx = (baseW + deltaW[i]).roundToInt().coerceAtLeast(dp(32))
@@ -10835,11 +11933,13 @@ class TermuxActivity : Activity() {
                 val curL = restL + (outerR - restL) * pillMorph
                 val curR = restR + (outerR - restR) * pillMorph
 
-                val activeFill = if (isRoot) COLOR_ROOT_CONTAINER else uiAccentContainer
+                val activeFill = blendColor(uiAccentContainer, COLOR_ROOT_CONTAINER, rProg)
+                val inactiveFill = blendColor(uiSurfaceHigh, blendColor(uiSurfaceHigh, COLOR_ROOT_CONTAINER, 0.42f), rProg)
                 val colorT = safeClamp(max(selF, pSelf * 0.85f), 0f, 1f)
-                val fillCol = blendColor(uiSurfaceHigh, activeFill, colorT)
-                val activeTxtCol = if (isRoot) COLOR_ROOT else uiOnAccentContainer
-                val txtCol = blendColor(COLOR_TEXT_BRIGHT, activeTxtCol, safeClamp(max(selF, pSelf), 0f, 1f))
+                val fillCol = blendColor(inactiveFill, activeFill, colorT)
+                val activeTxtCol = blendColor(uiOnAccentContainer, COLOR_ROOT, rProg)
+                val inactiveTxtCol = blendColor(COLOR_TEXT_BRIGHT, COLOR_ROOT, rProg * 0.75f)
+                val txtCol = blendColor(inactiveTxtCol, activeTxtCol, safeClamp(max(selF, pSelf), 0f, 1f))
 
                 val bg = tabBgs[i]
                 bg.setColor(fillCol)
@@ -10847,12 +11947,8 @@ class TermuxActivity : Activity() {
 
                 val tv = tabViews[i]
                 tv.setTextColor(txtCol)
-                // Living squash-and-stretch during session switch & press!
-                val midSquash = if (selF in 0.03f..0.97f) {
-                    kotlin.math.sin(selF.coerceIn(0f, 1f) * Math.PI.toFloat())
-                } else 0f
                 val pressSquash = safeClamp(pSelf, 0f, 1f)
-                tv.scaleY = (1f - 0.11f * midSquash - 0.06f * pressSquash).coerceIn(0.84f, 1.04f)
+                tv.scaleY = (1f - 0.05f * pressSquash).coerceIn(0.90f, 1.04f)
                 val lp = tv.layoutParams as LinearLayout.LayoutParams
                 if (lp.width != wPx) {
                     lp.width = wPx
@@ -10880,6 +11976,14 @@ class TermuxActivity : Activity() {
             val idx = i
             val isRoot = if (rawCount > 0) nativeIsSessionRoot(i) else false
             tabIsRootArr[i] = isRoot
+            val prevRoot = prevSessionRootStates[i]
+            prevSessionRootStates[i] = isRoot
+            if (prevRoot != null && prevRoot != isRoot && !countChanged && closedTabIndex < 0) {
+                rootColorProg[i] = if (isRoot) 0f else 1f
+                rootChangedIndices.add(i)
+            } else {
+                rootColorProg[i] = if (isRoot) 1f else 0f
+            }
             val bg = makeConnectedSegmentDrawable(uiSurfaceContainer, outerR, outerR)
             tabBgs.add(bg)
 
@@ -11001,16 +12105,16 @@ class TermuxActivity : Activity() {
             }
             switchProg[active] = 0f
             updateSessionTabsBentoGeometry()
+            // Monotonic cubic deceleration (no overshoot/inertia on neighboring sessions!)
             val switchAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 320L
-                interpolator = LinearInterpolator()
+                duration = 250L
+                interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
                 addUpdateListener { va ->
                     val t = safeClamp(va.animatedValue as Float, 0f, 1f)
-                    val spring = 1f - kotlin.math.exp(-3.5f * t) * kotlin.math.cos(5.6f * t)
-                    val smoothCollapse = (1f - t) * (1f - t)
-                    switchProg[active] = safeClamp(spring, 0f, 1.14f)
+                    val smoothCollapse = 1f - t
+                    switchProg[active] = t
                     if (animateOldActive) {
-                        switchProg[fromIdx] = safeClamp(1f - spring, 0f, 1f)
+                        switchProg[fromIdx] = 1f - t
                     }
                     if (closedTabIndex >= 0) {
                         ghostClosingProg = smoothCollapse
@@ -11031,6 +12135,22 @@ class TermuxActivity : Activity() {
             }
             tabStrip.tag = switchAnim
             switchAnim.start()
+        } else if (rootChangedIndices.isNotEmpty()) {
+            updateSessionTabsBentoGeometry()
+            val rootAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 380L
+                interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                addUpdateListener { va ->
+                    val t = safeClamp(va.animatedValue as Float, 0f, 1f)
+                    for (rIdx in rootChangedIndices) {
+                        val targetRoot = tabIsRootArr[rIdx]
+                        rootColorProg[rIdx] = if (targetRoot) t else (1f - t)
+                    }
+                    updateSessionTabsBentoGeometry()
+                }
+            }
+            tabStrip.tag = rootAnim
+            rootAnim.start()
         } else {
             updateSessionTabsBentoGeometry()
         }
@@ -11666,9 +12786,9 @@ class TermuxActivity : Activity() {
             val effectiveH = max(h, unoccludedHeightPx)
             val topOff = computeGridTopOffsetPx()
             val navBot = currentSysNavBottomPx.toFloat()
-            val usableGridH = (effectiveH.toFloat() - topOff - navBot).coerceAtLeast(cellHeight * 6f)
-            val newCols = max(10, (w / cellWidth).toInt())
-            val newRows = max(4, (usableGridH / cellHeight).toInt())
+            val usableGridH = (effectiveH.toFloat() - topOff - navBot).coerceAtLeast(cellHeight * 2f)
+            val newCols = max(4, (w / cellWidth).toInt())
+            val newRows = max(2, (usableGridH / cellHeight).toInt())
             val changed = (newCols != cols || newRows != rows)
             cols = newCols
             rows = newRows

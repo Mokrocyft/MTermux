@@ -1548,7 +1548,7 @@ public:
 
         if (newRows != mRows || newCols != mCols) {
             int modes = mModes.load(std::memory_order_relaxed);
-            if (!(modes & MODE_ALT_SCREEN) && newCols != mCols) {
+            if (!(modes & MODE_ALT_SCREEN)) {
                 reflowPrimaryAndScrollback(newRows, newCols);
             } else {
                 mPrimaryGrid.resize(static_cast<size_t>(newRows), Row(newCols));
