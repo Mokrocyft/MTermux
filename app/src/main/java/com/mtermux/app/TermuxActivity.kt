@@ -513,12 +513,8 @@ class TermuxActivity : Activity() {
         keyRepeatIntervalMs = prefs.getInt(KEY_KEY_REPEAT_INTERVAL_MS, 90).coerceIn(30, 250)
 
         window.apply {
-            statusBarColor = 0x00000000
-            navigationBarColor = 0x00000000
-            if (Build.VERSION.SDK_INT >= 29) {
-                isStatusBarContrastEnforced = false
-                isNavigationBarContrastEnforced = false
-            }
+            statusBarColor = 0xFF000000.toInt()
+            navigationBarColor = 0xFF000000.toInt()
             attributes = attributes.apply {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -558,14 +554,15 @@ class TermuxActivity : Activity() {
             )
         )
 
-        // 1.5. Subtle Vignette Overlays (Gentle soft gradients at top and bottom of screen)
+        // 1.5. Dark Vignette Overlays (Full-bleed dark top gradient & soft bottom gradient)
         topVignetteView = View(this).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(
-                    0x55000000.toInt(),
-                    0x2A000000.toInt(),
-                    0x0E000000.toInt(),
+                    0xF8000000.toInt(),
+                    0xE0000000.toInt(),
+                    0x88000000.toInt(),
+                    0x33000000.toInt(),
                     0x00000000
                 )
             )
@@ -576,7 +573,7 @@ class TermuxActivity : Activity() {
             topVignetteView,
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(68),
+                dp(120),
                 Gravity.TOP
             )
         )
@@ -1964,15 +1961,15 @@ class TermuxActivity : Activity() {
         target.pivotY = h * 0.5f
     }
 
-    private fun applyRoundedCornersProgress(target: View, radiusPx: Float, topInsetPx: Int = 0) {
-        if (radiusPx <= 0.5f && topInsetPx <= 0) {
+    private fun applyRoundedCornersProgress(target: View, radiusPx: Float) {
+        if (radiusPx <= 0.5f) {
             target.clipToOutline = false
         } else {
             target.outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(view: View, outline: Outline) {
                     val vw = if (view.width > 0) view.width else resources.displayMetrics.widthPixels
                     val vh = if (view.height > 0) view.height else resources.displayMetrics.heightPixels
-                    outline.setRoundRect(0, topInsetPx.coerceAtLeast(0), vw, vh, radiusPx)
+                    outline.setRoundRect(0, 0, vw, vh, radiusPx)
                 }
             }
             target.clipToOutline = true
@@ -2002,13 +1999,8 @@ class TermuxActivity : Activity() {
         foregroundView.scaleY = scale
         foregroundView.translationX = dir * maxShiftX * ep
         foregroundView.translationY = 0f
-        foregroundView.alpha = 1f - (0.55f * ep)
-        val topClip = if (backgroundView == null) {
-            ((foregroundView.paddingTop - dp(6)).coerceAtLeast(0) * ep).roundToInt()
-        } else {
-            0
-        }
-        applyRoundedCornersProgress(foregroundView, dpF(28f) * ep, topClip)
+        foregroundView.alpha = 1f - (0.50f * ep)
+        applyRoundedCornersProgress(foregroundView, dpF(28f) * ep)
 
         if (backgroundView != null) {
             backgroundView.visibility = View.VISIBLE
@@ -6471,7 +6463,7 @@ class TermuxActivity : Activity() {
         }
 
         val root = FrameLayout(this).apply {
-            setBackgroundColor(0x00000000)
+            setBackgroundColor(COLOR_AMOLED_BG)
         }
         root.setOnApplyWindowInsetsListener { v, insets ->
             val sysBars = insets.getInsets(
@@ -7253,15 +7245,29 @@ class TermuxActivity : Activity() {
                     )
                     accW = accPill.measuredWidth.coerceAtLeast(dp(36))
                     accPill.alpha = 0f
-                    accPill.scaleX = 0.70f
-                    accPill.scaleY = 0.70f
-                    accPill.translationX = -dpF(6f)
+                    accPill.scaleX = 0.82f
+                    accPill.scaleY = 0.82f
+                    accPill.translationX = -dpF(4f)
                     termOuterFrame.addView(accPill, 1, LinearLayout.LayoutParams(accW, pillInnerH).apply {
                         marginEnd = 0
                     })
                 }
 
-                val targetCompactW = if (activeTab == 1) (dp(112) + accW + dp(4)) else dp(112)
+                val firstChip = termOuterFrame.getChildAt(0) as? LinearLayout
+                val lblV = firstChip?.getChildAt(1) as? TextView
+                val targetLabelW = if (lblV != null) {
+                    lblV.measure(
+                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                        View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
+                    )
+                    lblV.measuredWidth.coerceAtLeast(dp(54))
+                } else {
+                    dp(58)
+                }
+                val exactTermBackW = dp(12) + dp(19) + dp(5) + targetLabelW + dp(13)
+                val exactCompactW = termOuterFrame.paddingLeft + exactTermBackW + (if (accPill != null) (dp(2) + accW) else 0) + termOuterFrame.paddingRight
+                val targetCompactW = if (activeTab == 1) exactCompactW else (termOuterFrame.paddingLeft + exactTermBackW + termOuterFrame.paddingRight)
+
                 hubTabsOuter.visibility = View.VISIBLE
                 hubTabsOuter.alpha = 0f
                 hubTabsOuter.scaleX = 0.94f
@@ -7281,32 +7287,34 @@ class TermuxActivity : Activity() {
                         termOuterFrame.layoutParams = lp
 
                         if (prevMode == 3 && termOuterFrame.childCount > 0) {
-                            val firstChip = termOuterFrame.getChildAt(0) as? LinearLayout
                             if (firstChip != null && firstChip.childCount >= 2) {
                                 val icV = firstChip.getChildAt(0)
-                                val lblV = firstChip.getChildAt(1) as? TextView
-                                val expandP = safeClamp((p - 0.08f) / 0.92f, 0f, 1f)
+                                val expandP = safeClamp((p - 0.05f) / 0.95f, 0f, 1f)
                                 if (lblV != null) {
                                     lblV.visibility = View.VISIBLE
                                     lblV.alpha = expandP
                                     val lblLp = lblV.layoutParams as LinearLayout.LayoutParams
-                                    lblLp.width = (dpF(62f) * expandP).roundToInt()
+                                    lblLp.width = (targetLabelW.toFloat() * expandP).roundToInt()
                                     lblV.layoutParams = lblLp
                                 }
                                 val icLp = icV.layoutParams as LinearLayout.LayoutParams
                                 icLp.marginEnd = (dpF(5f) * expandP).roundToInt()
                                 icV.layoutParams = icLp
-                                val hPad = (dpF(8f) + dpF(4f) * expandP).roundToInt()
-                                firstChip.setPadding(hPad, 0, hPad, 0)
+                                val leftPad = (dpF(8f) + dpF(4f) * expandP).roundToInt()
+                                val rightPad = (dpF(8f) + dpF(5f) * expandP).roundToInt()
+                                firstChip.setPadding(leftPad, 0, rightPad, 0)
+                                val chipLp = firstChip.layoutParams as LinearLayout.LayoutParams
+                                chipLp.marginEnd = (dpF(2f) * expandP).roundToInt()
+                                firstChip.layoutParams = chipLp
                             }
                         }
 
                         if (accPill != null) {
-                            val accFade = safeClamp((p - 0.12f) / 0.88f, 0f, 1f)
+                            val accFade = safeClamp((p - 0.10f) / 0.90f, 0f, 1f)
                             accPill.alpha = accFade
-                            accPill.scaleX = 0.70f + 0.30f * accFade
-                            accPill.scaleY = 0.70f + 0.30f * accFade
-                            accPill.translationX = -dpF(6f) * (1f - accFade)
+                            accPill.scaleX = 0.82f + 0.18f * accFade
+                            accPill.scaleY = 0.82f + 0.18f * accFade
+                            accPill.translationX = -dpF(4f) * (1f - accFade)
                         }
 
                         val startIndex = if (accPill != null) 2 else 1
