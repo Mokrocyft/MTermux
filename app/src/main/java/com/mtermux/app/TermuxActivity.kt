@@ -5767,16 +5767,9 @@ class TermuxActivity : Activity() {
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.EYE -> {
-                    path.moveTo(x(2.5f), y(12f))
-                    path.quadTo(x(12f), y(4.5f), x(21.5f), y(12f))
-                    path.quadTo(x(12f), y(19.5f), x(2.5f), y(12f))
-                    path.close()
-                    fillPaint.color = (0x24 shl 24) or (tintColor and 0x00FFFFFF)
-                    canvas.drawPath(path, fillPaint)
-                    canvas.drawPath(path, strokePaint)
-                    canvas.drawCircle(x(12f), y(12f), 3.4f * u, strokePaint)
-                    fillPaint.color = tintColor
-                    canvas.drawCircle(x(12f), y(12f), 1.8f * u, fillPaint)
+                    rect.set(x(2.5f), y(6.5f), x(21.5f), y(17.5f))
+                    canvas.drawOval(rect, strokePaint)
+                    canvas.drawCircle(x(12f), y(12f), 2.4f * u, fillPaint)
                 }
                 M3Icon.CREATE_FOLDER -> {
                     path.moveTo(x(3f), y(7f))
@@ -13975,13 +13968,15 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 }
             }
 
-            // Search Filter & Sort Chips Bar (smoothly expands above floatingPill when search is active)
+            // Search Filter & Sort Chips Bar (with C++26 liquid sliding segmented pill animation)
             val searchFiltersWrap = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 background = makeM3FloatingSurfaceDrawable(dp(20), tintWithAccent = false)
                 elevation = dpF(8f)
-                setPadding(dp(6), dp(4), dp(6), dp(4))
+                clipChildren = false
+                clipToPadding = false
+                setPadding(dp(5), dp(4), dp(5), dp(4))
                 visibility = if (sftpSearchActive) View.VISIBLE else View.GONE
                 alpha = if (sftpSearchActive) 1f else 0f
                 layoutParams = LinearLayout.LayoutParams(
@@ -13992,70 +13987,147 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 }
             }
 
-            fun rebuildSearchFilterChips() {
-                searchFiltersWrap.removeAllViews()
-                val filterItems = listOf(
-                    0 to tr("Все", "All"),
-                    1 to tr("Папки", "Dirs"),
-                    2 to tr("Файлы", "Files")
+            val filterTabsOuter = FrameLayout(this).apply {
+                clipChildren = false
+                clipToPadding = false
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(28)
                 )
-                for ((fCode, fTitle) in filterItems) {
-                    val isSel = (sftpSearchFilterType == fCode)
-                    val chip = TextView(this).apply {
-                        text = fTitle
-                        setSingleLine(true)
-                        setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
-                        typeface = Typeface.DEFAULT_BOLD
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                        background = tonalBg(if (isSel) uiAccentContainer else 0x00000000, dp(14))
-                        setPadding(dp(10), dp(5), dp(10), dp(5))
-                        layoutParams = LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ).apply {
-                            marginEnd = dp(3)
-                        }
-                        attachSmoothPressAnimation(this, 0.94f)
-                        setOnClickListener {
-                            triggerHaptic(0.85f)
-                            if (sftpSearchFilterType != fCode) {
-                                sftpSearchFilterType = fCode
-                                rebuildSearchFilterChips()
-                                refreshSftpListInPlace(false, null)
-                            }
+            }
+            val filterSlidingPill = View(this).apply {
+                background = makeLiquidGlassPillDrawable(uiAccentContainer, dp(14))
+                layoutParams = FrameLayout.LayoutParams(0, dp(28))
+            }
+            filterTabsOuter.addView(filterSlidingPill)
+
+            val filterTabsRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                clipChildren = false
+                clipToPadding = false
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(28)
+                )
+            }
+            filterTabsOuter.addView(filterTabsRow)
+            searchFiltersWrap.addView(filterTabsOuter)
+
+            val filterTabViews = ArrayList<TextView>(3)
+            val filterItems = listOf(
+                0 to tr("Все", "All"),
+                1 to tr("Папки", "Dirs"),
+                2 to tr("Файлы", "Files")
+            )
+
+            fun updateSearchFilterTabStyles(animate: Boolean) {
+                val targetTab = filterTabViews.getOrNull(sftpSearchFilterType) ?: return
+                if (filterTabsOuter.width > 0 && targetTab.width > 0) {
+                    animateLiquidSegmentedPill(filterSlidingPill, filterTabsOuter, targetTab, animate = animate)
+                } else {
+                    filterTabsOuter.post {
+                        val t = filterTabViews.getOrNull(sftpSearchFilterType)
+                        if (t != null) {
+                            animateLiquidSegmentedPill(filterSlidingPill, filterTabsOuter, t, animate = false)
                         }
                     }
-                    searchFiltersWrap.addView(chip)
                 }
+                for ((idx, tv) in filterTabViews.withIndex()) {
+                    val sel = (idx == sftpSearchFilterType)
+                    val targetCol = if (sel) uiOnAccentContainer else COLOR_TEXT_DIM
+                    if (animate && tv.currentTextColor != targetCol) {
+                        val startCol = tv.currentTextColor
+                        ValueAnimator.ofFloat(0f, 1f).apply {
+                            duration = 240L
+                            interpolator = aosp17SpatialInterpolator
+                            addUpdateListener { va ->
+                                val p = va.animatedValue as Float
+                                tv.setTextColor(blendColor(startCol, targetCol, p))
+                            }
+                            start()
+                        }
+                    } else {
+                        tv.setTextColor(targetCol)
+                    }
+                }
+            }
 
-                val sortTitle = when (sftpSortMode) {
-                    1 -> tr("⇅ Размер", "⇅ Size")
-                    2 -> tr("⇅ Дата", "⇅ Date")
-                    else -> tr("⇅ Имя", "⇅ Name")
-                }
-                val sortChip = TextView(this).apply {
-                    text = sortTitle
+            for ((fCode, fTitle) in filterItems) {
+                val isSel = (sftpSearchFilterType == fCode)
+                val chip = TextView(this).apply {
+                    text = fTitle
+                    gravity = Gravity.CENTER
                     setSingleLine(true)
-                    setTextColor(if (sftpSortMode != 0) uiAccent else COLOR_TEXT_BRIGHT)
+                    setTextColor(if (isSel) uiOnAccentContainer else COLOR_TEXT_DIM)
                     typeface = Typeface.DEFAULT_BOLD
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                    background = tonalBg(uiSurfaceHigh, dp(14))
-                    setPadding(dp(10), dp(5), dp(10), dp(5))
+                    background = null
+                    setPadding(dp(11), dp(4), dp(11), dp(4))
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
+                        dp(28)
                     )
                     attachSmoothPressAnimation(this, 0.94f)
                     setOnClickListener {
-                        triggerHaptic(0.9f)
-                        sftpSortMode = (sftpSortMode + 1) % 3
-                        rebuildSearchFilterChips()
-                        refreshSftpListInPlace(false, null)
+                        if (sftpSearchFilterType != fCode) {
+                            triggerHaptic(0.85f)
+                            sftpSearchFilterType = fCode
+                            updateSearchFilterTabStyles(animate = true)
+                            refreshSftpListInPlace(false, null)
+                        }
                     }
                 }
-                searchFiltersWrap.addView(sortChip)
+                filterTabViews.add(chip)
+                filterTabsRow.addView(chip)
             }
-            rebuildSearchFilterChips()
+
+            // Subtle vertical separator between liquid filter pill and sort button
+            val filterDivider = View(this).apply {
+                background = tonalBg(withAlpha(COLOR_TEXT_DIM, 55), dp(1))
+                layoutParams = LinearLayout.LayoutParams(dp(1), dp(16)).apply {
+                    setMargins(dp(3), 0, dp(4), 0)
+                }
+            }
+            searchFiltersWrap.addView(filterDivider)
+
+            fun sortTitleText(): String = when (sftpSortMode) {
+                1 -> tr("⇅ Размер", "⇅ Size")
+                2 -> tr("⇅ Дата", "⇅ Date")
+                else -> tr("⇅ Имя", "⇅ Name")
+            }
+
+            val sortChip = TextView(this).apply {
+                text = sortTitleText()
+                gravity = Gravity.CENTER
+                setSingleLine(true)
+                setTextColor(if (sftpSortMode != 0) uiAccent else COLOR_TEXT_BRIGHT)
+                typeface = Typeface.DEFAULT_BOLD
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                background = tonalBg(uiSurfaceHigh, dp(14))
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(28)
+                )
+                attachSmoothPressAnimation(this, 0.94f)
+                setOnClickListener {
+                    triggerHaptic(0.9f)
+                    sftpSortMode = (sftpSortMode + 1) % 3
+                    text = sortTitleText()
+                    setTextColor(if (sftpSortMode != 0) uiAccent else COLOR_TEXT_BRIGHT)
+                    animEngine.pulse(this, 0.90f, 180L)
+                    refreshSftpListInPlace(false, null)
+                }
+            }
+            searchFiltersWrap.addView(sortChip)
+
+            fun rebuildSearchFilterChips() {
+                updateSearchFilterTabStyles(animate = false)
+                sortChip.text = sortTitleText()
+                sortChip.setTextColor(if (sftpSortMode != 0) uiAccent else COLOR_TEXT_BRIGHT)
+            }
+
             bottomBarRow.addView(searchFiltersWrap)
 
             val floatingPill = LinearLayout(this).apply {
