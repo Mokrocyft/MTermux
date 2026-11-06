@@ -15134,7 +15134,6 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
         private var bootstrapReady = false
         private var cachedMaxScrollback = 0
-        private val bootPolyVerts = FloatArray(144 * 2)
         private val bootPolyPath = Path()
 
         override fun onDraw(canvas: Canvas) {
@@ -15172,17 +15171,21 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     bgPaint.color = uiAccentContainer
                     canvas.drawCircle(cx, badgeCy, dpF(32f), bgPaint)
 
-                    val pts = nativeComputeM3LoadingPolygon(morphPhase, 144)
-                    if (pts.size >= 288) {
-                        System.arraycopy(pts, 0, bootPolyVerts, 0, 288)
+                    val pts = nativeComputeM3LoadingPolygon(
+                        phase = morphPhase,
+                        pullProgress = 1.0f,
+                        isRefreshing = true,
+                        radiusPx = dpF(24f)
+                    )
+                    val nPts = pts.size / 2
+                    if (nPts >= 3) {
                         bootPolyPath.reset()
-                        val polyR = dpF(24f)
                         val rotRad = ((nowMs % 7200L).toFloat() / 7200f) * (2f * Math.PI.toFloat())
                         val cosA = cos(rotRad)
                         val sinA = kotlin.math.sin(rotRad)
-                        for (i in 0 until 144) {
-                            val px = bootPolyVerts[i * 2] * polyR
-                            val py = bootPolyVerts[i * 2 + 1] * polyR
+                        for (i in 0 until nPts) {
+                            val px = pts[i * 2]
+                            val py = pts[i * 2 + 1]
                             val rx = cx + (px * cosA - py * sinA)
                             val ry = badgeCy + (px * sinA + py * cosA)
                             if (i == 0) bootPolyPath.moveTo(rx, ry) else bootPolyPath.lineTo(rx, ry)
