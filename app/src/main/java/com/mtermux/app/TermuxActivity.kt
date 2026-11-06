@@ -487,6 +487,13 @@ class TermuxActivity : Activity() {
                 }
                 updateExtraKeysTranslationY()
             }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    if (::terminalSurface.isInitialized) {
+                        terminalSurface.syncSize()
+                    }
+                }
+            })
             start()
         }
     }
@@ -5358,7 +5365,10 @@ class TermuxActivity : Activity() {
                             val nowOpen = imeB > dp(80)
                             isImeCurrentlyOpen = nowOpen
                             applyExtraKeysImeState(finalBot.toFloat(), if (nowOpen) 1f else 0f)
-                            terminalSurface.postInvalidateOnAnimation()
+                            if (::terminalSurface.isInitialized) {
+                                terminalSurface.syncSize()
+                                terminalSurface.postInvalidateOnAnimation()
+                            }
                         }
                     }
                 }
@@ -5403,19 +5413,28 @@ class TermuxActivity : Activity() {
                                 val t = safeClamp(va.animatedValue as Float, 0f, 1f)
                                 val curBot = startBottom + (endBottom - startBottom) * t
                                 applyExtraKeysImeState(curBot, startF + (endF - startF) * t)
-                                terminalSurface.postInvalidateOnAnimation()
+                                if (::terminalSurface.isInitialized) {
+                                    terminalSurface.postInvalidateOnAnimation()
+                                }
                             }
                             addListener(object : android.animation.AnimatorListenerAdapter() {
                                 override fun onAnimationEnd(animation: android.animation.Animator) {
                                     applyExtraKeysImeState(endBottom, endF)
-                                    terminalSurface.postInvalidateOnAnimation()
+                                    if (::terminalSurface.isInitialized) {
+                                        terminalSurface.syncSize()
+                                        terminalSurface.postInvalidateOnAnimation()
+                                    }
                                 }
                             })
                             start()
                         }
                     } else {
+                        val bottomChanged = (lastAppliedBottomPx != targetBottom)
                         lastAppliedBottomPx = targetBottom
                         applyExtraKeysImeState(targetBottom.toFloat(), if (nowOpen) 1f else 0f)
+                        if (bottomChanged && ::terminalSurface.isInitialized) {
+                            terminalSurface.syncSize()
+                        }
                     }
                 }
                 insets
@@ -16134,7 +16153,17 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             }
         }
 
-        private var unoccludedHeightPx: Int = 0
+        internal fun computeTotalBottomOcclusionPx(): Float {
+            val baseLift = if (currentExtraKeysImeLiftPx > 0f) {
+                currentExtraKeysImeLiftPx
+            } else {
+                max(currentSysNavBottomPx, currentImeBottomPx).toFloat() + (if (!isImeCurrentlyOpen) dpF(14f) else 0f)
+            }
+            val extraH = if (::extraKeysRoot.isInitialized && extraKeysRoot.visibility == View.VISIBLE && !isExtraKeysScrollHidden) {
+                (extraKeysRoot.height.takeIf { it > 0 } ?: dp(41)).toFloat()
+            } else 0f
+            return baseLift + extraH
+        }
 
         internal fun resetScrollAndBlink() {
             scrollOffset = 0
@@ -16163,24 +16192,12 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
         internal fun computeEffectiveRow0Y(): Float {
             val gridTopOffPx = computeGridTopOffsetPx()
-            val cursorStateForPan = nativeGetCursorState()
-            val curCursorRow = if (cursorStateForPan >= 0) (cursorStateForPan ushr 16) and 0x1FFF else 0
             val overscrollUpPx = if (scrollOffset < 0) (-scrollOffset) * cellHeight else 0f
-            val activeBottomLimitY = (height - max(currentSysNavBottomPx, currentImeBottomPx)).toFloat()
-            val cursorBottomY = gridTopOffPx + (curCursorRow + 1) * cellHeight
-            val imeOccludedPanPx = if (scrollOffset == 0 && height > 0 && cursorBottomY > activeBottomLimitY) {
-                cursorBottomY - activeBottomLimitY
-            } else {
-                0f
-            }
-            return gridTopOffPx - (overscrollUpPx + imeOccludedPanPx)
+            return gridTopOffPx - overscrollUpPx
         }
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
-            if (!isImeCurrentlyOpen || h > unoccludedHeightPx || w != oldw) {
-                unoccludedHeightPx = max(h, unoccludedHeightPx)
-            }
             syncSize()
         }
 
@@ -16238,7 +16255,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
         internal fun computeSplitBounds(): FloatArray {
             val topOff = computeGridTopOffsetPx()
-            val activeBotY = (height - max(currentSysNavBottomPx, currentImeBottomPx)).toFloat()
+            val activeBotY = (height - computeTotalBottomOcclusionPx())
                 .coerceAtLeast(topOff + cellHeight * 4f + dpF(36f))
             val divH = dpF(34f)
             val usableH = (activeBotY - topOff - divH).coerceAtLeast(cellHeight * 4f)
@@ -16253,9 +16270,9 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             val w = width
             val h = height
             if (w <= 0 || h <= 0) return
-            if (!isImeCurrentlyOpen || h > unoccludedHeightPx) {
-                unoccludedHeightPx = h
-            }
+            val totalBottomOcclusion = computeTotalBottomOcclusionPx()
+            val topOff = computeGridTopOffsetPx()
+
             if (isDualPaneActive()) {
                 normalizeSplitSessionIndices()
                 val splitLeftInset = dpF(10f)
@@ -16289,11 +16306,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 return
             }
             val newCols = max(4, (w / cellWidth).toInt())
-
-            val effectiveH = max(h, unoccludedHeightPx)
-            val topOff = computeGridTopOffsetPx()
-            val navBot = currentSysNavBottomPx.toFloat()
-            val usableGridH = (effectiveH.toFloat() - topOff - navBot).coerceAtLeast(cellHeight * 2f)
+            val usableGridH = (h.toFloat() - topOff - totalBottomOcclusion).coerceAtLeast(cellHeight * 2f)
             val newRows = max(2, (usableGridH / cellHeight).toInt())
             val changed = (newCols != cols || newRows != rows)
             cols = newCols
@@ -16840,20 +16853,8 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             }
 
             val gridTopOffPx = computeGridTopOffsetPx()
-            val cursorStateForPan = nativeGetCursorState()
-            val curCursorRow = if (cursorStateForPan >= 0) (cursorStateForPan ushr 16) and 0x1FFF else 0
             val overscrollUpPx = if (scrollOffset < 0) (-scrollOffset) * cellHeight else 0f
-
-            // Visible bottom above IME (so text renders freely behind extraKeysRoot all the way down to the keyboard / bottom of screen!)
-            val activeBottomLimitY = (height - max(currentSysNavBottomPx, currentImeBottomPx)).toFloat()
-            val cursorBottomY = gridTopOffPx + (curCursorRow + 1) * cellHeight
-            val imeOccludedPanPx = if (scrollOffset == 0 && height > 0 && cursorBottomY > activeBottomLimitY) {
-                cursorBottomY - activeBottomLimitY
-            } else {
-                0f
-            }
-            val totalPanUpPx = overscrollUpPx + imeOccludedPanPx
-            val effectiveRow0Y = gridTopOffPx - totalPanUpPx
+            val effectiveRow0Y = gridTopOffPx - overscrollUpPx
 
             // 1. Draw scrollback rows ABOVE row 0 only when scrollback rows actually exist above row 0!
             if (scrollOffset < cachedMaxScrollback && effectiveRow0Y > 0f) {
@@ -16905,12 +16906,13 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             // 3. Draw rows BELOW row (rows - 1) only when scrolled up into history (scrollOffset > 0)!
             if (scrollOffset > 0) {
                 val bottomRowEndY = effectiveRow0Y + rows * cellHeight
-                if (bottomRowEndY < height) {
-                    val botExtraCount = min(scrollOffset, ceil(((height - bottomRowEndY) / cellHeight).toDouble()).toInt().coerceIn(0, 8))
+                val visibleLimitY = height - computeTotalBottomOcclusionPx()
+                if (bottomRowEndY < visibleLimitY) {
+                    val botExtraCount = min(scrollOffset, ceil(((visibleLimitY - bottomRowEndY) / cellHeight).toDouble()).toInt().coerceIn(0, 8))
                     for (k in 0 until botExtraCount) {
                         val rAfter = rows + k
                         val yTop = effectiveRow0Y + rAfter * cellHeight
-                        if (yTop < height) {
+                        if (yTop < visibleLimitY) {
                             drawSingleRow(canvas, rAfter, yTop)
                         }
                     }
