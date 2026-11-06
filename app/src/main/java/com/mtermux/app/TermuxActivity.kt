@@ -30,7 +30,6 @@ import android.graphics.RenderNode
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -47,9 +46,7 @@ import android.text.InputType
 import android.text.Selection
 import android.text.SpannableStringBuilder
 import android.util.TypedValue
-import android.animation.LayoutTransition
 import android.animation.ValueAnimator
-import android.graphics.CornerPathEffect
 import android.view.ActionMode
 import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
@@ -83,7 +80,6 @@ import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import android.window.BackEvent
@@ -484,8 +480,10 @@ class TermuxActivity : Activity() {
     private val backCallback = OnBackInvokedCallback {
         if (terminalSurface.isSelectingText()) {
             terminalSurface.stopTextSelection()
+        } else if (isExtraKeysScrollHidden) {
+            setExtraKeysScrollHidden(false)
         } else {
-            finish()
+            moveTaskToBack(true)
         }
     }
 
@@ -1183,10 +1181,12 @@ class TermuxActivity : Activity() {
         super.onResume()
         nativeRegisterSurface(terminalSurface)
         terminalSurface.onActivityResume()
+        terminalSurface.invalidateAllRows()
         terminalSurface.requestFocus()
     }
 
     override fun onPause() {
+        nativeRegisterSurface(null)
         terminalSurface.onActivityPause()
         super.onPause()
     }
@@ -1197,13 +1197,6 @@ class TermuxActivity : Activity() {
         }
         onBackInvokedDispatcher.unregisterOnBackInvokedCallback(backCallback)
         nativeRegisterSurface(null)
-        if (isFinishing) {
-            nativeDestroyAll()
-            try {
-                stopService(Intent(this, KeepAliveService::class.java))
-            } catch (_: Throwable) {
-            }
-        }
         super.onDestroy()
     }
 
@@ -7952,7 +7945,7 @@ class TermuxActivity : Activity() {
             val expandedInnerW = (totalNavW - termOuterFrame.paddingLeft - termOuterFrame.paddingRight).coerceAtLeast(dp(200))
 
             if (animateMorph && prevMode > 0 && targetMode == 0 && termOuterFrame.childCount > 0 && startTermW > dp(140)) {
-                // Smooth collapse: lock oldRow at its full expandedInnerW so its tabs never squish while closing!
+                // Liquid Expressive Collapse: lock oldRow at its full expandedInnerW so its tabs never squish while closing!
                 while (termOuterFrame.childCount > 1) {
                     termOuterFrame.removeViewAt(0)
                 }
@@ -7978,17 +7971,28 @@ class TermuxActivity : Activity() {
                     Gravity.START or Gravity.CENTER_VERTICAL
                 )
                 val exactCompactW = compactInnerW + termOuterFrame.paddingLeft + termOuterFrame.paddingRight
-                newRow.alpha = 0f
+                newRow.alpha = 1f
+                if (newRow.childCount > 0) {
+                    newRow.getChildAt(0).alpha = 0f
+                }
+                if (newRow.childCount > 1) {
+                    val accCh = newRow.getChildAt(1)
+                    accCh.alpha = 0f
+                    accCh.translationX = -dpF(14f)
+                    accCh.scaleX = 0.82f
+                    accCh.scaleY = 0.82f
+                }
                 termOuterFrame.addView(newRow)
 
                 hubTabsOuter.visibility = View.VISIBLE
                 hubTabsOuter.alpha = 0f
-                hubTabsOuter.scaleX = 0.95f
-                hubTabsOuter.scaleY = 0.95f
+                hubTabsOuter.translationX = dpF(20f)
+                hubTabsOuter.scaleX = 0.90f
+                hubTabsOuter.scaleY = 0.92f
 
                 termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 250L
-                    interpolator = PathInterpolator(0.18f, 1.0f, 0.24f, 1.0f)
+                    duration = 370L
+                    interpolator = PathInterpolator(0.30f, 0.0f, 0.12f, 1.0f)
                     addUpdateListener { va ->
                         val p = safeClamp(va.animatedValue as Float, 0f, 1f)
                         val curW = (startTermW + (exactCompactW - startTermW) * p).roundToInt()
@@ -7997,6 +8001,9 @@ class TermuxActivity : Activity() {
                         lp.weight = 0f
                         lp.marginEnd = (dpF(8f) * p).roundToInt()
                         termOuterFrame.layoutParams = lp
+                        // Subtle liquid vertical tension & rebound
+                        val liqScaleY = 1f - 0.032f * kotlin.math.sin(Math.PI.toFloat() * p)
+                        termOuterFrame.scaleY = liqScaleY
 
                         if (oldRow != null) {
                             if (oldRow.childCount > 0) {
@@ -8004,17 +8011,33 @@ class TermuxActivity : Activity() {
                             }
                             for (cIdx in 1 until oldRow.childCount) {
                                 val ch = oldRow.getChildAt(cIdx)
-                                ch.alpha = (1f - p * 1.45f).coerceIn(0f, 1f)
-                                ch.translationX = -dpF(10f) * p
+                                val fadeOut = safeClamp(1f - p * 1.35f, 0f, 1f)
+                                ch.alpha = fadeOut
+                                ch.translationX = -dpF(26f) * p
+                                ch.scaleX = 1f - 0.12f * p
+                                ch.scaleY = 1f - 0.12f * p
                             }
                         }
 
-                        newRow.alpha = safeClamp(p * 1.25f, 0f, 1f)
+                        if (newRow.childCount > 0) {
+                            val chip0 = newRow.getChildAt(0)
+                            val pChip0 = safeClamp(p * 1.25f, 0f, 1f)
+                            chip0.alpha = pChip0
+                        }
+                        if (newRow.childCount > 1) {
+                            val accCh = newRow.getChildAt(1)
+                            val pAcc = safeClamp((p - 0.10f) / 0.90f, 0f, 1f)
+                            accCh.alpha = pAcc
+                            accCh.translationX = -dpF(14f) * (1f - pAcc)
+                            accCh.scaleX = 0.82f + 0.18f * pAcc
+                            accCh.scaleY = 0.82f + 0.18f * pAcc
+                        }
 
-                        val pTab = safeClamp((p - 0.06f) / 0.94f, 0f, 1f)
+                        val pTab = safeClamp((p - 0.08f) / 0.92f, 0f, 1f)
                         hubTabsOuter.alpha = pTab
-                        hubTabsOuter.scaleX = 0.95f + 0.05f * pTab
-                        hubTabsOuter.scaleY = 0.95f + 0.05f * pTab
+                        hubTabsOuter.translationX = dpF(20f) * (1f - pTab)
+                        hubTabsOuter.scaleX = 0.90f + 0.10f * pTab
+                        hubTabsOuter.scaleY = 0.92f + 0.08f * pTab
                         (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
                             syncLiquidPillGeometryNow(hubSlidingPill, hubTabsOuter, st)
                         }
@@ -8029,7 +8052,15 @@ class TermuxActivity : Activity() {
                             while (termOuterFrame.childCount > 1) {
                                 termOuterFrame.removeViewAt(0)
                             }
+                            termOuterFrame.scaleY = 1f
                             newRow.alpha = 1f
+                            for (cIdx in 0 until newRow.childCount) {
+                                val ch = newRow.getChildAt(cIdx)
+                                ch.alpha = 1f
+                                ch.translationX = 0f
+                                ch.scaleX = 1f
+                                ch.scaleY = 1f
+                            }
                             newRow.layoutParams = FrameLayout.LayoutParams(
                                 FrameLayout.LayoutParams.WRAP_CONTENT,
                                 pillInnerH,
@@ -8041,6 +8072,7 @@ class TermuxActivity : Activity() {
                             finalLp.marginEnd = dp(8)
                             termOuterFrame.layoutParams = finalLp
                             hubTabsOuter.alpha = 1f
+                            hubTabsOuter.translationX = 0f
                             hubTabsOuter.scaleX = 1f
                             hubTabsOuter.scaleY = 1f
                             (hubSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
@@ -8051,7 +8083,7 @@ class TermuxActivity : Activity() {
                     start()
                 }
             } else if (animateMorph && prevMode == 0 && targetMode > 0 && termOuterFrame.childCount > 0) {
-                // Smooth expand: lock oldRow at its compact width and pre-layout newRow at expandedInnerW!
+                // Liquid Expressive Expand: lock oldRow at its compact width and pre-layout newRow at expandedInnerW!
                 while (termOuterFrame.childCount > 1) {
                     termOuterFrame.removeViewAt(0)
                 }
@@ -8066,14 +8098,18 @@ class TermuxActivity : Activity() {
                 val newRow = buildContentRow(targetMode, expandedInnerW)
                 for (cIdx in 0 until newRow.childCount) {
                     val ch = newRow.getChildAt(cIdx)
-                    ch.alpha = if (cIdx == 0) 0.3f else 0f
-                    if (cIdx > 0) ch.translationX = -dpF(8f)
+                    ch.alpha = if (cIdx == 0) 0.35f else 0f
+                    if (cIdx > 0) {
+                        ch.translationX = -dpF(22f)
+                        ch.scaleX = 0.86f
+                        ch.scaleY = 0.86f
+                    }
                 }
                 termOuterFrame.addView(newRow)
 
                 termExpandAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 250L
-                    interpolator = PathInterpolator(0.18f, 1.0f, 0.24f, 1.0f)
+                    duration = 390L
+                    interpolator = PathInterpolator(0.30f, 0.0f, 0.12f, 1.0f)
                     addUpdateListener { va ->
                         val p = safeClamp(va.animatedValue as Float, 0f, 1f)
                         val curW = (startTermW + (totalNavW - startTermW) * p).roundToInt()
@@ -8082,23 +8118,39 @@ class TermuxActivity : Activity() {
                         lp.weight = 0f
                         lp.marginEnd = (dpF(8f) * (1f - p)).roundToInt()
                         termOuterFrame.layoutParams = lp
+                        // Subtle liquid vertical squeeze & rebound
+                        val liqScaleY = 1f - 0.032f * kotlin.math.sin(Math.PI.toFloat() * p)
+                        termOuterFrame.scaleY = liqScaleY
 
                         if (oldRow != null) {
-                            oldRow.alpha = (1f - p * 1.45f).coerceIn(0f, 1f)
+                            if (oldRow.childCount > 0) {
+                                oldRow.getChildAt(0).alpha = (1f - p * 1.45f).coerceIn(0f, 1f)
+                            }
+                            if (oldRow.childCount > 1) {
+                                val accOld = oldRow.getChildAt(1)
+                                accOld.alpha = (1f - p * 1.65f).coerceIn(0f, 1f)
+                                accOld.translationX = dpF(24f) * p
+                                accOld.scaleX = 1f - 0.15f * p
+                                accOld.scaleY = 1f - 0.15f * p
+                            }
                         }
                         if (newRow.childCount > 0) {
-                            newRow.getChildAt(0).alpha = safeClamp(p * 1.6f, 0f, 1f)
+                            newRow.getChildAt(0).alpha = safeClamp(0.35f + p * 1.25f, 0f, 1f)
                         }
-                        val pNew = safeClamp((p - 0.08f) / 0.88f, 0f, 1f)
                         for (cIdx in 1 until newRow.childCount) {
                             val ch = newRow.getChildAt(cIdx)
+                            val stagger = (cIdx - 1) * 0.06f
+                            val pNew = safeClamp((p - 0.06f - stagger) / (0.90f - stagger).coerceAtLeast(0.4f), 0f, 1f)
                             ch.alpha = pNew
-                            ch.translationX = -dpF(8f) * (1f - pNew)
+                            ch.translationX = -dpF(22f) * (1f - pNew)
+                            ch.scaleX = 0.86f + 0.14f * pNew
+                            ch.scaleY = 0.86f + 0.14f * pNew
                         }
 
-                        hubTabsOuter.alpha = (1f - p * 1.45f).coerceIn(0f, 1f)
-                        hubTabsOuter.scaleX = 1f - 0.05f * p
-                        hubTabsOuter.scaleY = 1f - 0.05f * p
+                        hubTabsOuter.alpha = (1f - p * 1.35f).coerceIn(0f, 1f)
+                        hubTabsOuter.translationX = dpF(20f) * p
+                        hubTabsOuter.scaleX = 1f - 0.10f * p
+                        hubTabsOuter.scaleY = 1f - 0.08f * p
                     }
                     addListener(object : android.animation.AnimatorListenerAdapter() {
                         private var isCancelled = false
@@ -8110,10 +8162,13 @@ class TermuxActivity : Activity() {
                             while (termOuterFrame.childCount > 1) {
                                 termOuterFrame.removeViewAt(0)
                             }
+                            termOuterFrame.scaleY = 1f
                             for (cIdx in 0 until newRow.childCount) {
                                 val ch = newRow.getChildAt(cIdx)
                                 ch.alpha = 1f
                                 ch.translationX = 0f
+                                ch.scaleX = 1f
+                                ch.scaleY = 1f
                             }
                             newRow.layoutParams = FrameLayout.LayoutParams(
                                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -8127,6 +8182,7 @@ class TermuxActivity : Activity() {
                             termOuterFrame.layoutParams = finalLp
                             hubTabsOuter.visibility = View.GONE
                             hubTabsOuter.alpha = 1f
+                            hubTabsOuter.translationX = 0f
                             hubTabsOuter.scaleX = 1f
                             hubTabsOuter.scaleY = 1f
                         }
@@ -14480,8 +14536,11 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
     internal fun hasClipboardText(): Boolean {
         val cm = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager ?: return false
-        val clip = cm.primaryClip ?: return false
-        return clip.itemCount > 0 && !clip.getItemAt(0).coerceToText(this).isNullOrEmpty()
+        if (!cm.hasPrimaryClip()) return false
+        val desc = cm.primaryClipDescription ?: return true
+        return desc.hasMimeType(android.content.ClipDescription.MIMETYPE_TEXT_PLAIN) ||
+            desc.hasMimeType(android.content.ClipDescription.MIMETYPE_TEXT_HTML) ||
+            desc.mimeTypeCount > 0
     }
 
     private fun pillBg(fill: Int, stroke: Int, radiusPx: Int, strokeWidthPx: Int = -1): GradientDrawable {
@@ -15009,6 +15068,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
         internal fun invalidateAllRows() {
             rowNodesValid?.fill(false)
+            cachedMaxScrollback = nativeGetActiveScrollback()
             postInvalidateOnAnimation()
         }
 
@@ -15072,44 +15132,142 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             postInvalidateOnAnimation()
         }
 
+        private var bootstrapReady = false
+        private var cachedMaxScrollback = 0
+        private val bootPolyVerts = FloatArray(144 * 2)
+        private val bootPolyPath = Path()
+
         override fun onDraw(canvas: Canvas) {
             bgPaint.color = COLOR_AMOLED_BG
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
 
-            val bootState = nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
-            if (bootState != 2) {
-                textPaint.color = uiAccent
-                textPaint.typeface = baseTypeface
-                canvas.drawText(
-                    tr("Инициализация...", "Initializing..."),
-                    dp(16).toFloat(),
-                    height / 2f,
-                    textPaint
-                )
-                postInvalidateDelayed(40L)
-                return
-            }
+            if (!bootstrapReady) {
+                val bootState = nativeInitAndPollBootstrap(applicationInfo.nativeLibraryDir)
+                if (bootState != 2) {
+                    val w = width.toFloat()
+                    val h = height.toFloat()
+                    val cx = w * 0.5f
+                    val cy = h * 0.46f
+                    val cardW = min(w - dpF(40f), dpF(330f)).coerceAtLeast(dpF(240f))
+                    val cardH = dpF(216f)
+                    val cardLeft = cx - cardW * 0.5f
+                    val cardTop = cy - cardH * 0.5f
 
-            if (nativeGetSessionCount() == 0) {
-                nativeNewSession(
-                    false,
-                    max(5, rows),
-                    max(10, cols),
-                    cellWidth.roundToInt(),
-                    cellHeight.roundToInt()
-                )
-                post { rebuildTabs() }
-                rowNodesValid?.fill(false)
-            }
+                    // Material 3 Expressive Elevated Card
+                    bgPaint.style = Paint.Style.FILL
+                    bgPaint.color = uiSurfaceLow
+                    cursorRectF.set(cardLeft, cardTop, cardLeft + cardW, cardTop + cardH)
+                    canvas.drawRoundRect(cursorRectF, dpF(32f), dpF(32f), bgPaint)
 
-            val oscClip = nativeConsumeOsc52Clipboard()
-            if (!oscClip.isNullOrEmpty()) {
-                copyToClipboard(oscClip, false)
+                    bgPaint.style = Paint.Style.STROKE
+                    bgPaint.strokeWidth = dpF(1.2f)
+                    bgPaint.color = withAlpha(uiAccent, 48)
+                    canvas.drawRoundRect(cursorRectF, dpF(32f), dpF(32f), bgPaint)
+                    bgPaint.style = Paint.Style.FILL
+
+                    // Animated C++26 Material 3 Morphing Polygon Emblem
+                    val nowMs = SystemClock.uptimeMillis()
+                    val morphPhase = ((nowMs % 3900L).toFloat() / 650f)
+                    val badgeCy = cardTop + dpF(58f)
+                    bgPaint.color = uiAccentContainer
+                    canvas.drawCircle(cx, badgeCy, dpF(32f), bgPaint)
+
+                    val pts = nativeComputeM3LoadingPolygon(morphPhase, 144)
+                    if (pts.size >= 288) {
+                        System.arraycopy(pts, 0, bootPolyVerts, 0, 288)
+                        bootPolyPath.reset()
+                        val polyR = dpF(24f)
+                        val rotRad = ((nowMs % 7200L).toFloat() / 7200f) * (2f * Math.PI.toFloat())
+                        val cosA = cos(rotRad)
+                        val sinA = kotlin.math.sin(rotRad)
+                        for (i in 0 until 144) {
+                            val px = bootPolyVerts[i * 2] * polyR
+                            val py = bootPolyVerts[i * 2 + 1] * polyR
+                            val rx = cx + (px * cosA - py * sinA)
+                            val ry = badgeCy + (px * sinA + py * cosA)
+                            if (i == 0) bootPolyPath.moveTo(rx, ry) else bootPolyPath.lineTo(rx, ry)
+                        }
+                        bootPolyPath.close()
+                        bgPaint.color = uiAccent
+                        canvas.drawPath(bootPolyPath, bgPaint)
+                    }
+
+                    // ">_" emblem inside polygon
+                    val prevSize = textPaint.textSize
+                    val prevAlign = textPaint.textAlign
+                    textPaint.textAlign = Paint.Align.CENTER
+                    textPaint.typeface = Typeface.DEFAULT_BOLD
+                    textPaint.textSize = dpF(15f)
+                    textPaint.color = uiSurface
+                    canvas.drawText(">_", cx, badgeCy + dpF(5.5f), textPaint)
+
+                    // Expressive Title & Subtitle
+                    textPaint.textSize = dpF(16.5f)
+                    textPaint.color = COLOR_TEXT_BRIGHT
+                    canvas.drawText(
+                        tr("Подготовка среды MTermux", "Preparing MTermux"),
+                        cx,
+                        cardTop + dpF(122f),
+                        textPaint
+                    )
+
+                    textPaint.typeface = Typeface.DEFAULT
+                    textPaint.textSize = dpF(12f)
+                    textPaint.color = COLOR_TEXT_DIM
+                    canvas.drawText(
+                        tr("Распаковка окружения Linux (C++26)…", "Extracting Linux environment (C++26)…"),
+                        cx,
+                        cardTop + dpF(146f),
+                        textPaint
+                    )
+
+                    // Material 3 Expressive Liquid Pill Progress Track
+                    val trackW = cardW - dpF(56f)
+                    val trackH = dpF(6f)
+                    val trackLeft = cx - trackW * 0.5f
+                    val trackTop = cardTop + dpF(172f)
+                    bgPaint.color = uiSurfaceHigh
+                    cursorRectF.set(trackLeft, trackTop, trackLeft + trackW, trackTop + trackH)
+                    canvas.drawRoundRect(cursorRectF, trackH * 0.5f, trackH * 0.5f, bgPaint)
+
+                    val waveT = ((nowMs % 1400L).toFloat() / 1400f)
+                    val pillSegW = trackW * (0.28f + 0.18f * kotlin.math.sin(Math.PI.toFloat() * waveT))
+                    val pillPos = (trackW - pillSegW) * (0.5f - 0.5f * cos(2f * Math.PI.toFloat() * waveT))
+                    bgPaint.color = uiAccent
+                    cursorRectF.set(trackLeft + pillPos, trackTop, trackLeft + pillPos + pillSegW, trackTop + trackH)
+                    canvas.drawRoundRect(cursorRectF, trackH * 0.5f, trackH * 0.5f, bgPaint)
+
+                    textPaint.textAlign = prevAlign
+                    textPaint.textSize = prevSize
+                    textPaint.typeface = baseTypeface
+                    postInvalidateDelayed(16L)
+                    return
+                }
+                bootstrapReady = true
             }
 
             val engineDirty = nativeConsumeFrameDirty()
+            if (engineDirty || nativeGetSessionCount() == 0) {
+                if (nativeGetSessionCount() == 0) {
+                    nativeNewSession(
+                        false,
+                        max(5, rows),
+                        max(10, cols),
+                        cellWidth.roundToInt(),
+                        cellHeight.roundToInt()
+                    )
+                    post { rebuildTabs() }
+                    rowNodesValid?.fill(false)
+                }
+                val oscClip = nativeConsumeOsc52Clipboard()
+                if (!oscClip.isNullOrEmpty()) {
+                    copyToClipboard(oscClip, false)
+                }
+            }
+
             if (engineDirty) {
                 lastInputTimeMs = SystemClock.uptimeMillis()
+                cachedMaxScrollback = nativeGetActiveScrollback()
                 val curIdx = nativeGetActiveIndex()
                 if (curIdx >= 0) {
                     val nowRoot = nativeIsSessionRoot(curIdx)
@@ -15125,6 +15283,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             if (scrollOffset != cachedScrollOffset) {
                 valid.fill(false)
                 cachedScrollOffset = scrollOffset
+                cachedMaxScrollback = nativeGetActiveScrollback()
             } else if (engineDirty) {
                 for (r in 0 until min(rows, valid.size)) {
                     if (nativeIsRowDirty(r)) {
@@ -15150,13 +15309,16 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             val totalPanUpPx = overscrollUpPx + imeOccludedPanPx
             val effectiveRow0Y = gridTopOffPx - totalPanUpPx
 
-            // 1. Draw scrollback rows ABOVE row 0 (directly behind the floating top headerBar capsules!)
-            val topExtraCount = ceil((effectiveRow0Y / cellHeight).toDouble()).toInt().coerceIn(0, 8)
-            for (k in topExtraCount downTo 1) {
-                val rNeg = -k
-                val yTop = effectiveRow0Y + rNeg * cellHeight
-                if (yTop + cellHeight > 0f && yTop < height) {
-                    drawSingleRow(canvas, rNeg, yTop)
+            // 1. Draw scrollback rows ABOVE row 0 only when scrollback rows actually exist above row 0!
+            if (scrollOffset < cachedMaxScrollback && effectiveRow0Y > 0f) {
+                val availAbove = (cachedMaxScrollback - max(0, scrollOffset)).coerceIn(0, 8)
+                val topExtraCount = min(availAbove, ceil((effectiveRow0Y / cellHeight).toDouble()).toInt().coerceIn(0, 8))
+                for (k in topExtraCount downTo 1) {
+                    val rNeg = -k
+                    val yTop = effectiveRow0Y + rNeg * cellHeight
+                    if (yTop + cellHeight > 0f && yTop < height) {
+                        drawSingleRow(canvas, rNeg, yTop)
+                    }
                 }
             }
 
@@ -15194,15 +15356,17 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             }
             canvas.restore()
 
-            // 3. Draw rows BELOW row (rows - 1) (directly behind the floating bottom extraKeysRoot capsules!)
-            val bottomRowEndY = effectiveRow0Y + rows * cellHeight
-            if (bottomRowEndY < height) {
-                val botExtraCount = ceil(((height - bottomRowEndY) / cellHeight).toDouble()).toInt().coerceIn(0, 8)
-                for (k in 0 until botExtraCount) {
-                    val rAfter = rows + k
-                    val yTop = effectiveRow0Y + rAfter * cellHeight
-                    if (yTop < height) {
-                        drawSingleRow(canvas, rAfter, yTop)
+            // 3. Draw rows BELOW row (rows - 1) only when scrolled up into history (scrollOffset > 0)!
+            if (scrollOffset > 0) {
+                val bottomRowEndY = effectiveRow0Y + rows * cellHeight
+                if (bottomRowEndY < height) {
+                    val botExtraCount = min(scrollOffset, ceil(((height - bottomRowEndY) / cellHeight).toDouble()).toInt().coerceIn(0, 8))
+                    for (k in 0 until botExtraCount) {
+                        val rAfter = rows + k
+                        val yTop = effectiveRow0Y + rAfter * cellHeight
+                        if (yTop < height) {
+                            drawSingleRow(canvas, rAfter, yTop)
+                        }
                     }
                 }
             }
@@ -15211,7 +15375,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
             // Minimalist right-edge scrollbar indicator when viewing scrollback history
             if (scrollOffset > 0 && height > 0) {
-                val maxSb = nativeGetActiveScrollback()
+                val maxSb = cachedMaxScrollback
                 if (maxSb > 0) {
                     val totalRows = maxSb + rows
                     val thumbH = max(dpF(20f), height.toFloat() * (rows.toFloat() / totalRows.toFloat()))
@@ -15272,7 +15436,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
                         val baseMaxAlpha = (cursorAlphaPct.coerceIn(15, 100) / 100f)
                         val elapsedMs = SystemClock.uptimeMillis() - lastInputTimeMs
-                        val isIdleSleep = (elapsedMs > 10_000L) // VS Code #22900 10s idle freeze for 0% CPU
+                        val isIdleSleep = (elapsedMs > 4_000L) // 4s idle freeze for 0% battery & CPU drain
 
                         var alphaMul = 1f
                         var scaleYMul = 1f
@@ -15380,7 +15544,11 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                         }
 
                         if (activityResumed && keepVSyncAnimating) {
-                            postInvalidateOnAnimation()
+                            if (stillMoving) {
+                                postInvalidateOnAnimation()
+                            } else {
+                                postInvalidateDelayed(34L)
+                            }
                         }
                     }
                 }
@@ -16300,8 +16468,6 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 }
 
 class KeepAliveService : Service() {
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
 
     private fun buildMinimalNotification(): Notification {
         val chId = "termux_session_channel"
@@ -16353,33 +16519,9 @@ class KeepAliveService : Service() {
             startForeground(1, buildMinimalNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } catch (_: Throwable) {
         }
-
-        try {
-            wakeLock = getSystemService(PowerManager::class.java)
-                ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MTermux::WakeLock")
-                ?.apply {
-                    setReferenceCounted(false)
-                    acquire()
-                }
-            wifiLock = applicationContext.getSystemService(WifiManager::class.java)
-                ?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "MTermux::WifiLock")
-                ?.apply {
-                    setReferenceCounted(false)
-                    acquire()
-                }
-        } catch (_: Throwable) {
-        }
     }
 
     override fun onDestroy() {
-        try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-        } catch (_: Throwable) {
-        }
-        try {
-            if (wifiLock?.isHeld == true) wifiLock?.release()
-        } catch (_: Throwable) {
-        }
         super.onDestroy()
     }
 

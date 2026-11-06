@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     name: Build APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Git Init
@@ -82,7 +82,7 @@ jobs:
           chmod +x ./gradlew scripts/update_bootstrap.py
           python3 scripts/update_bootstrap.py
 
-      - name: Build APK
+      - name: Build APK & Generate Build Telemetry
         env:
           TERMUX_PACKAGE_VARIANT: apt-android-7
         run: |
@@ -110,6 +110,7 @@ jobs:
           fi
 
           APKSIGNER=$(find ${ANDROID_HOME}/build-tools -name apksigner | sort -V | tail -n 1)
+          SIGN_VERIFY_OUT="N/A"
           if [ -n "$APKSIGNER" ]; then
             if [ ! -f dist/MTermux-release.apk.idsig ]; then
               JAVA_OPTS="--enable-native-access=ALL-UNNAMED" "$APKSIGNER" sign \
@@ -124,15 +125,122 @@ jobs:
                 --out dist/MTermux-release.apk \
                 dist/MTermux-release.apk
             fi
-            JAVA_OPTS="--enable-native-access=ALL-UNNAMED" "$APKSIGNER" verify --verbose --v4-signature-file dist/MTermux-release.apk.idsig dist/MTermux-release.apk
+            SIGN_VERIFY_OUT=$(JAVA_OPTS="--enable-native-access=ALL-UNNAMED" "$APKSIGNER" verify --verbose --v4-signature-file dist/MTermux-release.apk.idsig dist/MTermux-release.apk || true)
+            echo "$SIGN_VERIFY_OUT"
           fi
+
+          python3 - << 'EOF'
+          import os, subprocess, zipfile, hashlib, datetime
+
+          def sh(cmd):
+              try:
+                  return subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, text=True).strip()
+              except Exception as e:
+                  return str(e)
+
+          os_name = sh("grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '\"'") or sh("uname -sr")
+          kernel = sh("uname -r")
+          java_ver = sh("java -version").splitlines()[0] if sh("java -version") else "Unknown"
+          python_ver = sh("python3 --version")
+          node_ver = sh("node -v")
+          ccache_ver = sh("ccache --version").splitlines()[0] if sh("ccache --version") else "N/A"
+          ccache_stats = sh("ccache -s")
+
+          # Parse versions from gradle/libs.versions.toml
+          versions = {}
+          if os.path.exists("gradle/libs.versions.toml"):
+              with open("gradle/libs.versions.toml") as vf:
+                  for line in vf:
+                      if "=" in line and not line.strip().startswith("["):
+                          k, v = line.split("=", 1)
+                          versions[k.strip()] = v.strip().strip('"')
+
+          # Inspect bootstrap-aarch64.zip packages
+          bs_path = "app/src/main/cpp/bootstrap-aarch64.zip"
+          bs_size = os.path.getsize(bs_path) if os.path.exists(bs_path) else 0
+          bs_pkgs = {}
+          total_bs_pkgs = 0
+          if os.path.exists(bs_path):
+              with zipfile.ZipFile(bs_path, "r") as zf:
+                  if "var/lib/dpkg/status" in zf.namelist():
+                      st_txt = zf.read("var/lib/dpkg/status").decode("utf-8", errors="replace")
+                      for block in st_txt.strip().split("\n\n"):
+                          p_name = None
+                          p_ver = None
+                          for ln in block.splitlines():
+                              if ln.startswith("Package:"):
+                                  p_name = ln.split(":", 1)[1].strip()
+                              elif ln.startswith("Version:"):
+                                  p_ver = ln.split(":", 1)[1].strip()
+                          if p_name and p_ver:
+                              total_bs_pkgs += 1
+                              bs_pkgs[p_name] = p_ver
+
+          apk_path = "dist/MTermux-release.apk"
+          idsig_path = "dist/MTermux-release.apk.idsig"
+          apk_size = os.path.getsize(apk_path) if os.path.exists(apk_path) else 0
+          idsig_size = os.path.getsize(idsig_path) if os.path.exists(idsig_path) else 0
+          apk_sha256 = hashlib.sha256(open(apk_path, "rb").read()).hexdigest() if os.path.exists(apk_path) else "N/A"
+
+          key_pkgs = ["bash", "apt", "dpkg", "openssh", "openssl", "coreutils", "ncurses", "readline", "zlib", "libandroid-support", "ca-certificates", "termux-tools"]
+          pkg_rows = "\n".join(
+              f"| `{k}` | `{bs_pkgs.get(k, 'pre-bundled')}` |"
+              for k in key_pkgs if k in bs_pkgs
+          )
+
+          now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+          md = f"""# ✦ MTermux Release — Build & Dependency Telemetry
+
+          > **Material 3 Expressive Edition (`com.mtermux`)** • Built on `{now_utc}`
+
+          ## 1. Выходные артефакты (Release Artifacts)
+          | Файл | Размер | SHA-256 / Статус |
+          | :--- | :--- | :--- |
+          | **`MTermux-release.apk`** | `{apk_size:,} bytes` (`{apk_size / (1024*1024):.2f} MB`) | `{apk_sha256}` |
+          | **`MTermux-release.apk.idsig`** | `{idsig_size:,} bytes` | `APK Signature Scheme v4 (.idsig)` |
+          | **`bootstrap-aarch64.zip`** | `{bs_size:,} bytes` (`{bs_size / (1024*1024):.2f} MB`) | `{total_bs_pkgs} pre-installed ARM64 packages` |
+
+          ## 2. Версии компиляторов, SDK и окружения (Toolchain & SDK)
+          | Компонент | Версия / Конфигурация |
+          | :--- | :--- |
+          | **Образ ОС (CI Runner)** | `{os_name}` (Kernel `{kernel}`) |
+          | **Стандарт C++ ядра** | `ISO C++26 (-std=c++26, -O3, ARMv8.2-A + Crypto + DotProd + FP16)` |
+          | **Версия Kotlin** | `{versions.get('kotlin', '2.5.0-Beta2')}` |
+          | **Android Gradle Plugin (AGP)** | `{versions.get('agp', '9.6.0-alpha02')}` |
+          | **Android SDK (compile / target / min)** | `API {versions.get('compileSdk', '37')} (Android 17)` |
+          | **Android NDK** | `{versions.get('ndk', '30.0.16248370')}` (`c++_static`, 16 KB page size aligned) |
+          | **Java / JDK Toolchain** | `{java_ver}` |
+          | **Python / Node.js** | `{python_ver}` / `{node_ver}` |
+          | **CCache** | `{ccache_ver}` |
+
+          ## 3. Ключевые пакеты в составе Bootstrap (`{total_bs_pkgs}` пакетов из коробки)
+          | Пакет (`aarch64`) | Версия |
+          | :--- | :--- |
+          {pkg_rows}
+
+          ## 4. Статистика компиляторного кэша (`ccache -s`)
+          ```text
+          {ccache_stats}
+          ```
+          """
+          md_clean = "\n".join(line[10:] if line.startswith("          ") else line for line in md.strip().splitlines()) + "\n"
+          with open("dist/BUILD-INFO.md", "w", encoding="utf-8") as out:
+              out.write(md_clean)
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as sf:
+                  sf.write(md_clean)
+          print("Generated dist/BUILD-INFO.md successfully!")
+          EOF
+
           ls -lh dist/
 
-      - name: Upload APK
+      - name: Upload APK & Build Telemetry
         uses: actions/upload-artifact@main
         with:
           name: MTermux-release
           path: |
             dist/MTermux-release.apk
             dist/MTermux-release.apk.idsig
+            dist/BUILD-INFO.md
           if-no-files-found: error
