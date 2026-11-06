@@ -1,0 +1,592 @@
+            if (isFileSelectionMode) {
+                val srv = activeSftpServer
+                val activeDirStr = if (srv == null) localCurrentDir.absolutePath else remoteCurrentPath
+
+                // 1. Compact Terminal icon + selected count (fixed minWidth so count changes never jitter!)
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.TERMINAL,
+                        label = "${selectedSftpPaths.size}",
+                        leftR = pillOuterR,
+                        rightR = pillInnerR,
+                        fillCol = uiAccentContainer,
+                        tintCol = uiOnAccentContainer,
+                        weightVal = 1.05f,
+                        minW = dp(54),
+                        captureLabelRef = true
+                    ) {
+                        exitToTerminalAnimated()
+                    }
+                )
+                // 2. Select All icon (M3Icon.SELECT_ALL)
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.SELECT_ALL,
+                        label = null,
+                        leftR = pillInnerR,
+                        rightR = pillInnerR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        weightVal = 0.85f
+                    ) {
+                        trashConfirmExpanded = false
+                        if (selectedSftpPaths.size >= lastRenderedEntries.size && lastRenderedEntries.isNotEmpty()) {
+                            selectedSftpPaths.clear()
+                            rebuildUniversalTermPill(true)
+                        } else {
+                            for (e in lastRenderedEntries) {
+                                selectedSftpPaths.add(e.path)
+                            }
+                            rebuildUniversalTermPill(false)
+                        }
+                        activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                    }
+                )
+                if (srv == null) {
+                    // 3. Copy icon (M3Icon.COPY)
+                    termOuterFrame.addView(
+                        makeSegmentPill(
+                            icon = M3Icon.COPY,
+                            label = null,
+                            leftR = pillInnerR,
+                            rightR = pillInnerR,
+                            fillCol = uiSurfaceHigh,
+                            tintCol = COLOR_TEXT_BRIGHT,
+                            weightVal = 0.85f
+                        ) {
+                            trashConfirmExpanded = false
+                            batchClipSources.clear()
+                            batchClipSources.addAll(selectedSftpPaths)
+                            batchClipIsMove = false
+                            fileClipSource = null
+                            selectedSftpPaths.clear()
+                            rebuildUniversalTermPill(true)
+                            activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                        }
+                    )
+                    // 4. Cut icon (M3Icon.CUT - scissors)
+                    termOuterFrame.addView(
+                        makeSegmentPill(
+                            icon = M3Icon.CUT,
+                            label = null,
+                            leftR = pillInnerR,
+                            rightR = pillInnerR,
+                            fillCol = uiSurfaceHigh,
+                            tintCol = COLOR_TEXT_BRIGHT,
+                            weightVal = 0.85f
+                        ) {
+                            trashConfirmExpanded = false
+                            batchClipSources.clear()
+                            batchClipSources.addAll(selectedSftpPaths)
+                            batchClipIsMove = true
+                            fileClipSource = null
+                            selectedSftpPaths.clear()
+                            rebuildUniversalTermPill(true)
+                            activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                        }
+                    )
+                }
+                // 5. Compress to .zip icon (M3Icon.ARCHIVE_ZIP)
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.ARCHIVE_ZIP,
+                        label = null,
+                        leftR = pillInnerR,
+                        rightR = pillInnerR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        weightVal = 0.85f
+                    ) {
+                        trashConfirmExpanded = false
+                        val targets = selectedSftpPaths.toList()
+                        val archiveName = if (targets.size == 1) {
+                            "${targets[0].substringAfterLast('/')}.zip"
+                        } else {
+                            "archive_${System.currentTimeMillis() / 1000}.zip"
+                        }
+                        val archivePath = if (activeDirStr == "/") "/$archiveName" else "$activeDirStr/$archiveName"
+                        selectedSftpPaths.clear()
+                        rebuildUniversalTermPill(true)
+                        activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                        compressPathsToZipAsync(srv, activeDirStr, targets, archivePath) { _, createdName ->
+                            Toast.makeText(this, tr("Создан архив: $createdName", "Archived: $createdName"), Toast.LENGTH_SHORT).show()
+                            activeSftpRefreshCallback?.invoke(true, null)
+                        }
+                    }
+                )
+                // 6. Expandable Trash Icon -> on 1st tap smoothly unfolds in-place with "Уверены?"!
+                val trashBg = makeConnectedSegmentDrawable(
+                    COLOR_ROOT_CONTAINER,
+                    if (trashConfirmExpanded) pillOuterR else pillInnerR,
+                    if (trashConfirmExpanded) pillOuterR else pillInnerR
+                )
+                val trashIconView = MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                        marginEnd = if (trashConfirmExpanded) dp(5) else 0
+                    }
+                }
+                val trashSureTv = TextView(this@TermuxActivity).apply {
+                    text = tr("Уверены?", "Sure?")
+                    setSingleLine(true)
+                    setTextColor(COLOR_ROOT)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
+                    alpha = if (trashConfirmExpanded) 1f else 0f
+                    visibility = if (trashConfirmExpanded) View.VISIBLE else View.GONE
+                }
+                val trashBtn = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    background = trashBg
+                    setPadding(dp(10), 0, dp(10), 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        pillInnerH,
+                        if (trashConfirmExpanded) 2.15f else 0.90f
+                    ).apply {
+                        marginEnd = dp(2)
+                    }
+                    addView(trashIconView)
+                    addView(trashSureTv)
+                    attachSmoothPressAnimation(this, 0.93f)
+                    setOnClickListener {
+                        if (!trashConfirmExpanded) {
+                            triggerHaptic(1.1f)
+                            trashConfirmExpanded = true
+                            lastTermPillTrashConfirm = true
+                            trashSureTv.visibility = View.VISIBLE
+                            trashSureTv.alpha = 0f
+                            animEngine.drive(this, 240L, 0, onStep = { t ->
+                                val p = safeClamp(t, 0f, 1f)
+                                val curR = pillInnerR + (pillOuterR - pillInnerR) * p
+                                trashBg.cornerRadii = floatArrayOf(curR, curR, curR, curR, curR, curR, curR, curR)
+                                val lp = layoutParams as LinearLayout.LayoutParams
+                                lp.weight = 0.90f + (2.15f - 0.90f) * p
+                                layoutParams = lp
+                                val icLp = trashIconView.layoutParams as LinearLayout.LayoutParams
+                                icLp.marginEnd = (dpF(5f) * p).roundToInt()
+                                trashIconView.layoutParams = icLp
+                                trashSureTv.alpha = safeClamp((p - 0.18f) / 0.82f, 0f, 1f)
+                            })
+                        } else {
+                            triggerHaptic(1.35f)
+                            trashConfirmExpanded = false
+                            val toDel = selectedSftpPaths.toList()
+                            selectedSftpPaths.clear()
+                            rebuildUniversalTermPill(true)
+                            val joined = toDel.joinToString(" ") { shellEscapeSingle(it) }
+                            Thread {
+                                if (srv == null) {
+                                    var allDeleted = true
+                                    for (p in toDel) {
+                                        if (!File(p).deleteRecursively()) allDeleted = false
+                                    }
+                                    if (!allDeleted) {
+                                        nativeExecLocalRootCmd("rm -rf -- $joined")
+                                    }
+                                } else {
+                                    runRemoteSftpViaCpp26(srv, "rm -rf -- $joined")
+                                }
+                                runOnUiThread { activeSftpRefreshCallback?.invoke(true, null) }
+                            }.start()
+                        }
+                    }
+                }
+                termOuterFrame.addView(trashBtn)
+
+                // 7. Close/Clear selection icon
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.CLOSE,
+                        label = null,
+                        leftR = pillInnerR,
+                        rightR = pillOuterR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        marginEndDp = 0,
+                        weightVal = 0.85f
+                    ) {
+                        trashConfirmExpanded = false
+                        selectedSftpPaths.clear()
+                        rebuildUniversalTermPill(true)
+                        activeSftpPopulateRowsCallback?.invoke(null, lastRenderedEntries)
+                    }
+                )
+            } else if (isPkgSelectionMode) {
+                // Batch Package Selection Toolbar in Пакеты tab (in-place counter update!)
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.TERMINAL,
+                        label = "${selectedPackageNames.size}",
+                        leftR = pillOuterR,
+                        rightR = pillInnerR,
+                        fillCol = uiAccentContainer,
+                        tintCol = uiOnAccentContainer,
+                        weightVal = 1.0f,
+                        minW = dp(54),
+                        captureLabelRef = true
+                    ) {
+                        exitToTerminalAnimated()
+                    }
+                )
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.SELECT_ALL,
+                        label = tr("Все", "All"),
+                        leftR = pillInnerR,
+                        rightR = pillInnerR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        weightVal = 1.15f
+                    ) {
+                        trashConfirmExpanded = false
+                        if (selectedPackageNames.size >= lastUserPackageNames.size && lastUserPackageNames.isNotEmpty()) {
+                            selectedPackageNames.clear()
+                            rebuildUniversalTermPill(true)
+                        } else {
+                            selectedPackageNames.addAll(lastUserPackageNames)
+                            rebuildUniversalTermPill(false)
+                        }
+                        activePackagesPopulateCallback?.invoke()
+                    }
+                )
+                val pkgTrashBtn = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    background = makeConnectedSegmentDrawable(
+                        COLOR_ROOT_CONTAINER,
+                        if (trashConfirmExpanded) pillOuterR else pillInnerR,
+                        if (trashConfirmExpanded) pillOuterR else pillInnerR
+                    )
+                    setPadding(dp(12), 0, dp(12), 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        pillInnerH,
+                        if (trashConfirmExpanded) 2.1f else 1.25f
+                    ).apply {
+                        marginEnd = dp(2)
+                    }
+                    addView(
+                        MaterialIconView(this@TermuxActivity, M3Icon.TRASH, COLOR_ROOT, 17.5f, 2.0f).apply {
+                            layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                                marginEnd = dp(5)
+                            }
+                        }
+                    )
+                    addView(TextView(this@TermuxActivity).apply {
+                        text = if (trashConfirmExpanded) tr("Уверены?", "Sure?") else tr("Удалить", "Remove")
+                        setSingleLine(true)
+                        setTextColor(COLOR_ROOT)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    })
+                    attachSmoothPressAnimation(this, 0.93f)
+                    setOnClickListener {
+                        if (!trashConfirmExpanded) {
+                            triggerHaptic(1.1f)
+                            trashConfirmExpanded = true
+                            rebuildUniversalTermPill(true)
+                        } else {
+                            triggerHaptic(1.35f)
+                            val pkgsToRemove = selectedPackageNames.joinToString(" ")
+                            selectedPackageNames.clear()
+                            trashConfirmExpanded = false
+                            dlg.dismiss()
+                            nativeSendText("apt remove -y $pkgsToRemove\n", false)
+                        }
+                    }
+                }
+                termOuterFrame.addView(pkgTrashBtn)
+
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.CLOSE,
+                        label = null,
+                        leftR = pillInnerR,
+                        rightR = pillOuterR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        marginEndDp = 0,
+                        weightVal = 0.85f
+                    ) {
+                        trashConfirmExpanded = false
+                        selectedPackageNames.clear()
+                        rebuildUniversalTermPill(true)
+                        activePackagesPopulateCallback?.invoke()
+                    }
+                )
+            } else if (activeTab == 1 && termDrawerExpanded) {
+                // Файлы Source Switcher Hotbar inside "Терминал" capsule:
+                // Smoothly compresses "Терминал" into a compact icon chip [ >_ ] while unfolding [ Termux | SD | Root | SSH ]!
+                val startChipFromMorph = animateMorph && !prevExpandedRight
+                val termDrawerIcon = MaterialIconView(this@TermuxActivity, M3Icon.TERMINAL, uiOnAccentContainer, 18f, 2.0f).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(19), dp(19)).apply {
+                        marginEnd = if (startChipFromMorph) dp(5) else 0
+                    }
+                }
+                val termDrawerLabel = TextView(this@TermuxActivity).apply {
+                    text = tr("Терминал", "Terminal")
+                    setSingleLine(true)
+                    setTextColor(uiOnAccentContainer)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    alpha = if (startChipFromMorph) 1f else 0f
+                    visibility = if (startChipFromMorph) View.VISIBLE else View.GONE
+                }
+                termDrawerLabel.measure(
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(pillInnerH, View.MeasureSpec.EXACTLY)
+                )
+                val fullTermLabelW = termDrawerLabel.measuredWidth.coerceAtLeast(dp(58))
+                termDrawerLabel.layoutParams = LinearLayout.LayoutParams(
+                    if (startChipFromMorph) fullTermLabelW else 0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                val termDrawerChip = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    minimumWidth = dp(36)
+                    background = makeConnectedSegmentDrawable(uiAccentContainer, pillOuterR, pillInnerR)
+                    val initHPad = if (startChipFromMorph) dp(12) else dp(8)
+                    setPadding(initHPad, 0, initHPad, 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        pillInnerH
+                    ).apply {
+                        marginEnd = dp(3)
+                    }
+                    addView(termDrawerIcon)
+                    addView(termDrawerLabel)
+                    attachSmoothPressAnimation(this, 0.94f)
+                    setOnClickListener {
+                        exitToTerminalAnimated()
+                    }
+                }
+                termOuterFrame.addView(termDrawerChip)
+
+                val curSrc = currentSftpSourceCode()
+                val srcHotbarOuter = FrameLayout(this).apply {
+                    clipChildren = true
+                    clipToPadding = true
+                    layoutParams = LinearLayout.LayoutParams(0, pillInnerH, 1f).apply {
+                        marginEnd = dp(3)
+                    }
+                }
+                val srcSlidingPill = View(this).apply {
+                    background = makeLiquidGlassPillDrawable(activePillColor, pillOuterR.roundToInt())
+                    layoutParams = FrameLayout.LayoutParams(0, pillInnerH)
+                }
+                srcHotbarOuter.addView(srcSlidingPill)
+
+                val srcHotbarRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        pillInnerH
+                    )
+                }
+                srcHotbarOuter.addView(srcHotbarRow)
+
+                val sources = listOf(
+                    Triple(0, M3Icon.FOLDER, "Termux"),
+                    Triple(1, M3Icon.STORAGE, "SD"),
+                    Triple(2, M3Icon.ROOT_HASH, "Root"),
+                    Triple(3, M3Icon.SERVER, "SSH")
+                )
+                val srcTabViews = ArrayList<LinearLayout>(4)
+                val srcIcons = ArrayList<MaterialIconView>(4)
+                val srcLabels = ArrayList<TextView>(4)
+                val srcSelProgs = FloatArray(4) { idx -> if (idx == curSrc) 1f else 0f }
+                var srcSwitchAnim: ValueAnimator? = null
+
+                fun updateSrcHotbarGeometry() {
+                    for (idx in 0 until 4) {
+                        val sf = safeClamp(srcSelProgs[idx], 0f, 1f)
+                        val ic = srcIcons[idx]
+                        val icLp = ic.layoutParams as LinearLayout.LayoutParams
+                        val icW = (dpF(15f) * sf).roundToInt()
+                        val icM = (dpF(4f) * sf).roundToInt()
+                        ic.visibility = View.VISIBLE
+                        ic.alpha = sf
+                        ic.scaleX = 0.65f + 0.35f * sf
+                        ic.scaleY = 0.65f + 0.35f * sf
+                        if (icLp.width != icW || icLp.marginEnd != icM) {
+                            icLp.width = icW
+                            icLp.marginEnd = icM
+                            ic.layoutParams = icLp
+                        }
+                        val box = srcTabViews[idx]
+                        val lp = box.layoutParams as LinearLayout.LayoutParams
+                        val targetW = 0.86f + 0.50f * sf
+                        if (abs(lp.weight - targetW) > 0.004f) {
+                            lp.weight = targetW
+                            box.layoutParams = lp
+                        }
+                        srcLabels[idx].setTextColor(blendColor(COLOR_TEXT_DIM, COLOR_TEXT_BRIGHT, sf))
+                    }
+                    (srcSlidingPill.tag as? LiquidPillTrackerState)?.let { st ->
+                        syncLiquidPillGeometryNow(srcSlidingPill, srcHotbarOuter, st)
+                    }
+                }
+
+                fun selectSourceAnimated(sCode: Int, targetBox: LinearLayout, onSwitched: () -> Unit) {
+                    srcSwitchAnim?.cancel()
+                    val startProgs = FloatArray(4) { srcSelProgs[it] }
+                    srcSwitchAnim = animEngine.drive("srcSwitch", 230L, 0, onStep = { t ->
+                        val p = safeClamp(t, 0f, 1f)
+                        for (i in 0 until 4) {
+                            val goal = if (i == sCode) 1f else 0f
+                            srcSelProgs[i] = startProgs[i] + (goal - startProgs[i]) * p
+                        }
+                        updateSrcHotbarGeometry()
+                    })
+                    animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, targetBox, animate = true)
+                    srcHotbarRow.postDelayed({
+                        onSwitched()
+                    }, 175L)
+                }
+
+                for ((sCode, sIcon, sLbl) in sources) {
+                    val isSel = (curSrc == sCode)
+                    val ic = MaterialIconView(this, sIcon, uiOnAccentContainer, 15f, 2.0f).apply {
+                        layoutParams = LinearLayout.LayoutParams(if (isSel) dp(15) else 0, dp(15)).apply {
+                            marginEnd = if (isSel) dp(4) else 0
+                        }
+                        alpha = if (isSel) 1f else 0f
+                    }
+                    val tv = TextView(this).apply {
+                        text = sLbl
+                        setSingleLine(true)
+                        setTextColor(if (isSel) COLOR_TEXT_BRIGHT else COLOR_TEXT_DIM)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.8f)
+                    }
+                    val box = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER
+                        setPadding(dp(4), 0, dp(4), 0)
+                        layoutParams = LinearLayout.LayoutParams(
+                            0,
+                            pillInnerH,
+                            if (isSel) 1.36f else 0.86f
+                        )
+                        addView(ic)
+                        addView(tv)
+                        attachSmoothPressAnimation(this, 0.94f)
+                        setOnClickListener {
+                            triggerHaptic(0.85f)
+                            when (sCode) {
+                                0 -> {
+                                    selectSourceAnimated(0, this) {
+                                        activeSftpServer = null
+                                        localCurrentDir = appRootDir
+prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).apply()
+                                        termDrawerExpanded = false
+                                        rebuildUniversalTermPill(true)
+                                        activeSftpBreadcrumbsCallback?.invoke(true)
+                                        activeSftpRefreshCallback?.invoke(false, null)
+                                    }
+                                }
+                                1 -> {
+                                    val switchToSd = {
+                                        selectSourceAnimated(1, this) {
+                                            activeSftpServer = null
+                                            localCurrentDir = sdDirGlobal
+prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).apply()
+                                            termDrawerExpanded = false
+                                            rebuildUniversalTermPill(true)
+                                            activeSftpBreadcrumbsCallback?.invoke(true)
+                                            activeSftpRefreshCallback?.invoke(false, null)
+                                        }
+                                    }
+                                    if (!hasAllFilesAccessPermission() && !hasStandardStoragePermission()) {
+                                        showStoragePermissionsModal { switchToSd() }
+                                    } else {
+                                        switchToSd()
+                                    }
+                                }
+                                2 -> {
+                                    selectSourceAnimated(2, this) {
+                                        activeSftpServer = null
+                                        localCurrentDir = fsRootDir
+prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).apply()
+                                        termDrawerExpanded = false
+                                        rebuildUniversalTermPill(true)
+                                        activeSftpBreadcrumbsCallback?.invoke(true)
+                                        activeSftpRefreshCallback?.invoke(false, null)
+                                    }
+                                }
+                                3 -> {
+                                    val saved = loadSshServers()
+                                    if (saved.isEmpty()) {
+                                        Toast.makeText(this@TermuxActivity, tr("Сначала добавьте SSH-сервер во вкладке SSH", "Add an SSH server in the SSH tab first"), Toast.LENGTH_SHORT).show()
+                                    } else if (saved.size == 1 && activeSftpServer == null) {
+                                        val srv = saved[0]
+                                        selectSourceAnimated(3, this) {
+                                            activeSftpServer = srv
+                                            remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                                            termDrawerExpanded = false
+                                            rebuildUniversalTermPill(true)
+                                            activeSftpBreadcrumbsCallback?.invoke(true)
+                                            activeSftpRefreshCallback?.invoke(false, null)
+                                        }
+                                    } else {
+                                        val curIdx = saved.indexOfFirst { it.id == activeSftpServer?.id }.coerceAtLeast(0)
+                                        showBakaSuChooseDialog(
+                                            title = tr("Выберите SSH-сервер", "Select SSH Server"),
+                                            items = saved.map { it.label },
+                                            descriptions = saved.map { "${it.username}@${it.host}:${it.port}" },
+                                            selectedIndex = curIdx
+                                        ) { chosen ->
+                                            val srv = saved[chosen]
+                                            selectSourceAnimated(3, this) {
+                                                activeSftpServer = srv
+                                                remoteCurrentPath = if (srv.username == "root") "/root" else "/home/${srv.username}"
+                                                termDrawerExpanded = false
+                                                rebuildUniversalTermPill(true)
+                                                activeSftpBreadcrumbsCallback?.invoke(true)
+                                                activeSftpRefreshCallback?.invoke(false, null)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    srcIcons.add(ic)
+                    srcLabels.add(tv)
+                    srcTabViews.add(box)
+                    srcHotbarRow.addView(box)
+                }
+
+                srcHotbarRow.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+                    override fun onPreDraw(): Boolean {
+                        if (srcHotbarRow.viewTreeObserver.isAlive) {
+                            srcHotbarRow.viewTreeObserver.removeOnPreDrawListener(this)
+                        }
+                        val target = srcTabViews.getOrNull(curSrc) ?: return true
+                        animateLiquidSegmentedPill(srcSlidingPill, srcHotbarOuter, target, animate = false)
+                        return true
+                    }
+                })
+                termOuterFrame.addView(srcHotbarOuter)
+
+                // Collapse drawer button
+                termOuterFrame.addView(
+                    makeSegmentPill(
+                        icon = M3Icon.CLOSE,
+                        label = null,
+                        leftR = pillInnerR,
+                        rightR = pillOuterR,
+                        fillCol = uiSurfaceHigh,
+                        tintCol = COLOR_TEXT_BRIGHT,
+                        marginEndDp = 0,
+                        weightVal = 0f,
+                        minW = dp(34)
+                    ) {
+                        termDrawerExpanded = false
+                        rebuildUniversalTermPill(true)
+                    }
+                )
+            } else {

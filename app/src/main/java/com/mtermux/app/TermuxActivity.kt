@@ -15133,6 +15133,11 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             if (rem < 2 && splitScreenEnabled) {
                 splitScreenEnabled = false
             }
+            val newActive = nativeGetActiveIndex()
+            if (newActive >= 0) {
+                terminalSurface.lastObservedRootState = nativeIsSessionRoot(newActive)
+            }
+            terminalSurface.triggerSessionSwitchAnim()
             terminalSurface.syncSize(forceResize = true)
             rebuildTabs(
                 closedTabIndex = closedIdx,
@@ -15146,6 +15151,8 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
     private fun showTabContextMenu(tabIndex: Int) {
         if (nativeGetSessionCount() > tabIndex && nativeGetActiveIndex() != tabIndex) {
             nativeSwitchSession(tabIndex)
+            terminalSurface.lastObservedRootState = nativeIsSessionRoot(tabIndex)
+            terminalSurface.triggerSessionSwitchAnim()
             terminalSurface.syncSize()
             rebuildTabs()
             terminalSurface.invalidateAllRows()
@@ -15228,6 +15235,9 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
         (tabStrip.tag as? ValueAnimator)?.cancel()
         tabSlidingIndicator.visibility = View.GONE
 
+        if (closedTabIndex >= 0) {
+            prevSessionRootStates.clear()
+        }
         val rawCount = nativeGetSessionCount()
         val count = max(1, rawCount)
         val active = safeClampInt(if (rawCount > 0) nativeGetActiveIndex() else 0, 0, count - 1)
@@ -15463,6 +15473,8 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                             terminalSurface.resetScrollAndBlink()
                         } else {
                             nativeSwitchSession(idx)
+                            terminalSurface.lastObservedRootState = nativeIsSessionRoot(idx)
+                            terminalSurface.triggerSessionSwitchAnim()
                             terminalSurface.syncSize(forceResize = true)
                             rebuildTabs()
                             terminalSurface.invalidateAllRows()
@@ -15537,6 +15549,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                             ghostClosingProg = 0f
                             updateSessionTabsBentoGeometry()
                         }
+                        tabStrip.tag = null
                     }
                 })
             }
@@ -15555,6 +15568,11 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     }
                     updateSessionTabsBentoGeometry()
                 }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        tabStrip.tag = null
+                    }
+                })
             }
             tabStrip.tag = rootAnim
             rootAnim.start()
@@ -15746,7 +15764,29 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
         private var cursorBlinkOn = true
         private var lastInputTimeMs = SystemClock.uptimeMillis()
-        private var lastObservedRootState: Boolean = false
+        internal var lastObservedRootState: Boolean = false
+        private var sessionSwitchAnimProg: Float = 1f
+        private var sessionSwitchAnimator: ValueAnimator? = null
+
+        internal fun triggerSessionSwitchAnim() {
+            sessionSwitchAnimator?.cancel()
+            sessionSwitchAnimProg = 0f
+            sessionSwitchAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 200L
+                interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                addUpdateListener { va ->
+                    sessionSwitchAnimProg = va.animatedValue as Float
+                    postInvalidateOnAnimation()
+                }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        sessionSwitchAnimProg = 1f
+                        postInvalidateOnAnimation()
+                    }
+                })
+                start()
+            }
+        }
 
         // VS Code Smooth Caret Interpolation State
         private var animCursorX = 0f
@@ -16193,7 +16233,16 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
         internal fun computeEffectiveRow0Y(): Float {
             val gridTopOffPx = computeGridTopOffsetPx()
             val overscrollUpPx = if (scrollOffset < 0) (-scrollOffset) * cellHeight else 0f
-            return gridTopOffPx - overscrollUpPx
+            val cursorStateForPan = nativeGetCursorState()
+            val curCursorRow = if (cursorStateForPan >= 0) (cursorStateForPan ushr 16) and 0x1FFF else 0
+            val cursorBottomY = gridTopOffPx + (curCursorRow + 1) * cellHeight
+            val activeBottomLimitY = (height.toFloat() - computeTotalBottomOcclusionPx()).coerceAtLeast(gridTopOffPx + cellHeight)
+            val imeGlidePanPx = if (scrollOffset == 0 && height > 0 && cursorBottomY > activeBottomLimitY) {
+                cursorBottomY - activeBottomLimitY
+            } else {
+                0f
+            }
+            return gridTopOffPx - (overscrollUpPx + imeGlidePanPx)
         }
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -16466,7 +16515,9 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     val nowRoot = nativeIsSessionRoot(curIdx)
                     if (nowRoot != lastObservedRootState) {
                         lastObservedRootState = nowRoot
-                        post { rebuildTabs() }
+                        if (tabStrip.tag == null) {
+                            post { rebuildTabs() }
+                        }
                     }
                 }
             }
@@ -16853,17 +16904,21 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             }
 
             val gridTopOffPx = computeGridTopOffsetPx()
-            val overscrollUpPx = if (scrollOffset < 0) (-scrollOffset) * cellHeight else 0f
-            val effectiveRow0Y = gridTopOffPx - overscrollUpPx
+            val effectiveRow0Y = computeEffectiveRow0Y()
+            val activeBottomLimitY = (height.toFloat() - computeTotalBottomOcclusionPx()).coerceAtLeast(gridTopOffPx + cellHeight)
+            val switchSlideY = dpF(4f) * (1f - sessionSwitchAnimProg)
+
+            canvas.save()
+            canvas.clipRect(0f, gridTopOffPx, width.toFloat(), activeBottomLimitY)
 
             // 1. Draw scrollback rows ABOVE row 0 only when scrollback rows actually exist above row 0!
-            if (scrollOffset < cachedMaxScrollback && effectiveRow0Y > 0f) {
+            if (scrollOffset < cachedMaxScrollback && effectiveRow0Y > gridTopOffPx) {
                 val availAbove = (cachedMaxScrollback - max(0, scrollOffset)).coerceIn(0, 8)
-                val topExtraCount = min(availAbove, ceil((effectiveRow0Y / cellHeight).toDouble()).toInt().coerceIn(0, 8))
+                val topExtraCount = min(availAbove, ceil(((effectiveRow0Y - gridTopOffPx) / cellHeight).toDouble()).toInt().coerceIn(0, 8))
                 for (k in topExtraCount downTo 1) {
                     val rNeg = -k
                     val yTop = effectiveRow0Y + rNeg * cellHeight
-                    if (yTop + cellHeight > 0f && yTop < height) {
+                    if (yTop + cellHeight > gridTopOffPx && yTop < activeBottomLimitY) {
                         drawSingleRow(canvas, rNeg, yTop)
                     }
                 }
@@ -16871,7 +16926,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
             // 2. Draw primary viewport rows (0 until rows)
             canvas.save()
-            canvas.translate(0f, effectiveRow0Y)
+            canvas.translate(0f, effectiveRow0Y + switchSlideY)
             if (canvas.isHardwareAccelerated) {
                 val rowHeightPx = ceil(cellHeight.toDouble()).toInt()
                 for (r in 0 until rows) {
@@ -16946,7 +17001,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     val cCol = cursorState and 0xFFFF
                     if (cRow in 0 until rows && cCol in 0 until cols) {
                         val targetX = cCol * cellWidth
-                        val targetY = effectiveRow0Y + cRow * cellHeight
+                        val targetY = effectiveRow0Y + switchSlideY + cRow * cellHeight
                         val nowNs = System.nanoTime()
 
                         var stillMoving = false
@@ -17130,6 +17185,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     selGeomBuf[9] + effectiveRow0Y
                 )
             }
+            canvas.restore()
         }
 
         private fun drawColorOs17Handle(
