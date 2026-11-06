@@ -335,64 +335,101 @@ internal data class SftpItemEntry(
     val isExpanded: Boolean = false
 )
 
-internal class M3SplitTabIndicatorDrawable(
+/**
+ * Authentic Material Design 3 `splitscreen` / `vertical_split` Segmented Window Icon:
+ * - Uses Material 3 asymmetric segmented corners:
+ *   Top pane has large outer top corners (3.2dp) and subtle inner bottom corners (1.0dp).
+ *   Bottom pane has subtle inner top corners (1.0dp) and large outer bottom corners (3.2dp).
+ * - Embedded via `ReplacementSpan` so `TextView` with `Gravity.CENTER` measures and centers
+ *   `[icon + gap + "$ 1"]` together as one cohesive unit without pinning the icon to the far left!
+ */
+internal class M3SplitPaneIconSpan(
     val isTopPane: Boolean,
     var accentColor: Int,
     var isFocusedPane: Boolean,
     private val density: Float
-) : android.graphics.drawable.Drawable() {
+) : android.text.style.ReplacementSpan() {
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
     }
+    private val path = Path()
     private val rectF = RectF()
 
-    override fun getIntrinsicWidth(): Int = (14f * density).roundToInt()
-    override fun getIntrinsicHeight(): Int = (13f * density).roundToInt()
-
-    override fun draw(canvas: Canvas) {
-        val b = bounds
-        val w = b.width().toFloat()
-        val h = b.height().toFloat()
-        val pad = 1f * density
-        val rW = w - pad * 2f
-        val halfH = (h - pad * 2f - 2f * density) * 0.5f
-        val r = 2.2f * density
-
-        val topY = b.top + pad
-        val botY = topY + halfH + 2f * density
-
-        // Top pane
-        rectF.set(b.left + pad, topY, b.left + pad + rW, topY + halfH)
-        if (isTopPane) {
-            fillPaint.color = accentColor
-            fillPaint.alpha = if (isFocusedPane) 255 else 190
-            canvas.drawRoundRect(rectF, r, r, fillPaint)
-        } else {
-            strokePaint.color = accentColor
-            strokePaint.strokeWidth = 1.25f * density
-            strokePaint.alpha = if (isFocusedPane) 180 else 110
-            canvas.drawRoundRect(rectF, r, r, strokePaint)
-        }
-
-        // Bottom pane
-        rectF.set(b.left + pad, botY, b.left + pad + rW, botY + halfH)
-        if (!isTopPane) {
-            fillPaint.color = accentColor
-            fillPaint.alpha = if (isFocusedPane) 255 else 190
-            canvas.drawRoundRect(rectF, r, r, fillPaint)
-        } else {
-            strokePaint.color = accentColor
-            strokePaint.strokeWidth = 1.25f * density
-            strokePaint.alpha = if (isFocusedPane) 180 else 110
-            canvas.drawRoundRect(rectF, r, r, strokePaint)
-        }
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int {
+        return (17.5f * density).roundToInt()
     }
 
-    override fun setAlpha(alpha: Int) {}
-    override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {}
-    override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) {
+        val fm = paint.fontMetrics
+        val textCenterY = y + (fm.ascent + fm.descent) * 0.5f
+        val iconW = 13.0f * density
+        val iconH = 13.0f * density
+        val left = x + 0.5f * density
+        val topY = textCenterY - iconH * 0.5f
+        val gap = 1.8f * density
+        val paneH = (iconH - gap) * 0.5f
+        val botY = topY + paneH + gap
+
+        val outerR = 3.2f * density
+        val innerR = 1.0f * density
+        val topRadii = floatArrayOf(outerR, outerR, outerR, outerR, innerR, innerR, innerR, innerR)
+        val botRadii = floatArrayOf(innerR, innerR, innerR, innerR, outerR, outerR, outerR, outerR)
+
+        strokePaint.strokeWidth = 1.25f * density
+        val baseColor = accentColor and 0x00FFFFFF
+        val activeAlpha = if (isFocusedPane) 255 else 215
+        val inactiveStrokeAlpha = if (isFocusedPane) 185 else 130
+        val inactiveFillAlpha = if (isFocusedPane) 42 else 24
+
+        // 1. Top Window Pane
+        val topInset = if (isTopPane) 0f else 0.55f * density
+        rectF.set(left + topInset, topY + topInset, left + iconW - topInset, topY + paneH - topInset)
+        path.reset()
+        path.addRoundRect(rectF, topRadii, Path.Direction.CW)
+        if (isTopPane) {
+            fillPaint.color = (activeAlpha shl 24) or baseColor
+            canvas.drawPath(path, fillPaint)
+        } else {
+            fillPaint.color = (inactiveFillAlpha shl 24) or baseColor
+            canvas.drawPath(path, fillPaint)
+            strokePaint.color = (inactiveStrokeAlpha shl 24) or baseColor
+            canvas.drawPath(path, strokePaint)
+        }
+
+        // 2. Bottom Window Pane
+        val botInset = if (!isTopPane) 0f else 0.55f * density
+        rectF.set(left + botInset, botY + botInset, left + iconW - botInset, botY + paneH - botInset)
+        path.reset()
+        path.addRoundRect(rectF, botRadii, Path.Direction.CW)
+        if (!isTopPane) {
+            fillPaint.color = (activeAlpha shl 24) or baseColor
+            canvas.drawPath(path, fillPaint)
+        } else {
+            fillPaint.color = (inactiveFillAlpha shl 24) or baseColor
+            canvas.drawPath(path, fillPaint)
+            strokePaint.color = (inactiveStrokeAlpha shl 24) or baseColor
+            canvas.drawPath(path, strokePaint)
+        }
+    }
 }
 
 class TermuxActivity : Activity() {
@@ -6161,13 +6198,23 @@ class TermuxActivity : Activity() {
                     canvas.drawLine(x(12.0f), y(11.4f), x(12.0f), y(16.4f), strokePaint)
                 }
                 M3Icon.SPLIT_SCREEN -> {
-                    val r = 2.4f * u
-                    rect.set(x(4f), y(3.8f), x(20f), y(10.6f))
-                    fillPaint.color = (0x3C shl 24) or (tintColor and 0x00FFFFFF)
-                    canvas.drawRoundRect(rect, r, r, fillPaint)
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(4f), y(13.4f), x(20f), y(20.2f))
-                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    val outerR = 3.4f * u
+                    val innerR = 1.1f * u
+                    val topRadii = floatArrayOf(outerR, outerR, outerR, outerR, innerR, innerR, innerR, innerR)
+                    val botRadii = floatArrayOf(innerR, innerR, innerR, innerR, outerR, outerR, outerR, outerR)
+                    path.reset()
+                    rect.set(x(3.8f), y(3.6f), x(20.2f), y(10.6f))
+                    path.addRoundRect(rect, topRadii, Path.Direction.CW)
+                    fillPaint.color = (0x55 shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawPath(path, fillPaint)
+                    canvas.drawPath(path, strokePaint)
+
+                    path.reset()
+                    rect.set(x(3.8f), y(13.4f), x(20.2f), y(20.4f))
+                    path.addRoundRect(rect, botRadii, Path.Direction.CW)
+                    fillPaint.color = (0x1C shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawPath(path, fillPaint)
+                    canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.SWAP_VERT -> {
                     val a1X = x(8.5f)
@@ -15255,10 +15302,10 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
                 val tv = tabViews[i]
                 tv.setTextColor(txtCol)
-                val splitDrawable = tv.compoundDrawables.firstOrNull() as? M3SplitTabIndicatorDrawable
-                if (splitDrawable != null) {
-                    splitDrawable.accentColor = txtCol
-                    splitDrawable.isFocusedPane = (selF > 0.45f)
+                val splitSpan = tv.tag as? M3SplitPaneIconSpan
+                if (splitSpan != null) {
+                    splitSpan.accentColor = txtCol
+                    splitSpan.isFocusedPane = (selF > 0.45f)
                     tv.invalidate()
                 }
                 val pressSquash = safeClamp(pSelf, 0f, 1f)
@@ -15332,7 +15379,6 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
             val tabText = (if (isRoot) "# " else "$ ") + (i + 1)
             val tab = TextView(this).apply {
-                text = tabText
                 gravity = Gravity.CENTER
                 setSingleLine(true)
                 typeface = Typeface.DEFAULT_BOLD
@@ -15341,17 +15387,19 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 background = bg
                 if (isSplitTab) {
                     val density = resources.displayMetrics.density
-                    val iconDrawable = M3SplitTabIndicatorDrawable(
+                    val iconSpan = M3SplitPaneIconSpan(
                         isTopPane = isSplitTop,
-                        accentColor = if (i == active) uiOnAccentContainer else blendColor(COLOR_TEXT_DIM, uiAccent, 0.45f),
+                        accentColor = if (i == active) uiOnAccentContainer else COLOR_TEXT_BRIGHT,
                         isFocusedPane = (i == active),
                         density = density
                     )
-                    iconDrawable.setBounds(0, 0, (14f * density).roundToInt(), (13f * density).roundToInt())
-                    setCompoundDrawables(iconDrawable, null, null, null)
-                    compoundDrawablePadding = dp(5)
+                    val sb = SpannableStringBuilder("￼$tabText")
+                    sb.setSpan(iconSpan, 0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    text = sb
+                    tag = iconSpan
                 } else {
-                    setCompoundDrawables(null, null, null, null)
+                    text = tabText
+                    tag = null
                 }
                 layoutParams = LinearLayout.LayoutParams(
                     if (i == active) activeTabW.roundToInt() else inactiveTabW.roundToInt(),
@@ -16139,7 +16187,11 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
         internal var splitTopRows: Int = 12
         internal var splitBotRows: Int = 12
         private var isDraggingSplitDivider: Boolean = false
-        private var splitDividerDownAction: Int = 0 // 0 = drag, 1 = swap, 2 = close
+        private var splitDividerDownAction: Int = 0 // 0 = drag, 1 = swap, 2 = close, 3 = top chip, 4 = bot chip
+        private var splitFocusAnimProg: Float = 1f // 0f = Top pane focused, 1f = Bottom pane focused
+        private var lastObservedSplitFocusTop: Boolean? = null
+        private var splitFocusAnimator: ValueAnimator? = null
+        private val splitCornerPath = Path()
 
         internal fun isDualPaneActive(): Boolean {
             val cnt = nativeGetSessionCount()
@@ -16162,13 +16214,33 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             if (active in 0 until cnt && active != splitTopSessionIdx && active != splitBottomSessionIdx) {
                 splitBottomSessionIdx = active
             }
+            val nowTopFocused = (nativeGetActiveIndex() == splitTopSessionIdx)
+            val prevTop = lastObservedSplitFocusTop
+            if (prevTop == null) {
+                lastObservedSplitFocusTop = nowTopFocused
+                splitFocusAnimProg = if (nowTopFocused) 0f else 1f
+            } else if (prevTop != nowTopFocused) {
+                lastObservedSplitFocusTop = nowTopFocused
+                splitFocusAnimator?.cancel()
+                val startP = splitFocusAnimProg
+                val targetP = if (nowTopFocused) 0f else 1f
+                splitFocusAnimator = ValueAnimator.ofFloat(startP, targetP).apply {
+                    duration = 280L
+                    interpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f)
+                    addUpdateListener { va ->
+                        splitFocusAnimProg = (va.animatedValue as Float).coerceIn(0f, 1f)
+                        postInvalidateOnAnimation()
+                    }
+                    start()
+                }
+            }
         }
 
         internal fun computeSplitBounds(): FloatArray {
             val topOff = computeGridTopOffsetPx()
             val activeBotY = (height - max(currentSysNavBottomPx, currentImeBottomPx)).toFloat()
-                .coerceAtLeast(topOff + cellHeight * 4f + dpF(30f))
-            val divH = dpF(28f)
+                .coerceAtLeast(topOff + cellHeight * 4f + dpF(36f))
+            val divH = dpF(34f)
             val usableH = (activeBotY - topOff - divH).coerceAtLeast(cellHeight * 4f)
             val ratio = splitVerticalRatio.coerceIn(0.25f, 0.75f)
             val topPaneH = (usableH * ratio).coerceAtLeast(cellHeight * 2f)
@@ -16184,9 +16256,10 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             if (!isImeCurrentlyOpen || h > unoccludedHeightPx) {
                 unoccludedHeightPx = h
             }
-            val newCols = max(4, (w / cellWidth).toInt())
             if (isDualPaneActive()) {
                 normalizeSplitSessionIndices()
+                val splitLeftInset = dpF(10f)
+                val newCols = max(4, ((w - splitLeftInset) / cellWidth).toInt())
                 val b = computeSplitBounds()
                 val newTopRows = max(2, ((b[1] - b[0]) / cellHeight).toInt())
                 val newBotRows = max(2, ((b[5] - b[4]) / cellHeight).toInt())
@@ -16215,6 +16288,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 postInvalidateOnAnimation()
                 return
             }
+            val newCols = max(4, (w / cellWidth).toInt())
 
             val effectiveH = max(h, unoccludedHeightPx)
             val topOff = computeGridTopOffsetPx()
@@ -16399,6 +16473,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 val botPaneTop = b[4]
                 val botPaneBot = b[5]
 
+                val splitLeftInset = dpF(10f)
                 val curTopRows = max(2, ((topPaneBot - topPaneTop) / cellHeight).toInt())
                 val curBotRows = max(2, ((botPaneBot - botPaneTop) / cellHeight).toInt())
                 if (curTopRows != splitTopRows || curBotRows != splitBotRows) {
@@ -16411,10 +16486,12 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 val activeIdx = nativeGetActiveIndex()
                 val topFocused = (activeIdx == splitTopSessionIdx)
                 val botFocused = (activeIdx == splitBottomSessionIdx)
+                val focusP = splitFocusAnimProg.coerceIn(0f, 1f) // 0f = Top, 1f = Bottom
 
-                // 1. Render Top Pane
+                // 1. Render Top Pane (indented by splitLeftInset so prompt never collides with M3 indicator)
                 canvas.save()
                 canvas.clipRect(0f, topPaneTop, width.toFloat(), topPaneBot)
+                canvas.translate(splitLeftInset, 0f)
                 val topOffScroll = if (topFocused) max(0, scrollOffset) else 0
                 for (r in 0 until splitTopRows) {
                     val yTop = topPaneTop + r * cellHeight
@@ -16423,17 +16500,12 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     }
                 }
                 drawPaneCursorSimple(canvas, splitTopSessionIdx, topPaneTop, splitTopRows, topFocused)
-                if (topFocused) {
-                    bgPaint.style = Paint.Style.FILL
-                    bgPaint.color = withAlpha(uiAccent, 210)
-                    cursorRectF.set(0f, topPaneTop + dpF(4f), dpF(2.8f), topPaneBot - dpF(4f))
-                    canvas.drawRoundRect(cursorRectF, dpF(1.4f), dpF(1.4f), bgPaint)
-                }
                 canvas.restore()
 
-                // 2. Render Bottom Pane
+                // 2. Render Bottom Pane (indented by splitLeftInset so prompt never collides with M3 indicator)
                 canvas.save()
                 canvas.clipRect(0f, botPaneTop, width.toFloat(), botPaneBot)
+                canvas.translate(splitLeftInset, 0f)
                 val botOffScroll = if (botFocused) max(0, scrollOffset) else 0
                 for (r in 0 until splitBotRows) {
                     val yTop = botPaneTop + r * cellHeight
@@ -16442,169 +16514,310 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     }
                 }
                 drawPaneCursorSimple(canvas, splitBottomSessionIdx, botPaneTop, splitBotRows, botFocused)
-                if (botFocused) {
-                    bgPaint.style = Paint.Style.FILL
-                    bgPaint.color = withAlpha(uiAccent, 210)
-                    cursorRectF.set(0f, botPaneTop + dpF(4f), dpF(2.8f), botPaneBot - dpF(4f))
-                    canvas.drawRoundRect(cursorRectF, dpF(1.4f), dpF(1.4f), bgPaint)
-                }
                 canvas.restore()
 
-                // 3. Render Material 3 Expressive Draggable Split Divider Bar
-                bgPaint.style = Paint.Style.FILL
-                bgPaint.color = uiSurfaceLow
-                cursorRectF.set(dpF(8f), divTop + dpF(2f), width - dpF(8f), divBot - dpF(2f))
-                canvas.drawRoundRect(cursorRectF, dpF(12f), dpF(12f), bgPaint)
+                // 2.5. Material 3 Expressive Left Active Pane Indicator Pill (with liquid glide & ambient halo)
+                val topCurState = nativeGetSessionCursorState(splitTopSessionIdx)
+                val botCurState = nativeGetSessionCursorState(splitBottomSessionIdx)
+                val topCurRow = if (topCurState >= 0) ((topCurState ushr 16) and 0x1FFF).coerceIn(0, max(0, splitTopRows - 1)) else 0
+                val botCurRow = if (botCurState >= 0) ((botCurState ushr 16) and 0x1FFF).coerceIn(0, max(0, splitBotRows - 1)) else 0
 
-                // Subtle contour outline
-                bgPaint.style = Paint.Style.STROKE
-                bgPaint.strokeWidth = dpF(1f)
-                bgPaint.color = withAlpha(uiAccent, 35)
-                canvas.drawRoundRect(cursorRectF, dpF(12f), dpF(12f), bgPaint)
-                bgPaint.style = Paint.Style.FILL
+                val topPillH = min((topPaneBot - topPaneTop) * 0.45f, max(cellHeight * 1.6f, dpF(36f))).coerceAtLeast(dpF(20f))
+                val botPillH = min((botPaneBot - botPaneTop) * 0.45f, max(cellHeight * 1.6f, dpF(36f))).coerceAtLeast(dpF(20f))
 
+                val topAnchorCy = (topPaneTop + (topCurRow + 0.5f) * cellHeight)
+                    .coerceIn(topPaneTop + topPillH * 0.5f + dpF(4f), max(topPaneTop + topPillH * 0.5f + dpF(4f), topPaneBot - topPillH * 0.5f - dpF(4f)))
+                val botAnchorCy = (botPaneTop + (botCurRow + 0.5f) * cellHeight)
+                    .coerceIn(botPaneTop + botPillH * 0.5f + dpF(4f), max(botPaneTop + botPillH * 0.5f + dpF(4f), botPaneBot - botPillH * 0.5f - dpF(4f)))
+
+                // Subtle inactive anchor dot in the unfocused pane
+                bgPaint.style = Paint.Style.FILL
+                val inactiveCy = if (topFocused) botAnchorCy else topAnchorCy
+                val inactiveAlpha = (75f * (1f - abs(focusP - (if (topFocused) 0f else 1f)))).roundToInt().coerceIn(0, 85)
+                if (inactiveAlpha > 8) {
+                    bgPaint.color = withAlpha(COLOR_TEXT_DIM, inactiveAlpha)
+                    cursorRectF.set(dpF(2.8f), inactiveCy - dpF(5f), dpF(5.2f), inactiveCy + dpF(5f))
+                    canvas.drawRoundRect(cursorRectF, dpF(99f), dpF(99f), bgPaint)
+                }
+
+                // Liquid morphing M3 active indicator pill gliding between topAnchorCy and botAnchorCy
+                val leadT = nativeEvalAnimCurve(4, if (botFocused) focusP else (1f - focusP))
+                val trailT = nativeEvalAnimCurve(5, if (botFocused) focusP else (1f - focusP))
+                val topStart = topAnchorCy - topPillH * 0.5f
+                val topEnd = topAnchorCy + topPillH * 0.5f
+                val botStart = botAnchorCy - botPillH * 0.5f
+                val botEnd = botAnchorCy + botPillH * 0.5f
+
+                val curPillTop = if (botFocused) {
+                    topStart + (botStart - topStart) * trailT
+                } else {
+                    botStart + (topStart - botStart) * leadT
+                }
+                val curPillBot = if (botFocused) {
+                    topEnd + (botEnd - topEnd) * leadT
+                } else {
+                    botEnd + (topEnd - botEnd) * trailT
+                }
+
+                val topIsRoot = nativeIsSessionRoot(splitTopSessionIdx)
+                val botIsRoot = nativeIsSessionRoot(splitBottomSessionIdx)
+                val topIndCol = if (topIsRoot) COLOR_ROOT else uiAccent
+                val botIndCol = if (botIsRoot) COLOR_ROOT else uiAccent
+                val activeIndCol = blendColor(topIndCol, botIndCol, focusP)
+
+                // Soft ambient M3 glow halo behind the active pill
+                bgPaint.color = withAlpha(activeIndCol, 42)
+                cursorRectF.set(dpF(1.0f), curPillTop - dpF(2.5f), dpF(7.2f), curPillBot + dpF(2.5f))
+                canvas.drawRoundRect(cursorRectF, dpF(99f), dpF(99f), bgPaint)
+
+                // Crisp M3 Expressive active capsule
+                bgPaint.color = activeIndCol
+                cursorRectF.set(dpF(2.3f), curPillTop, dpF(5.9f), curPillBot)
+                canvas.drawRoundRect(cursorRectF, dpF(99f), dpF(99f), bgPaint)
+
+                // 3. Render Material 3 Expressive Split Divider Bar & Connected Segmented Capsules
                 val divCy = (divTop + divBot) * 0.5f
 
-                // Center pill drag handle (Material 3 Expressive handle)
-                val handleW = if (isDraggingSplitDivider) dpF(44f) else dpF(32f)
-                val handleH = dpF(4f)
-                bgPaint.color = if (isDraggingSplitDivider) uiAccent else withAlpha(COLOR_TEXT_DIM, 175)
-                cursorRectF.set(width * 0.5f - handleW * 0.5f, divCy - handleH * 0.5f, width * 0.5f + handleW * 0.5f, divCy + handleH * 0.5f)
-                canvas.drawRoundRect(cursorRectF, handleH * 0.5f, handleH * 0.5f, bgPaint)
+                // Helper to draw a rounded rectangle with asymmetric left & right corner radii
+                fun drawSegmentedRect(l: Float, t: Float, r: Float, bRect: Float, leftRad: Float, rightRad: Float, fillColor: Int) {
+                    splitCornerPath.reset()
+                    cursorRectF.set(l, t, r, bRect)
+                    splitCornerPath.addRoundRect(
+                        cursorRectF,
+                        floatArrayOf(leftRad, leftRad, rightRad, rightRad, rightRad, rightRad, leftRad, leftRad),
+                        Path.Direction.CW
+                    )
+                    bgPaint.style = Paint.Style.FILL
+                    bgPaint.color = fillColor
+                    canvas.drawPath(splitCornerPath, bgPaint)
+                }
 
-                // Left: Two Material 3 Expressive Session Chips (Top pane & Bottom pane)
-                val chipH = dpF(20f)
-                val chipR = dpF(7f)
-                val topSym = if (nativeIsSessionRoot(splitTopSessionIdx)) "#" else "$"
-                val botSym = if (nativeIsSessionRoot(splitBottomSessionIdx)) "#" else "$"
-
-                val prevSize = textPaint.textSize
-                val prevType = textPaint.typeface
-                textPaint.typeface = Typeface.DEFAULT_BOLD
-                textPaint.textSize = dpF(11.2f)
-
-                // Helper to draw a miniature M3 split icon inside a chip
-                fun drawMiniSplitGlyph(cx: Float, cy: Float, isTop: Boolean, isFocused: Boolean) {
-                    val gw = dpF(9.5f)
-                    val gh = dpF(9.5f)
-                    val halfGh = dpF(3.8f)
-                    val gap = dpF(1.4f)
-                    val r = dpF(1.6f)
+                // Helper to draw authentic Material Design asymmetric splitscreen glyph inside a divider segment
+                fun drawM3SplitScreenGlyph(cx: Float, cy: Float, isTop: Boolean, tintCol: Int, isFocused: Boolean) {
+                    val gw = dpF(11.2f)
+                    val gh = dpF(11.2f)
+                    val gap = dpF(1.6f)
+                    val paneH = (gh - gap) * 0.5f
+                    val left = cx - gw * 0.5f
                     val topY = cy - gh * 0.5f
-                    val botY = topY + halfGh + gap
+                    val botY = topY + paneH + gap
 
-                    // Top pane
-                    cursorRectF.set(cx - gw * 0.5f, topY, cx + gw * 0.5f, topY + halfGh)
+                    val outR = dpF(2.8f)
+                    val inR = dpF(0.9f)
+                    val topRadii = floatArrayOf(outR, outR, outR, outR, inR, inR, inR, inR)
+                    val botRadii = floatArrayOf(inR, inR, inR, inR, outR, outR, outR, outR)
+
+                    val baseRgb = tintCol and 0x00FFFFFF
+                    val fillAlpha = if (isFocused) 255 else 210
+                    val strokeAlpha = if (isFocused) 185 else 135
+                    val subFillAlpha = if (isFocused) 42 else 24
+
+                    handlePaint.style = Paint.Style.STROKE
+                    handlePaint.strokeWidth = dpF(1.15f)
+
+                    // Top window pane
+                    val tIn = if (isTop) 0f else dpF(0.45f)
+                    cursorRectF.set(left + tIn, topY + tIn, left + gw - tIn, topY + paneH - tIn)
+                    splitCornerPath.reset()
+                    splitCornerPath.addRoundRect(cursorRectF, topRadii, Path.Direction.CW)
                     if (isTop) {
                         bgPaint.style = Paint.Style.FILL
-                        bgPaint.color = if (isFocused) uiAccent else blendColor(COLOR_TEXT_DIM, uiAccent, 0.45f)
-                        canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
+                        bgPaint.color = (fillAlpha shl 24) or baseRgb
+                        canvas.drawPath(splitCornerPath, bgPaint)
                     } else {
-                        bgPaint.style = Paint.Style.STROKE
-                        bgPaint.strokeWidth = dpF(1f)
-                        bgPaint.color = if (isFocused) withAlpha(uiAccent, 170) else withAlpha(COLOR_TEXT_DIM, 120)
-                        canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
                         bgPaint.style = Paint.Style.FILL
+                        bgPaint.color = (subFillAlpha shl 24) or baseRgb
+                        canvas.drawPath(splitCornerPath, bgPaint)
+                        handlePaint.color = (strokeAlpha shl 24) or baseRgb
+                        canvas.drawPath(splitCornerPath, handlePaint)
                     }
 
-                    // Bottom pane
-                    cursorRectF.set(cx - gw * 0.5f, botY, cx + gw * 0.5f, botY + halfGh)
+                    // Bottom window pane
+                    val bIn = if (!isTop) 0f else dpF(0.45f)
+                    cursorRectF.set(left + bIn, botY + bIn, left + gw - bIn, botY + paneH - bIn)
+                    splitCornerPath.reset()
+                    splitCornerPath.addRoundRect(cursorRectF, botRadii, Path.Direction.CW)
                     if (!isTop) {
                         bgPaint.style = Paint.Style.FILL
-                        bgPaint.color = if (isFocused) uiAccent else blendColor(COLOR_TEXT_DIM, uiAccent, 0.45f)
-                        canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
+                        bgPaint.color = (fillAlpha shl 24) or baseRgb
+                        canvas.drawPath(splitCornerPath, bgPaint)
                     } else {
-                        bgPaint.style = Paint.Style.STROKE
-                        bgPaint.strokeWidth = dpF(1f)
-                        bgPaint.color = if (isFocused) withAlpha(uiAccent, 170) else withAlpha(COLOR_TEXT_DIM, 120)
-                        canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
                         bgPaint.style = Paint.Style.FILL
+                        bgPaint.color = (subFillAlpha shl 24) or baseRgb
+                        canvas.drawPath(splitCornerPath, bgPaint)
+                        handlePaint.color = (strokeAlpha shl 24) or baseRgb
+                        canvas.drawPath(splitCornerPath, handlePaint)
                     }
                 }
 
-                // 1) Top Pane Chip
+                // Subtle horizontal divider track line spanning the background
+                bgPaint.style = Paint.Style.FILL
+                bgPaint.color = withAlpha(uiSurfaceHigh, 185)
+                cursorRectF.set(dpF(10f), divCy - dpF(0.7f), width - dpF(10f), divCy + dpF(0.7f))
+                canvas.drawRoundRect(cursorRectF, dpF(1f), dpF(1f), bgPaint)
+
+                // A) Left Connected Segmented Session Switcher Capsule: [ ⬒ $ 1 | ⬓ $ 2 ]
+                val prevSize = textPaint.textSize
+                val prevType = textPaint.typeface
+                val prevAlign = textPaint.textAlign
+                textPaint.typeface = Typeface.DEFAULT_BOLD
+                textPaint.textSize = dpF(11.4f)
+                textPaint.textAlign = Paint.Align.LEFT
+
+                val topSym = if (topIsRoot) "# " else "$ "
+                val botSym = if (botIsRoot) "# " else "$ "
                 val topTxt = "$topSym${splitTopSessionIdx + 1}"
-                val topTxtW = textPaint.measureText(topTxt)
-                val chip1W = dpF(18f) + topTxtW + dpF(8f)
-                val chip1Left = dpF(14f)
-                cursorRectF.set(chip1Left, divCy - chipH * 0.5f, chip1Left + chip1W, divCy + chipH * 0.5f)
-                bgPaint.style = Paint.Style.FILL
-                bgPaint.color = if (topFocused) uiAccentContainer else uiSurfaceHigh
-                canvas.drawRoundRect(cursorRectF, chipR, chipR, bgPaint)
-
-                drawMiniSplitGlyph(chip1Left + dpF(10f), divCy, isTop = true, isFocused = topFocused)
-                textPaint.color = if (topFocused) uiOnAccentContainer else COLOR_TEXT_DIM
-                canvas.drawText(topTxt, chip1Left + dpF(18f), divCy + dpF(3.8f), textPaint)
-
-                // 2) Bottom Pane Chip
                 val botTxt = "$botSym${splitBottomSessionIdx + 1}"
-                val botTxtW = textPaint.measureText(botTxt)
-                val chip2W = dpF(18f) + botTxtW + dpF(8f)
-                val chip2Left = chip1Left + chip1W + dpF(5f)
-                cursorRectF.set(chip2Left, divCy - chipH * 0.5f, chip2Left + chip2W, divCy + chipH * 0.5f)
+
+                val segPadH = dpF(2.5f)
+                val segGap = dpF(2f)
+                val outerCapH = dpF(28f)
+                val innerSegH = outerCapH - segPadH * 2f
+                val segOuterR = innerSegH * 0.5f
+                val segInnerR = dpF(4.2f)
+
+                val topSelF = (1f - focusP).coerceIn(0f, 1f)
+                val botSelF = focusP.coerceIn(0f, 1f)
+
+                val seg1W = dpF(46f) + dpF(6f) * topSelF
+                val seg2W = dpF(46f) + dpF(6f) * botSelF
+                val leftCapLeft = dpF(10f)
+                val leftCapWidth = segPadH * 2f + seg1W + segGap + seg2W
+
+                // Outer tonal frame for session switcher
+                bgPaint.color = uiSurfaceLow
+                cursorRectF.set(leftCapLeft, divCy - outerCapH * 0.5f, leftCapLeft + leftCapWidth, divCy + outerCapH * 0.5f)
+                canvas.drawRoundRect(cursorRectF, outerCapH * 0.5f, outerCapH * 0.5f, bgPaint)
+
+                // Segment 1 (Top Session)
+                val seg1Left = leftCapLeft + segPadH
+                val seg1Right = seg1Left + seg1W
+                val segTopY = divCy - innerSegH * 0.5f
+                val segBotY = divCy + innerSegH * 0.5f
+                val seg1RightR = segInnerR + (segOuterR - segInnerR) * topSelF
+                val seg1ActiveFill = if (topIsRoot) COLOR_ROOT_CONTAINER else uiAccentContainer
+                val seg1Fill = blendColor(uiSurfaceContainer, seg1ActiveFill, topSelF)
+                drawSegmentedRect(seg1Left, segTopY, seg1Right, segBotY, segOuterR, seg1RightR, seg1Fill)
+
+                val seg1TxtCol = blendColor(
+                    if (topIsRoot) COLOR_ROOT else COLOR_TEXT_BRIGHT,
+                    if (topIsRoot) COLOR_ROOT else uiOnAccentContainer,
+                    topSelF
+                )
+                val seg1TxtW = textPaint.measureText(topTxt)
+                val seg1ContentW = dpF(11.2f) + dpF(4.5f) + seg1TxtW
+                val seg1StartX = (seg1Left + seg1Right - seg1ContentW) * 0.5f
+                drawM3SplitScreenGlyph(seg1StartX + dpF(5.6f), divCy, isTop = true, tintCol = seg1TxtCol, isFocused = topSelF > 0.45f)
+                textPaint.color = seg1TxtCol
+                val fm = textPaint.fontMetrics
+                val txtBaseY = divCy - (fm.ascent + fm.descent) * 0.5f
+                canvas.drawText(topTxt, seg1StartX + dpF(15.7f), txtBaseY, textPaint)
+
+                // Segment 2 (Bottom Session)
+                val seg2Left = seg1Right + segGap
+                val seg2Right = seg2Left + seg2W
+                val seg2LeftR = segInnerR + (segOuterR - segInnerR) * botSelF
+                val seg2ActiveFill = if (botIsRoot) COLOR_ROOT_CONTAINER else uiAccentContainer
+                val seg2Fill = blendColor(uiSurfaceContainer, seg2ActiveFill, botSelF)
+                drawSegmentedRect(seg2Left, segTopY, seg2Right, segBotY, seg2LeftR, segOuterR, seg2Fill)
+
+                val seg2TxtCol = blendColor(
+                    if (botIsRoot) COLOR_ROOT else COLOR_TEXT_BRIGHT,
+                    if (botIsRoot) COLOR_ROOT else uiOnAccentContainer,
+                    botSelF
+                )
+                val seg2TxtW = textPaint.measureText(botTxt)
+                val seg2ContentW = dpF(11.2f) + dpF(4.5f) + seg2TxtW
+                val seg2StartX = (seg2Left + seg2Right - seg2ContentW) * 0.5f
+                drawM3SplitScreenGlyph(seg2StartX + dpF(5.6f), divCy, isTop = false, tintCol = seg2TxtCol, isFocused = botSelF > 0.45f)
+                textPaint.color = seg2TxtCol
+                canvas.drawText(botTxt, seg2StartX + dpF(15.7f), txtBaseY, textPaint)
+
+                // B) Center Material 3 Expressive Drag Handle Capsule
+                val draggingHandle = isDraggingSplitDivider && splitDividerDownAction == 0
+                val handleOuterW = if (draggingHandle) dpF(62f) else dpF(50f)
+                val handleOuterH = dpF(22f)
                 bgPaint.style = Paint.Style.FILL
-                bgPaint.color = if (botFocused) uiAccentContainer else uiSurfaceHigh
-                canvas.drawRoundRect(cursorRectF, chipR, chipR, bgPaint)
+                bgPaint.color = if (draggingHandle) blendColor(uiSurfaceLow, uiAccentContainer, 0.45f) else uiSurfaceLow
+                cursorRectF.set(
+                    width * 0.5f - handleOuterW * 0.5f,
+                    divCy - handleOuterH * 0.5f,
+                    width * 0.5f + handleOuterW * 0.5f,
+                    divCy + handleOuterH * 0.5f
+                )
+                canvas.drawRoundRect(cursorRectF, handleOuterH * 0.5f, handleOuterH * 0.5f, bgPaint)
 
-                drawMiniSplitGlyph(chip2Left + dpF(10f), divCy, isTop = false, isFocused = botFocused)
-                textPaint.color = if (botFocused) uiOnAccentContainer else COLOR_TEXT_DIM
-                canvas.drawText(botTxt, chip2Left + dpF(18f), divCy + dpF(3.8f), textPaint)
+                val barW = if (draggingHandle) dpF(34f) else dpF(24f)
+                val barH = if (draggingHandle) dpF(4.4f) else dpF(3.8f)
+                bgPaint.color = if (draggingHandle) uiAccent else blendColor(COLOR_TEXT_DIM, COLOR_TEXT_BRIGHT, 0.55f)
+                cursorRectF.set(
+                    width * 0.5f - barW * 0.5f,
+                    divCy - barH * 0.5f,
+                    width * 0.5f + barW * 0.5f,
+                    divCy + barH * 0.5f
+                )
+                canvas.drawRoundRect(cursorRectF, barH * 0.5f, barH * 0.5f, bgPaint)
 
-                // Right: Two Material 3 Expressive Action Buttons: [Swap ⇅] and [Close ✕]
-                // 1) Swap Button
-                val swRight = width - dpF(46f)
-                val swLeft = width - dpF(76f)
-                val btnH = dpF(20f)
-                val btnR = dpF(7f)
-                cursorRectF.set(swLeft, divCy - btnH * 0.5f, swRight, divCy + btnH * 0.5f)
-                bgPaint.style = Paint.Style.FILL
-                bgPaint.color = uiSurfaceHigh
-                canvas.drawRoundRect(cursorRectF, btnR, btnR, bgPaint)
+                // C) Right Connected Segmented Action Capsule: [ ⇅ | ✕ ] (matches top-right Header Actions!)
+                val actSegW = dpF(32f)
+                val rightCapWidth = segPadH * 2f + actSegW * 2f + segGap
+                val rightCapRight = width - dpF(10f)
+                val rightCapLeft = rightCapRight - rightCapWidth
 
-                // Vector Swap Arrows (Official M3 swap_vert symbol)
+                bgPaint.color = uiSurfaceLow
+                cursorRectF.set(rightCapLeft, divCy - outerCapH * 0.5f, rightCapRight, divCy + outerCapH * 0.5f)
+                canvas.drawRoundRect(cursorRectF, outerCapH * 0.5f, outerCapH * 0.5f, bgPaint)
+
+                val pressingSwap = isDraggingSplitDivider && splitDividerDownAction == 1
+                val pressingClose = isDraggingSplitDivider && splitDividerDownAction == 2
+
+                // Swap Segment [⇅]
+                val swLeft = rightCapLeft + segPadH
+                val swRight = swLeft + actSegW
+                val swRightR = if (pressingSwap) segOuterR else segInnerR
+                val swFill = if (pressingSwap) uiAccentContainer else uiSurfaceContainer
+                drawSegmentedRect(swLeft, segTopY, swRight, segBotY, segOuterR, swRightR, swFill)
+
                 val swCenterX = (swLeft + swRight) * 0.5f
                 handlePaint.style = Paint.Style.STROKE
-                handlePaint.strokeWidth = dpF(1.65f)
+                handlePaint.strokeWidth = dpF(1.75f)
                 handlePaint.strokeCap = Paint.Cap.ROUND
                 handlePaint.strokeJoin = Paint.Join.ROUND
-                handlePaint.color = uiAccent
+                handlePaint.color = if (pressingSwap) uiOnAccentContainer else uiAccent
 
-                // Arrow 1: pointing up on left
-                val a1X = swCenterX - dpF(2.8f)
-                val aTop = divCy - dpF(4.4f)
-                val aBot = divCy + dpF(4.4f)
+                val a1X = swCenterX - dpF(2.9f)
+                val aTop = divCy - dpF(4.5f)
+                val aBot = divCy + dpF(4.5f)
                 canvas.drawLine(a1X, aBot, a1X, aTop, handlePaint)
                 wavePath.reset()
-                wavePath.moveTo(a1X - dpF(2.4f), aTop + dpF(2.6f))
+                wavePath.moveTo(a1X - dpF(2.4f), aTop + dpF(2.5f))
                 wavePath.lineTo(a1X, aTop)
-                wavePath.lineTo(a1X + dpF(2.4f), aTop + dpF(2.6f))
+                wavePath.lineTo(a1X + dpF(2.4f), aTop + dpF(2.5f))
                 canvas.drawPath(wavePath, handlePaint)
 
-                // Arrow 2: pointing down on right
-                val a2X = swCenterX + dpF(2.8f)
+                val a2X = swCenterX + dpF(2.9f)
                 canvas.drawLine(a2X, aTop, a2X, aBot, handlePaint)
                 wavePath.reset()
-                wavePath.moveTo(a2X - dpF(2.4f), aBot - dpF(2.6f))
+                wavePath.moveTo(a2X - dpF(2.4f), aBot - dpF(2.5f))
                 wavePath.lineTo(a2X, aBot)
-                wavePath.lineTo(a2X + dpF(2.4f), aBot - dpF(2.6f))
+                wavePath.lineTo(a2X + dpF(2.4f), aBot - dpF(2.5f))
                 canvas.drawPath(wavePath, handlePaint)
 
-                // 2) Close Button
-                val clRight = width - dpF(12f)
-                val clLeft = width - dpF(38f)
-                cursorRectF.set(clLeft, divCy - btnH * 0.5f, clRight, divCy + btnH * 0.5f)
-                bgPaint.style = Paint.Style.FILL
-                bgPaint.color = COLOR_ROOT_CONTAINER
-                canvas.drawRoundRect(cursorRectF, btnR, btnR, bgPaint)
+                // Close Segment [✕]
+                val clLeft = swRight + segGap
+                val clRight = clLeft + actSegW
+                val clLeftR = if (pressingClose) segOuterR else segInnerR
+                val clFill = if (pressingClose) COLOR_ROOT_CONTAINER else blendColor(uiSurfaceContainer, COLOR_ROOT_CONTAINER, 0.34f)
+                drawSegmentedRect(clLeft, segTopY, clRight, segBotY, clLeftR, segOuterR, clFill)
 
-                // Vector Close Cross (Official M3 close symbol)
                 val clCenterX = (clLeft + clRight) * 0.5f
                 handlePaint.color = COLOR_PASTEL_RED
-                handlePaint.strokeWidth = dpF(1.75f)
-                val s = dpF(3.6f)
+                handlePaint.strokeWidth = dpF(1.85f)
+                val s = dpF(3.8f)
                 canvas.drawLine(clCenterX - s, divCy - s, clCenterX + s, divCy + s, handlePaint)
                 canvas.drawLine(clCenterX + s, divCy - s, clCenterX - s, divCy + s, handlePaint)
 
+                textPaint.textAlign = prevAlign
                 textPaint.textSize = prevSize
                 textPaint.typeface = prevType
                 return
@@ -17139,11 +17352,11 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                             triggerHaptic(0.8f)
                             isDraggingSplitDivider = true
                             splitDividerDownAction = when {
-                                event.x >= width - dpF(42f) -> 2 // Close split
-                                event.x >= width - dpF(80f) -> 1 // Swap panes
-                                event.x in dpF(12f)..dpF(72f) -> 3 // Top session chip tap
-                                event.x in dpF(72f)..dpF(135f) -> 4 // Bottom session chip tap
-                                else -> 0 // Drag ratio
+                                event.x >= width - dpF(44f) -> 2 // Close split segment
+                                event.x >= width - dpF(82f) -> 1 // Swap panes segment
+                                event.x in dpF(8f)..dpF(62f) -> 3 // Top session segment tap
+                                event.x in dpF(62f)..dpF(120f) -> 4 // Bottom session segment tap
+                                else -> 0 // Drag ratio handle
                             }
                             invalidate()
                             return true
