@@ -5552,4 +5552,574 @@ Java_com_mtermux_app_TermuxActivity_nativeConvertChmodInfo(
     return env->NewStringUTF(out.c_str());
 }
 
+// ============================================================================
+// Dual-Pane / Split-Screen Session-Indexed C++26 JNI Methods
+// ============================================================================
+static std::shared_ptr<NeoTerminalEngine> getEngineAtIndexSafe(int index) {
+    pthread_mutex_lock(&gGlobalMutex);
+    std::shared_ptr<NeoTerminalEngine> eng =
+        (index >= 0 && index < static_cast<int>(gSessions.size()))
+            ? gSessions[static_cast<size_t>(index)]
+            : nullptr;
+    pthread_mutex_unlock(&gGlobalMutex);
+    return eng;
+}
+
+JNIEXPORT void JNICALL
+Java_com_mtermux_app_TermuxActivity_nativeResizeSessionAt(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jint index,
+    jint rows,
+    jint cols,
+    jint cellW,
+    jint cellH
+) {
+    pthread_mutex_lock(&gGlobalMutex);
+    std::shared_ptr<NeoTerminalEngine> eng =
+        (index >= 0 && index < static_cast<int>(gSessions.size()))
+            ? gSessions[static_cast<size_t>(index)]
+            : nullptr;
+    std::string libDir = gNativeLibDir;
+    pthread_mutex_unlock(&gGlobalMutex);
+    if (eng && rows > 0 && cols > 0) {
+        startSessionProcess(eng.get(), libDir.c_str(), rows, cols, cellW, cellH);
+    }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_mtermux_app_TermuxActivity_nativeConsumeSessionFrameDirty(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jint index
+) {
+    auto eng = getEngineAtIndexSafe(static_cast<int>(index));
+    bool d = eng && eng->mFrameDirty.exchange(false, std::memory_order_acq_rel);
+    return d ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_mtermux_app_TermuxActivity_nativeGetSessionCursorState(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jint index
+) {
+    auto eng = getEngineAtIndexSafe(static_cast<int>(index));
+    int state = -1;
+    if (eng) {
+        eng->lock();
+        if (eng->mCursorVisible) {
+            state = ((eng->mCursorShape & 3) << 29) |
+                    ((eng->mCursorRow & 0x1FFF) << 16) |
+                    (eng->mCursorCol & 0xFFFF);
+        }
+        eng->unlock();
+    }
+    return state;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_mtermux_app_TermuxActivity_nativePackSessionRowRender(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jint index,
+    jint scrollOffset,
+    jint screenRow,
+    jintArray outBgRuns,
+    jintArray outGlyphs
+) {
+    if (!outBgRuns || !outGlyphs) return 0;
+    auto engine = getEngineAtIndexSafe(static_cast<int>(index));
+    if (!engine) return 0;
+
+    int maxBgRuns = static_cast<int>(env->GetArrayLength(outBgRuns)) / 3;
+    int maxGlyphs = static_cast<int>(env->GetArrayLength(outGlyphs)) / 4;
+    if (maxBgRuns <= 0 || maxGlyphs <= 0) return 0;
+
+    engine->lock();
+    int modes = engine->mModes.load(std::memory_order_relaxed);
+    int clampedOffset = (modes & MODE_ALT_SCREEN) ? 0 : std::clamp<int>(scrollOffset, 0, engine->mScrollbackCount);
+    int logicalY = screenRow - clampedOffset;
+    if ((modes & MODE_ALT_SCREEN) ? (logicalY < 0 || logicalY >= engine->mRows)
+                                  : (logicalY < -engine->mScrollbackCount || logicalY >= engine->mRows)) {
+        engine->unlock();
+        return 0;
+    }
+    const Row& row = engine->getRowByLogicalY(logicalY);
+    int cols = std::min<int>(engine->mCols, static_cast<int>(row.cells.size()));
+
+    auto* bgPtr = static_cast<jint*>(env->GetPrimitiveArrayCritical(outBgRuns, nullptr));
+    auto* glPtr = static_cast<jint*>(env->GetPrimitiveArrayCritical(outGlyphs, nullptr));
+
+    int bgCount = 0;
+    int glCount = 0;
+
+    if (bgPtr && glPtr) {
+        const bool isCursorRow = (logicalY == engine->mCursorRow);
+        const int promptEndCol = isCursorRow ? findPromptEndColOnRow(row, engine->mCursorCol) : 0;
+        const int preDelStart = (isCursorRow && engine->mPreDeleteCount > 0)
+            ? std::clamp(engine->mCursorCol - engine->mPreDeleteCount, promptEndCol, engine->mCursorCol)
+            : -1;
+        const int preDelEnd = (isCursorRow && engine->mPreDeleteCount > 0)
+            ? engine->mCursorCol
+            : -1;
+
+        auto cellBgAt = [&](int c) -> uint32_t {
+            if (engine->isLogicalCellSelected(logicalY, c)) return SELECTION_BG;
+            if (c >= preDelStart && c < preDelEnd) return PREDELETE_BG;
+            const Cell& cell = row.cells[static_cast<size_t>(c)];
+            return resolveBgColor(cell.fg, cell.bg, cell.flags);
+        };
+
+        int runStart = 0;
+        while (runStart < cols && bgCount < maxBgRuns) {
+            uint32_t bg = cellBgAt(runStart);
+            int runEnd = runStart + 1;
+            while (runEnd < cols && cellBgAt(runEnd) == bg) {
+                runEnd++;
+            }
+            if (bg != DEFAULT_BG) {
+                int base = bgCount * 3;
+                bgPtr[base]     = runStart;
+                bgPtr[base + 1] = runEnd;
+                bgPtr[base + 2] = static_cast<jint>(bg);
+                bgCount++;
+            }
+            runStart = runEnd;
+        }
+
+        for (int c = 0; c < cols && glCount < maxGlyphs; ++c) {
+            const Cell& cell = row.cells[static_cast<size_t>(c)];
+            if (cell.codepoint <= ' ' || (cell.flags & (FLAG_INVISIBLE | FLAG_WIDE_TRAIL)) != 0) {
+                continue;
+            }
+            uint32_t fg = engine->isLogicalCellSelected(logicalY, c)
+                ? SELECTION_FG
+                : ((c >= preDelStart && c < preDelEnd)
+                    ? PREDELETE_FG
+                    : resolveFgColor(cell.fg, cell.bg, cell.flags));
+
+            if (!emitProceduralBoxOrBlockInCpp26(cell.codepoint, c, fg, glPtr, glCount, maxGlyphs)) {
+                if (glCount < maxGlyphs) {
+                    int base = glCount * 4;
+                    glPtr[base]     = static_cast<jint>(cell.codepoint);
+                    glPtr[base + 1] = c;
+                    glPtr[base + 2] = static_cast<jint>(fg);
+                    glPtr[base + 3] = static_cast<jint>(cell.flags);
+                    glCount++;
+                }
+            }
+        }
+    }
+
+    if (glPtr) env->ReleasePrimitiveArrayCritical(outGlyphs, glPtr, 0);
+    if (bgPtr) env->ReleasePrimitiveArrayCritical(outBgRuns, bgPtr, 0);
+    engine->unlock();
+
+    return (bgCount << 16) | (glCount & 0xFFFF);
+}
+
+// ============================================================================
+// Native C++26 Multi-Language Code Syntax Highlighter Lexer
+// Returns packed triples: [startUtf16Idx, endUtf16Idx, tokenCategory]
+// Categories:
+//   1 = Keyword / Control Flow
+//   2 = String / Char / Template Literal
+//   3 = Comment (Line / Block / XML)
+//   4 = Number / Hex / Boolean / Null
+//   5 = Function Call / Shell Variable ($VAR) / Builtin
+//   6 = Preprocessor (#include) / Decorator (@Annot) / CLI Flag (--flag)
+//   7 = Markup Tag (<tag>) / Config Key ("key":) / Markdown Heading (###)
+// ============================================================================
+static inline bool isIdentStart16(jchar ch) noexcept {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
+}
+
+static inline bool isIdentCont16(jchar ch) noexcept {
+    return isIdentStart16(ch) || (ch >= '0' && ch <= '9');
+}
+
+static inline bool isDigit16(jchar ch) noexcept {
+    return (ch >= '0' && ch <= '9');
+}
+
+static inline bool isHexDigit16(jchar ch) noexcept {
+    return isDigit16(ch) || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') || ch == '_';
+}
+
+static int classifyIdentifierCpp26(const jchar* buf, int start, int end) noexcept {
+    int len = end - start;
+    if (len < 2 || len > 20) return 0;
+    char w[24];
+    for (int i = 0; i < len; ++i) {
+        jchar c = buf[start + i];
+        if (c > 127) return 0;
+        w[i] = static_cast<char>(c);
+    }
+    w[len] = '\0';
+
+    static const char* const kBoolOrNull[] = {
+        "true", "false", "null", "nullptr", "None", "True", "False", "nil", "undefined", "NaN"
+    };
+    for (const char* b : kBoolOrNull) {
+        if (strcmp(w, b) == 0) return 4;
+    }
+
+    static const char* const kKeywords[] = {
+        "if", "else", "elif", "fi", "then", "for", "while", "do", "done", "until",
+        "case", "esac", "in", "function", "return", "break", "continue", "switch",
+        "default", "try", "catch", "finally", "throw", "raise", "except", "with",
+        "as", "import", "from", "export", "package", "class", "struct", "enum",
+        "interface", "trait", "impl", "pub", "priv", "private", "protected",
+        "public", "internal", "open", "final", "abstract", "override", "virtual",
+        "static", "const", "constexpr", "val", "var", "let", "mut", "fn", "fun",
+        "def", "lambda", "async", "await", "yield", "match", "where", "type",
+        "typedef", "typename", "template", "namespace", "using", "new", "delete",
+        "this", "super", "self", "sizeof", "typeof", "instanceof", "is", "when",
+        "object", "companion", "init", "defer", "go", "chan", "select", "fallthrough",
+        "local", "readonly", "declare", "typeset", "unset", "shift", "exit", "source"
+    };
+    for (const char* kw : kKeywords) {
+        if (strcmp(w, kw) == 0) return 1;
+    }
+
+    static const char* const kTypesAndBuiltins[] = {
+        "void", "int", "long", "short", "char", "float", "double", "bool", "boolean",
+        "byte", "usize", "isize", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64",
+        "f32", "f64", "size_t", "ssize_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        "int8_t", "int16_t", "int32_t", "int64_t", "String", "Int", "Long", "Float",
+        "Double", "Boolean", "Unit", "Any", "List", "Map", "Set", "Array", "Vec",
+        "Option", "Result", "Some", "Ok", "Err", "std", "string", "vector", "auto",
+        "echo", "printf", "read", "cd", "pwd", "ls", "cat", "grep", "sed", "awk",
+        "find", "xargs", "chmod", "chown", "mkdir", "rm", "cp", "mv", "ln", "tar",
+        "curl", "wget", "ssh", "scp", "sftp", "git", "apt", "pkg", "dpkg", "su",
+        "sudo", "print", "len", "range", "open", "str", "dict", "list", "set", "tuple"
+    };
+    for (const char* tb : kTypesAndBuiltins) {
+        if (strcmp(w, tb) == 0) return 5;
+    }
+    return 0;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_com_mtermux_app_TermuxActivity_nativeTokenizeCodeSyntax(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring codeStr,
+    jstring fileNameStr
+) {
+    if (!codeStr) return env->NewIntArray(0);
+    jsize totalLen = env->GetStringLength(codeStr);
+    if (totalLen <= 0) return env->NewIntArray(0);
+
+    const jchar* chars = env->GetStringChars(codeStr, nullptr);
+    if (!chars) return env->NewIntArray(0);
+
+    std::string fname = jstringToStdString(env, fileNameStr);
+    for (char& c : fname) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+    auto endsWith = [&](const char* suffix) -> bool {
+        size_t sl = strlen(suffix);
+        return fname.size() >= sl && fname.compare(fname.size() - sl, sl, suffix) == 0;
+    };
+
+    const bool isXmlOrSvg = endsWith(".xml") || endsWith(".html") || endsWith(".htm") ||
+                            endsWith(".svg") || endsWith(".plist") || endsWith(".xhtml");
+    const bool isMarkdown = endsWith(".md") || endsWith(".markdown");
+    const bool isConfig   = endsWith(".json") || endsWith(".yaml") || endsWith(".yml") ||
+                            endsWith(".toml") || endsWith(".ini") || endsWith(".conf") ||
+                            endsWith(".cfg") || endsWith(".properties");
+    const bool isShellOrPy = endsWith(".sh") || endsWith(".bash") || endsWith(".zsh") ||
+                             endsWith(".py") || endsWith(".pyw") || endsWith(".rb") ||
+                             endsWith(".pl") || endsWith(".env") || isConfig ||
+                             fname == ".bashrc" || fname == ".profile" || fname == "makefile" ||
+                             fname == "dockerfile" || fname == "cmakelists.txt";
+
+    const int limit = std::min<int>(static_cast<int>(totalLen), 131072);
+    constexpr size_t kMaxTriples = 8192;
+    std::vector<jint> out;
+    out.reserve(2048 * 3);
+
+    auto pushToken = [&](int s, int e, int cat) {
+        if (e > s && (out.size() / 3) < kMaxTriples) {
+            out.push_back(s);
+            out.push_back(e);
+            out.push_back(cat);
+        }
+    };
+
+    int i = 0;
+    bool atLineStart = true;
+
+    while (i < limit && (out.size() / 3) < kMaxTriples) {
+        jchar c = chars[i];
+        if (c == '\n' || c == '\r') {
+            atLineStart = true;
+            ++i;
+            continue;
+        }
+        if (c == ' ' || c == '\t') {
+            ++i;
+            continue;
+        }
+
+        // 1. Markdown headings / bold / inline code
+        if (isMarkdown) {
+            if (atLineStart && c == '#') {
+                int s = i;
+                while (i < limit && chars[i] != '\n') ++i;
+                pushToken(s, i, 7);
+                atLineStart = false;
+                continue;
+            }
+            if (c == '`') {
+                int s = i++;
+                if (i + 1 < limit && chars[i] == '`' && chars[i + 1] == '`') {
+                    i += 2;
+                    while (i + 2 < limit && !(chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`')) ++i;
+                    if (i + 2 < limit) i += 3; else i = limit;
+                } else {
+                    while (i < limit && chars[i] != '`' && chars[i] != '\n') ++i;
+                    if (i < limit && chars[i] == '`') ++i;
+                }
+                pushToken(s, i, 2);
+                atLineStart = false;
+                continue;
+            }
+        }
+
+        // 2. XML / HTML / SVG comments and tags
+        if (isXmlOrSvg || (c == '<' && i + 3 < limit && chars[i + 1] == '!' && chars[i + 2] == '-' && chars[i + 3] == '-')) {
+            if (c == '<' && i + 3 < limit && chars[i + 1] == '!' && chars[i + 2] == '-' && chars[i + 3] == '-') {
+                int s = i;
+                i += 4;
+                while (i + 2 < limit && !(chars[i] == '-' && chars[i + 1] == '-' && chars[i + 2] == '>')) ++i;
+                if (i + 2 < limit) i += 3; else i = limit;
+                pushToken(s, i, 3);
+                atLineStart = false;
+                continue;
+            }
+            if (isXmlOrSvg && c == '<') {
+                int s = i++;
+                if (i < limit && (chars[i] == '/' || chars[i] == '?' || chars[i] == '!')) ++i;
+                while (i < limit && (isIdentCont16(chars[i]) || chars[i] == ':' || chars[i] == '-')) ++i;
+                pushToken(s, i, 7);
+                while (i < limit && chars[i] != '>') {
+                    if (chars[i] == '"' || chars[i] == '\'') {
+                        jchar q = chars[i];
+                        int qs = i++;
+                        while (i < limit && chars[i] != q) {
+                            if (chars[i] == '\\' && i + 1 < limit) ++i;
+                            ++i;
+                        }
+                        if (i < limit) ++i;
+                        pushToken(qs, i, 2);
+                    } else if (isIdentStart16(chars[i])) {
+                        int as = i++;
+                        while (i < limit && (isIdentCont16(chars[i]) || chars[i] == '-' || chars[i] == ':')) ++i;
+                        pushToken(as, i, 6);
+                    } else {
+                        if (chars[i] == '/' && i + 1 < limit && chars[i + 1] == '>') {
+                            pushToken(i, i + 2, 7);
+                            i += 2;
+                            break;
+                        }
+                        ++i;
+                    }
+                }
+                if (i < limit && chars[i] == '>') {
+                    pushToken(i, i + 1, 7);
+                    ++i;
+                }
+                atLineStart = false;
+                continue;
+            }
+        }
+
+        // 3. C/C++/JS/Kotlin/Go/Rust Comments (// and /* */)
+        if (c == '/' && i + 1 < limit) {
+            if (chars[i + 1] == '/') {
+                int s = i;
+                i += 2;
+                while (i < limit && chars[i] != '\n') ++i;
+                pushToken(s, i, 3);
+                atLineStart = false;
+                continue;
+            }
+            if (chars[i + 1] == '*') {
+                int s = i;
+                i += 2;
+                while (i + 1 < limit && !(chars[i] == '*' && chars[i + 1] == '/')) ++i;
+                if (i + 1 < limit) i += 2; else i = limit;
+                pushToken(s, i, 3);
+                atLineStart = false;
+                continue;
+            }
+        }
+
+        // 4. Hash (#): Shebang / Preprocessor (#include, #define) / Comment (# ...)
+        if (c == '#') {
+            if (i == 0 && i + 1 < limit && chars[i + 1] == '!') {
+                int s = i;
+                while (i < limit && chars[i] != '\n') ++i;
+                pushToken(s, i, 6);
+                atLineStart = false;
+                continue;
+            }
+            if (!isShellOrPy && atLineStart) {
+                int s = i++;
+                while (i < limit && (chars[i] == ' ' || chars[i] == '\t')) ++i;
+                while (i < limit && isIdentCont16(chars[i])) ++i;
+                pushToken(s, i, 6);
+                atLineStart = false;
+                continue;
+            }
+            int s = i;
+            while (i < limit && chars[i] != '\n') ++i;
+            pushToken(s, i, 3);
+            atLineStart = false;
+            continue;
+        }
+
+        // 5. INI / TOML section headers [section]
+        if (isConfig && atLineStart && c == '[') {
+            int s = i++;
+            while (i < limit && chars[i] != ']' && chars[i] != '\n') ++i;
+            if (i < limit && chars[i] == ']') ++i;
+            pushToken(s, i, 7);
+            atLineStart = false;
+            continue;
+        }
+
+        // 6. Strings ("...", '...', `...`, triple-quoted)
+        if (c == '"' || c == '\'' || c == '`') {
+            jchar q = c;
+            int s = i++;
+            if ((q == '"' || q == '\'') && i + 1 < limit && chars[i] == q && chars[i + 1] == q) {
+                i += 2;
+                while (i + 2 < limit && !(chars[i] == q && chars[i + 1] == q && chars[i + 2] == q)) {
+                    if (chars[i] == '\\' && i + 1 < limit) ++i;
+                    ++i;
+                }
+                if (i + 2 < limit) i += 3; else i = limit;
+                pushToken(s, i, 2);
+            } else {
+                while (i < limit && chars[i] != q && (q == '`' || chars[i] != '\n')) {
+                    if (chars[i] == '\\' && i + 1 < limit) ++i;
+                    ++i;
+                }
+                if (i < limit && chars[i] == q) ++i;
+                int look = i;
+                while (look < limit && (chars[look] == ' ' || chars[look] == '\t')) ++look;
+                int cat = (q == '"' && look < limit && chars[look] == ':') ? 7 : 2;
+                pushToken(s, i, cat);
+            }
+            atLineStart = false;
+            continue;
+        }
+
+        // 7. Shell / PHP / Perl Variables ($VAR, ${VAR}, $1, $@)
+        if (c == '$' && i + 1 < limit) {
+            jchar nx = chars[i + 1];
+            if (nx == '{') {
+                int s = i;
+                i += 2;
+                while (i < limit && chars[i] != '}' && chars[i] != '\n') ++i;
+                if (i < limit && chars[i] == '}') ++i;
+                pushToken(s, i, 5);
+                atLineStart = false;
+                continue;
+            }
+            if (isIdentStart16(nx) || isDigit16(nx) || nx == '@' || nx == '?' || nx == '#' || nx == '*') {
+                int s = i;
+                i += 2;
+                while (i < limit && isIdentCont16(chars[i])) ++i;
+                pushToken(s, i, 5);
+                atLineStart = false;
+                continue;
+            }
+        }
+
+        // 8. Annotations / Decorators (@Override, @JvmStatic)
+        if (c == '@' && i + 1 < limit && isIdentStart16(chars[i + 1])) {
+            int s = i;
+            i += 2;
+            while (i < limit && (isIdentCont16(chars[i]) || chars[i] == '.')) ++i;
+            pushToken(s, i, 6);
+            atLineStart = false;
+            continue;
+        }
+
+        // 9. CLI flags in Shell (--flag or -f after whitespace)
+        if (c == '-' && i + 1 < limit && (i == 0 || chars[i - 1] == ' ' || chars[i - 1] == '\t') &&
+            (chars[i + 1] == '-' || isIdentStart16(chars[i + 1]))) {
+            int s = i;
+            ++i;
+            if (i < limit && chars[i] == '-') ++i;
+            while (i < limit && (isIdentCont16(chars[i]) || chars[i] == '-')) ++i;
+            if (i > s + 1) {
+                pushToken(s, i, 6);
+                atLineStart = false;
+                continue;
+            }
+        }
+
+        // 10. Numbers (decimal, hex 0x..., binary 0b..., float)
+        if (isDigit16(c)) {
+            int s = i++;
+            if (c == '0' && i < limit && (chars[i] == 'x' || chars[i] == 'X' || chars[i] == 'b' || chars[i] == 'B')) {
+                ++i;
+                while (i < limit && isHexDigit16(chars[i])) ++i;
+            } else {
+                while (i < limit && (isDigit16(chars[i]) || chars[i] == '.' || chars[i] == '_')) ++i;
+                if (i < limit && (chars[i] == 'e' || chars[i] == 'E')) {
+                    ++i;
+                    if (i < limit && (chars[i] == '+' || chars[i] == '-')) ++i;
+                    while (i < limit && isDigit16(chars[i])) ++i;
+                }
+            }
+            while (i < limit && (chars[i] == 'f' || chars[i] == 'F' || chars[i] == 'L' || chars[i] == 'u' || chars[i] == 'U')) ++i;
+            pushToken(s, i, 4);
+            atLineStart = false;
+            continue;
+        }
+
+        // 11. Identifiers, Keywords, Types, YAML/INI keys, and Function Calls
+        if (isIdentStart16(c)) {
+            int s = i++;
+            while (i < limit && (isIdentCont16(chars[i]) || (isConfig && chars[i] == '-'))) ++i;
+
+            int look = i;
+            while (look < limit && (chars[look] == ' ' || chars[look] == '\t')) ++look;
+
+            if (atLineStart && isConfig && look < limit && (chars[look] == ':' || chars[look] == '=')) {
+                pushToken(s, i, 7);
+            } else {
+                int cat = classifyIdentifierCpp26(chars, s, i);
+                if (cat == 0 && look < limit && chars[look] == '(') {
+                    cat = 5;
+                } else if (cat == 0 && chars[s] >= 'A' && chars[s] <= 'Z') {
+                    cat = 5;
+                }
+                if (cat != 0) {
+                    pushToken(s, i, cat);
+                }
+            }
+            atLineStart = false;
+            continue;
+        }
+
+        atLineStart = false;
+        ++i;
+    }
+
+    env->ReleaseStringChars(codeStr, chars);
+
+    jintArray arr = env->NewIntArray(static_cast<jsize>(out.size()));
+    if (arr != nullptr && !out.empty()) {
+        env->SetIntArrayRegion(arr, 0, static_cast<jsize>(out.size()), out.data());
+    }
+    return arr;
+}
+
 } // extern "C"

@@ -6111,7 +6111,7 @@ class TermuxActivity : Activity() {
                 icon = M3Icon.ADD,
                 isDanger = false,
                 onClick = { createSession(false) },
-                onLongClick = { terminalSurface.showTranscriptCopyDialog() }
+                onLongClick = { toggleSplitScreenMode() }
             ),
             HeaderActionSpec(
                 icon = M3Icon.HUB_GRID,
@@ -8402,7 +8402,39 @@ class TermuxActivity : Activity() {
             hubPredictiveBack
         )
 
-        // Full-screen Sub-Page: Code Viewer & Editor
+        fun isImageFileName(name: String): Boolean {
+            val lower = name.lowercase()
+            return lower.endsWith(".png") ||
+                lower.endsWith(".jpg") ||
+                lower.endsWith(".jpeg") ||
+                lower.endsWith(".webp") ||
+                lower.endsWith(".gif") ||
+                lower.endsWith(".bmp") ||
+                lower.endsWith(".ico") ||
+                lower.endsWith(".svg")
+        }
+
+        fun detectSyntaxLanguageBadge(name: String): String {
+            val lower = name.lowercase()
+            return when {
+                lower.endsWith(".sh") || lower.endsWith(".bash") || lower.endsWith(".zsh") || lower == ".bashrc" || lower == ".profile" -> "Shell / Bash"
+                lower.endsWith(".py") || lower.endsWith(".pyw") -> "Python"
+                lower.endsWith(".cpp") || lower.endsWith(".cc") || lower.endsWith(".cxx") || lower.endsWith(".hpp") || lower.endsWith(".h") || lower.endsWith(".c") -> "C / C++26"
+                lower.endsWith(".kt") || lower.endsWith(".kts") -> "Kotlin"
+                lower.endsWith(".rs") -> "Rust"
+                lower.endsWith(".go") -> "Go"
+                lower.endsWith(".java") -> "Java"
+                lower.endsWith(".js") || lower.endsWith(".ts") || lower.endsWith(".jsx") || lower.endsWith(".tsx") -> "JS / TS"
+                lower.endsWith(".json") -> "JSON"
+                lower.endsWith(".yaml") || lower.endsWith(".yml") -> "YAML"
+                lower.endsWith(".toml") || lower.endsWith(".ini") || lower.endsWith(".conf") || lower.endsWith(".cfg") -> "Config / INI"
+                lower.endsWith(".xml") || lower.endsWith(".html") || lower.endsWith(".htm") || lower.endsWith(".svg") -> "XML / SVG"
+                lower.endsWith(".md") || lower.endsWith(".markdown") -> "Markdown"
+                else -> "Code"
+            }
+        }
+
+        // Full-screen Sub-Page: Code Viewer & Editor with Native C++26 Syntax Highlighting
         fun openCodeViewerAndEditorSubPage(
             fileName: String,
             fullPath: String,
@@ -8411,11 +8443,12 @@ class TermuxActivity : Activity() {
         ) {
             openHubSubPage { pageCol, closeSubPage ->
                 var viewerFontScale = 1.0f
+                var syntaxHighlightEnabled = true
 
                 val topBar = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(16), dp(8), dp(16), dp(10))
+                    setPadding(dp(16), dp(8), dp(16), dp(6))
                 }
                 topBar.addView(
                     FrameLayout(this).apply {
@@ -8464,6 +8497,53 @@ class TermuxActivity : Activity() {
                         InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 }
 
+                val appliedSyntaxSpans = ArrayList<android.text.style.ForegroundColorSpan>(256)
+                var isApplyingSyntaxSpans = false
+
+                fun applyCpp26SyntaxHighlightNow() {
+                    if (isApplyingSyntaxSpans) return
+                    val editable = editorEt.text ?: return
+                    isApplyingSyntaxSpans = true
+                    try {
+                        for (oldSpan in appliedSyntaxSpans) {
+                            editable.removeSpan(oldSpan)
+                        }
+                        appliedSyntaxSpans.clear()
+                        if (!syntaxHighlightEnabled || editable.isEmpty()) return
+
+                        val rawText = editable.toString()
+                        val triples = nativeTokenizeCodeSyntax(rawText, fileName)
+                        val textLen = editable.length
+                        var idx = 0
+                        while (idx + 2 < triples.size) {
+                            val s = triples[idx]
+                            val e = triples[idx + 1]
+                            val cat = triples[idx + 2]
+                            idx += 3
+                            if (s >= 0 && e > s && e <= textLen) {
+                                val tokenColor = when (cat) {
+                                    1 -> 0xFFC792EA.toInt() // Keyword: Expressive Violet
+                                    2 -> 0xFFC3E88D.toInt() // String: Pastel Mint Green
+                                    3 -> 0xFF697098.toInt() // Comment: Muted Slate
+                                    4 -> 0xFFF78C6C.toInt() // Number / Bool: Warm Coral
+                                    5 -> 0xFF82AAFF.toInt() // Function / $VAR / Builtin: Sky Blue
+                                    6 -> 0xFF89DDFF.toInt() // Preprocessor / @Annot / --flag: Ice Cyan
+                                    7 -> 0xFFFFCB6B.toInt() // Tag / Config Key / Heading: Golden Amber
+                                    else -> 0
+                                }
+                                if (tokenColor != 0) {
+                                    val span = android.text.style.ForegroundColorSpan(tokenColor)
+                                    editable.setSpan(span, s, e, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                                    appliedSyntaxSpans.add(span)
+                                }
+                            }
+                        }
+                    } catch (_: Throwable) {
+                    } finally {
+                        isApplyingSyntaxSpans = false
+                    }
+                }
+
                 val zoomLabel = TextView(this).apply {
                     text = "100%"
                     setTextColor(uiAccent)
@@ -8488,6 +8568,57 @@ class TermuxActivity : Activity() {
                 })
                 pageCol.addView(topBar)
 
+                // Sub-bar: C++26 Syntax Language Badge + Line/Char Counter + Syntax Toggle Chip
+                val syntaxSubBar = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(16), dp(2), dp(16), dp(6))
+                }
+                val langBadgeTv = TextView(this).apply {
+                    val langName = detectSyntaxLanguageBadge(fileName)
+                    val lineCnt = max(1, initialContent.count { it == '\n' } + 1)
+                    text = "C++26 • $langName • $lineCnt ${tr("стр.", "lines")}"
+                    setTextColor(uiAccent)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.2f)
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                syntaxSubBar.addView(langBadgeTv)
+
+                var syntaxToggleChip: TextView? = null
+                syntaxToggleChip = makeExpressiveChip(
+                    tr("Подсветка: ВКЛ", "Syntax: ON"),
+                    true
+                ) {
+                    syntaxHighlightEnabled = !syntaxHighlightEnabled
+                    syntaxToggleChip?.apply {
+                        text = if (syntaxHighlightEnabled) tr("Подсветка: ВКЛ", "Syntax: ON") else tr("Подсветка: ВЫКЛ", "Syntax: OFF")
+                        setTextColor(if (syntaxHighlightEnabled) uiAccent else COLOR_TEXT)
+                        background = tonalBg(if (syntaxHighlightEnabled) uiAccentContainer else uiSurfaceLow, dp(12))
+                    }
+                    applyCpp26SyntaxHighlightNow()
+                }
+                syntaxSubBar.addView(syntaxToggleChip)
+                pageCol.addView(syntaxSubBar)
+
+                val rehighlightRunnable = Runnable {
+                    val curText = editorEt.text?.toString().orEmpty()
+                    val langName = detectSyntaxLanguageBadge(fileName)
+                    val lineCnt = max(1, curText.count { it == '\n' } + 1)
+                    langBadgeTv.text = "C++26 • $langName • $lineCnt ${tr("стр.", "lines")}"
+                    applyCpp26SyntaxHighlightNow()
+                }
+
+                editorEt.addTextChangedListener(object : android.text.TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                    override fun afterTextChanged(s: Editable?) {
+                        if (isApplyingSyntaxSpans) return
+                        editorEt.removeCallbacks(rehighlightRunnable)
+                        editorEt.postDelayed(rehighlightRunnable, 130L)
+                    }
+                })
+
                 val vScroll = ScrollView(this).apply {
                     isFillViewport = true
                     layoutParams = LinearLayout.LayoutParams(
@@ -8495,11 +8626,549 @@ class TermuxActivity : Activity() {
                         0,
                         1f
                     ).apply {
-                        setMargins(dp(14), dp(4), dp(14), dp(12))
+                        setMargins(dp(14), dp(2), dp(14), dp(12))
                     }
                 }
                 vScroll.addView(editorEt)
                 pageCol.addView(vScroll)
+
+                editorEt.post { applyCpp26SyntaxHighlightNow() }
+            }
+        }
+
+        // Lightweight Native SVG Vector Graphics Renderer for File Explorer Preview
+        fun parseSvgColor(raw: String?, fallback: Int): Int {
+            val s = raw?.trim()?.lowercase().orEmpty()
+            if (s.isEmpty() || s == "none" || s == "transparent") return 0
+            if (s == "currentcolor" || s == "white" || s == "#fff") return 0xFFFFFFFF.toInt()
+            if (s == "black" || s == "#000") return 0xFF000000.toInt()
+            return try {
+                if (s.startsWith("#") && s.length == 4) {
+                    val r = s[1]; val g = s[2]; val b = s[3]
+                    android.graphics.Color.parseColor("#$r$r$g$g$b$b")
+                } else {
+                    android.graphics.Color.parseColor(s)
+                }
+            } catch (_: Throwable) {
+                fallback
+            }
+        }
+
+        fun parseSvgPathData(d: String): Path {
+            val path = Path()
+            var i = 0
+            val n = d.length
+            var curX = 0f
+            var curY = 0f
+            var startX = 0f
+            var startY = 0f
+            var lastCtrlX = 0f
+            var lastCtrlY = 0f
+            var cmd = ' '
+
+            fun skipSep() {
+                while (i < n && (d[i] <= ' ' || d[i] == ',')) i++
+            }
+            fun hasNextNumber(): Boolean {
+                skipSep()
+                if (i >= n) return false
+                val c = d[i]
+                return (c in '0'..'9') || c == '-' || c == '+' || c == '.'
+            }
+            fun nextFloat(): Float {
+                skipSep()
+                val start = i
+                if (i < n && (d[i] == '-' || d[i] == '+')) i++
+                var seenDot = false
+                while (i < n) {
+                    val c = d[i]
+                    if (c in '0'..'9') {
+                        i++
+                    } else if (c == '.' && !seenDot) {
+                        seenDot = true
+                        i++
+                    } else if ((c == 'e' || c == 'E') && i + 1 < n) {
+                        i++
+                        if (d[i] == '-' || d[i] == '+') i++
+                    } else {
+                        break
+                    }
+                }
+                return d.substring(start, i).toFloatOrNull() ?: 0f
+            }
+
+            while (i < n) {
+                skipSep()
+                if (i >= n) break
+                val ch = d[i]
+                if (ch.isLetter()) {
+                    cmd = ch
+                    i++
+                }
+                when (cmd) {
+                    'M', 'm' -> {
+                        val x = nextFloat()
+                        val y = nextFloat()
+                        curX = if (cmd == 'm') curX + x else x
+                        curY = if (cmd == 'm') curY + y else y
+                        path.moveTo(curX, curY)
+                        startX = curX; startY = curY
+                        lastCtrlX = curX; lastCtrlY = curY
+                        cmd = if (cmd == 'm') 'l' else 'L'
+                    }
+                    'L', 'l' -> {
+                        while (hasNextNumber()) {
+                            val x = nextFloat()
+                            val y = nextFloat()
+                            curX = if (cmd == 'l') curX + x else x
+                            curY = if (cmd == 'l') curY + y else y
+                            path.lineTo(curX, curY)
+                            lastCtrlX = curX; lastCtrlY = curY
+                        }
+                    }
+                    'H', 'h' -> {
+                        while (hasNextNumber()) {
+                            val x = nextFloat()
+                            curX = if (cmd == 'h') curX + x else x
+                            path.lineTo(curX, curY)
+                            lastCtrlX = curX; lastCtrlY = curY
+                        }
+                    }
+                    'V', 'v' -> {
+                        while (hasNextNumber()) {
+                            val y = nextFloat()
+                            curY = if (cmd == 'v') curY + y else y
+                            path.lineTo(curX, curY)
+                            lastCtrlX = curX; lastCtrlY = curY
+                        }
+                    }
+                    'C', 'c' -> {
+                        while (hasNextNumber()) {
+                            val x1 = nextFloat(); val y1 = nextFloat()
+                            val x2 = nextFloat(); val y2 = nextFloat()
+                            val x = nextFloat(); val y = nextFloat()
+                            val ax1 = if (cmd == 'c') curX + x1 else x1
+                            val ay1 = if (cmd == 'c') curY + y1 else y1
+                            val ax2 = if (cmd == 'c') curX + x2 else x2
+                            val ay2 = if (cmd == 'c') curY + y2 else y2
+                            val ax = if (cmd == 'c') curX + x else x
+                            val ay = if (cmd == 'c') curY + y else y
+                            path.cubicTo(ax1, ay1, ax2, ay2, ax, ay)
+                            lastCtrlX = ax2; lastCtrlY = ay2
+                            curX = ax; curY = ay
+                        }
+                    }
+                    'S', 's' -> {
+                        while (hasNextNumber()) {
+                            val x2 = nextFloat(); val y2 = nextFloat()
+                            val x = nextFloat(); val y = nextFloat()
+                            val ax1 = 2f * curX - lastCtrlX
+                            val ay1 = 2f * curY - lastCtrlY
+                            val ax2 = if (cmd == 's') curX + x2 else x2
+                            val ay2 = if (cmd == 's') curY + y2 else y2
+                            val ax = if (cmd == 's') curX + x else x
+                            val ay = if (cmd == 's') curY + y else y
+                            path.cubicTo(ax1, ay1, ax2, ay2, ax, ay)
+                            lastCtrlX = ax2; lastCtrlY = ay2
+                            curX = ax; curY = ay
+                        }
+                    }
+                    'Q', 'q' -> {
+                        while (hasNextNumber()) {
+                            val x1 = nextFloat(); val y1 = nextFloat()
+                            val x = nextFloat(); val y = nextFloat()
+                            val ax1 = if (cmd == 'q') curX + x1 else x1
+                            val ay1 = if (cmd == 'q') curY + y1 else y1
+                            val ax = if (cmd == 'q') curX + x else x
+                            val ay = if (cmd == 'q') curY + y else y
+                            path.quadTo(ax1, ay1, ax, ay)
+                            lastCtrlX = ax1; lastCtrlY = ay1
+                            curX = ax; curY = ay
+                        }
+                    }
+                    'Z', 'z' -> {
+                        path.close()
+                        curX = startX; curY = startY
+                        lastCtrlX = curX; lastCtrlY = curY
+                    }
+                    else -> {
+                        if (hasNextNumber()) nextFloat() else i++
+                    }
+                }
+            }
+            return path
+        }
+
+        fun renderSvgBytesToBitmap(svgBytes: ByteArray, targetMaxPx: Int = 1024): android.graphics.Bitmap? {
+            val svgText = try { String(svgBytes, Charsets.UTF_8) } catch (_: Throwable) { return null }
+            if (!svgText.contains("<svg", ignoreCase = true)) return null
+            val vbMatch = Regex("viewBox\\s*=\\s*[\"']\\s*([-\\d.]+)[,\\s]+([-\\d.]+)[,\\s]+([\\d.]+)[,\\s]+([\\d.]+)\\s*[\"']", RegexOption.IGNORE_CASE).find(svgText)
+            val wMatch = Regex("\\bwidth\\s*=\\s*[\"']\\s*([\\d.]+)", RegexOption.IGNORE_CASE).find(svgText)
+            val hMatch = Regex("\\bheight\\s*=\\s*[\"']\\s*([\\d.]+)", RegexOption.IGNORE_CASE).find(svgText)
+
+            val vbX = vbMatch?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 0f
+            val vbY = vbMatch?.groupValues?.getOrNull(2)?.toFloatOrNull() ?: 0f
+            val vbW = (vbMatch?.groupValues?.getOrNull(3)?.toFloatOrNull() ?: wMatch?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 24f).coerceAtLeast(1f)
+            val vbH = (vbMatch?.groupValues?.getOrNull(4)?.toFloatOrNull() ?: hMatch?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 24f).coerceAtLeast(1f)
+
+            val aspect = (vbW / vbH).coerceIn(0.1f, 10f)
+            val bmpW = if (aspect >= 1f) targetMaxPx else (targetMaxPx * aspect).roundToInt().coerceAtLeast(64)
+            val bmpH = if (aspect >= 1f) (targetMaxPx / aspect).roundToInt().coerceAtLeast(64) else targetMaxPx
+
+            val bmp = android.graphics.Bitmap.createBitmap(bmpW, bmpH, android.graphics.Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            val scale = min(bmpW / vbW, bmpH / vbH)
+            canvas.translate((bmpW - vbW * scale) * 0.5f - vbX * scale, (bmpH - vbH * scale) * 0.5f - vbY * scale)
+            canvas.scale(scale, scale)
+
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+            }
+            val tagRegex = Regex("<(path|rect|circle|ellipse|line)\\b([^>]*)/?>", RegexOption.IGNORE_CASE)
+            fun attrVal(attrs: String, name: String): String? {
+                return Regex("\\b$name\\s*=\\s*[\"']([^\"']*)[\"']", RegexOption.IGNORE_CASE).find(attrs)?.groupValues?.getOrNull(1)
+            }
+            val rootFill = attrVal(svgText.substringBefore(">"), "fill")
+            val rootStroke = attrVal(svgText.substringBefore(">"), "stroke")
+
+            for (m in tagRegex.findAll(svgText)) {
+                val tag = m.groupValues[1].lowercase()
+                val attrs = m.groupValues[2]
+                val p = when (tag) {
+                    "path" -> parseSvgPathData(attrVal(attrs, "d").orEmpty())
+                    "rect" -> Path().apply {
+                        val x = attrVal(attrs, "x")?.toFloatOrNull() ?: 0f
+                        val y = attrVal(attrs, "y")?.toFloatOrNull() ?: 0f
+                        val w = attrVal(attrs, "width")?.toFloatOrNull() ?: 0f
+                        val h = attrVal(attrs, "height")?.toFloatOrNull() ?: 0f
+                        val rx = attrVal(attrs, "rx")?.toFloatOrNull() ?: 0f
+                        if (w > 0f && h > 0f) addRoundRect(RectF(x, y, x + w, y + h), rx, rx, Path.Direction.CW)
+                    }
+                    "circle" -> Path().apply {
+                        val cx = attrVal(attrs, "cx")?.toFloatOrNull() ?: 0f
+                        val cy = attrVal(attrs, "cy")?.toFloatOrNull() ?: 0f
+                        val r = attrVal(attrs, "r")?.toFloatOrNull() ?: 0f
+                        if (r > 0f) addCircle(cx, cy, r, Path.Direction.CW)
+                    }
+                    "ellipse" -> Path().apply {
+                        val cx = attrVal(attrs, "cx")?.toFloatOrNull() ?: 0f
+                        val cy = attrVal(attrs, "cy")?.toFloatOrNull() ?: 0f
+                        val rx = attrVal(attrs, "rx")?.toFloatOrNull() ?: 0f
+                        val ry = attrVal(attrs, "ry")?.toFloatOrNull() ?: 0f
+                        if (rx > 0f && ry > 0f) addOval(RectF(cx - rx, cy - ry, cx + rx, cy + ry), Path.Direction.CW)
+                    }
+                    "line" -> Path().apply {
+                        moveTo(attrVal(attrs, "x1")?.toFloatOrNull() ?: 0f, attrVal(attrs, "y1")?.toFloatOrNull() ?: 0f)
+                        lineTo(attrVal(attrs, "x2")?.toFloatOrNull() ?: 0f, attrVal(attrs, "y2")?.toFloatOrNull() ?: 0f)
+                    }
+                    else -> null
+                } ?: continue
+
+                val fillRaw = attrVal(attrs, "fill") ?: rootFill
+                val strokeRaw = attrVal(attrs, "stroke") ?: rootStroke
+                val fillCol = if (fillRaw == null && strokeRaw == null) uiAccent else parseSvgColor(fillRaw, uiAccent)
+                val strokeCol = parseSvgColor(strokeRaw, 0)
+                val strokeW = attrVal(attrs, "stroke-width")?.toFloatOrNull() ?: 1.8f
+
+                if (fillCol != 0) {
+                    paint.style = Paint.Style.FILL
+                    paint.color = fillCol
+                    canvas.drawPath(p, paint)
+                }
+                if (strokeCol != 0) {
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = strokeW
+                    paint.color = strokeCol
+                    canvas.drawPath(p, paint)
+                }
+            }
+            return bmp
+        }
+
+        // Full-screen Sub-Page: Built-in Image & Graphics Viewer in File Explorer
+        fun openImageViewerSubPage(
+            fileName: String,
+            fullPath: String,
+            imageBytes: ByteArray,
+            onEditSvgCode: (() -> Unit)? = null
+        ) {
+            openHubSubPage { pageCol, closeSubPage ->
+                val isSvg = fileName.lowercase().endsWith(".svg")
+                val decodedBitmap: android.graphics.Bitmap? = try {
+                    if (isSvg) {
+                        renderSvgBytesToBitmap(imageBytes, 1024)
+                            ?: android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+                    } else {
+                        android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+                    }
+                } catch (_: Throwable) {
+                    null
+                }
+
+                var zoomScale = 1.0f
+                var panX = 0f
+                var panY = 0f
+                var rotationDeg = 0f
+                var bgMode = 0 // 0 = Checkerboard grid, 1 = Pure AMOLED black, 2 = Light surface
+
+                val topBar = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(16), dp(8), dp(16), dp(8))
+                }
+                topBar.addView(
+                    FrameLayout(this).apply {
+                        background = tonalBg(uiSurfaceContainer, dp(20))
+                        layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                            marginEnd = dp(12)
+                        }
+                        addView(MaterialIconView(this@TermuxActivity, M3Icon.ARROW_BACK, COLOR_TEXT_BRIGHT, 21f, 2.15f))
+                        attachSmoothPressAnimation(this, 0.90f)
+                        setOnClickListener {
+                            triggerHaptic(0.8f)
+                            closeSubPage()
+                        }
+                    }
+                )
+                val titleCol = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                titleCol.addView(TextView(this).apply {
+                    text = fileName
+                    setSingleLine(true)
+                    setTextColor(COLOR_TEXT_BRIGHT)
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                })
+                titleCol.addView(TextView(this).apply {
+                    text = fullPath
+                    setSingleLine(true)
+                    setTextColor(COLOR_TEXT_DIM)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                })
+                topBar.addView(titleCol)
+
+                val zoomBadgeTv = TextView(this).apply {
+                    text = "100%"
+                    setTextColor(uiAccent)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setPadding(dp(8), 0, dp(8), 0)
+                }
+                topBar.addView(zoomBadgeTv)
+
+                var canvasViewRef: View? = null
+
+                topBar.addView(makeExpressiveChip(tr("Поворот 90°", "Rotate 90°"), false) {
+                    rotationDeg = (rotationDeg + 90f) % 360f
+                    canvasViewRef?.invalidate()
+                })
+                if (isSvg && onEditSvgCode != null) {
+                    topBar.addView(makeExpressiveChip(tr("Код SVG", "SVG Code"), true) {
+                        closeSubPage()
+                        onEditSvgCode()
+                    })
+                }
+                pageCol.addView(topBar)
+
+                // Secondary controls bar: Background Mode (Grid / AMOLED / Light) + Reset Zoom
+                val ctrlBar = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(16), dp(2), dp(16), dp(6))
+                }
+                val metaTv = TextView(this).apply {
+                    val wPx = decodedBitmap?.width ?: 0
+                    val hPx = decodedBitmap?.height ?: 0
+                    val ext = fileName.substringAfterLast('.', "IMG").uppercase()
+                    text = if (wPx > 0 && hPx > 0) {
+                        "$wPx × $hPx px • $ext • ${formatSize(imageBytes.size.toLong())}"
+                    } else {
+                        "$ext • ${formatSize(imageBytes.size.toLong())}"
+                    }
+                    setTextColor(COLOR_TEXT_DIM)
+                    typeface = Typeface.MONOSPACE
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.2f)
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                ctrlBar.addView(metaTv)
+
+                var bgChip: TextView? = null
+                bgChip = makeExpressiveChip(tr("Фон: Сетка", "BG: Grid"), false) {
+                    bgMode = (bgMode + 1) % 3
+                    bgChip?.text = when (bgMode) {
+                        0 -> tr("Фон: Сетка", "BG: Grid")
+                        1 -> tr("Фон: AMOLED", "BG: AMOLED")
+                        else -> tr("Фон: Светлый", "BG: Light")
+                    }
+                    canvasViewRef?.invalidate()
+                }
+                ctrlBar.addView(bgChip)
+                ctrlBar.addView(makeExpressiveChip(tr("Сброс 1:1", "Reset 1:1"), false) {
+                    zoomScale = 1.0f
+                    panX = 0f
+                    panY = 0f
+                    rotationDeg = 0f
+                    zoomBadgeTv.text = "100%"
+                    canvasViewRef?.invalidate()
+                })
+                pageCol.addView(ctrlBar)
+
+                val imgCanvas = object : View(this) {
+                    private val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                    private val gridPaint = Paint()
+                    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        style = Paint.Style.STROKE
+                        strokeWidth = dpF(1.2f)
+                    }
+                    private val clipRect = RectF()
+
+                    private val scaleDetect = ScaleGestureDetector(
+                        context,
+                        object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                                val prev = zoomScale
+                                val next = (zoomScale * detector.scaleFactor).coerceIn(0.5f, 8.0f)
+                                val factor = next / prev
+                                val fx = detector.focusX - width * 0.5f
+                                val fy = detector.focusY - height * 0.5f
+                                panX = fx - (fx - panX) * factor
+                                panY = fy - (fy - panY) * factor
+                                zoomScale = next
+                                zoomBadgeTv.text = "${(zoomScale * 100f).roundToInt()}%"
+                                invalidate()
+                                return true
+                            }
+                        }
+                    )
+
+                    private val gestureDetect = GestureDetector(
+                        context,
+                        object : GestureDetector.SimpleOnGestureListener() {
+                            override fun onDown(e: MotionEvent): Boolean = true
+
+                            override fun onScroll(
+                                e1: MotionEvent?,
+                                e2: MotionEvent,
+                                distanceX: Float,
+                                distanceY: Float
+                            ): Boolean {
+                                if (scaleDetect.isInProgress) return false
+                                panX -= distanceX
+                                panY -= distanceY
+                                invalidate()
+                                return true
+                            }
+
+                            override fun onDoubleTap(e: MotionEvent): Boolean {
+                                triggerHaptic(0.85f)
+                                val startScale = zoomScale
+                                val targetScale = if (zoomScale < 1.8f) 2.75f else 1.0f
+                                val startX = panX
+                                val startY = panY
+                                val targetX = if (targetScale == 1.0f) 0f else (width * 0.5f - e.x) * 1.2f
+                                val targetY = if (targetScale == 1.0f) 0f else (height * 0.5f - e.y) * 1.2f
+                                ValueAnimator.ofFloat(0f, 1f).apply {
+                                    duration = 240L
+                                    interpolator = aosp17SpatialInterpolator
+                                    addUpdateListener { va ->
+                                        val t = va.animatedValue as Float
+                                        zoomScale = startScale + (targetScale - startScale) * t
+                                        panX = startX + (targetX - startX) * t
+                                        panY = startY + (targetY - startY) * t
+                                        zoomBadgeTv.text = "${(zoomScale * 100f).roundToInt()}%"
+                                        invalidate()
+                                    }
+                                    start()
+                                }
+                                return true
+                            }
+                        }
+                    )
+
+                    override fun onTouchEvent(event: MotionEvent): Boolean {
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                        scaleDetect.onTouchEvent(event)
+                        gestureDetect.onTouchEvent(event)
+                        return true
+                    }
+
+                    override fun onDraw(canvas: Canvas) {
+                        super.onDraw(canvas)
+                        val w = width.toFloat()
+                        val h = height.toFloat()
+                        if (w <= 0f || h <= 0f) return
+
+                        clipRect.set(0f, 0f, w, h)
+                        val rad = dpF(22f)
+                        val clipPath = Path().apply { addRoundRect(clipRect, rad, rad, Path.Direction.CW) }
+                        canvas.save()
+                        canvas.clipPath(clipPath)
+
+                        when (bgMode) {
+                            1 -> canvas.drawColor(0xFF000000.toInt())
+                            2 -> canvas.drawColor(0xFFEAECEF.toInt())
+                            else -> {
+                                canvas.drawColor(0xFF12161F.toInt())
+                                val cell = dpF(14f)
+                                gridPaint.color = 0xFF1C2230.toInt()
+                                var y = 0f
+                                var rowIdx = 0
+                                while (y < h) {
+                                    var x = if (rowIdx % 2 == 0) 0f else cell
+                                    while (x < w) {
+                                        canvas.drawRect(x, y, min(w, x + cell), min(h, y + cell), gridPaint)
+                                        x += cell * 2f
+                                    }
+                                    y += cell
+                                    rowIdx++
+                                }
+                            }
+                        }
+
+                        val bmp = decodedBitmap
+                        if (bmp != null && bmp.width > 0 && bmp.height > 0) {
+                            val pad = dpF(20f)
+                            val availW = (w - pad * 2f).coerceAtLeast(1f)
+                            val availH = (h - pad * 2f).coerceAtLeast(1f)
+                            val fitScale = min(availW / bmp.width.toFloat(), availH / bmp.height.toFloat())
+
+                            canvas.save()
+                            canvas.translate(w * 0.5f + panX, h * 0.5f + panY)
+                            canvas.scale(zoomScale * fitScale, zoomScale * fitScale)
+                            canvas.rotate(rotationDeg)
+                            canvas.drawBitmap(bmp, -bmp.width * 0.5f, -bmp.height * 0.5f, bmpPaint)
+                            canvas.restore()
+                        } else {
+                            gridPaint.color = COLOR_TEXT_DIM
+                            gridPaint.textSize = dpF(14f)
+                            gridPaint.textAlign = Paint.Align.CENTER
+                            canvas.drawText(
+                                tr("Не удалось декодировать изображение", "Failed to decode image"),
+                                w * 0.5f,
+                                h * 0.5f,
+                                gridPaint
+                            )
+                        }
+
+                        borderPaint.color = withAlpha(uiAccent, 42)
+                        canvas.drawRoundRect(clipRect, rad, rad, borderPaint)
+                        canvas.restore()
+                    }
+                }.apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f
+                    ).apply {
+                        setMargins(dp(14), dp(4), dp(14), dp(14))
+                    }
+                }
+                canvasViewRef = imgCanvas
+                pageCol.addView(imgCanvas)
             }
         }
 
@@ -11563,9 +12232,61 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 hdrRow.addView(hdrCol)
                 mSheet.addView(hdrRow)
 
+                fun openImageEntryInExplorer(targetItem: SftpItemEntry) {
+                    val editTextFallback: () -> Unit = {
+                        if (srv == null) {
+                            val f = File(targetItem.path)
+                            val content = try { if (f.canRead() && f.length() <= 512 * 1024) f.readText() else "" } catch (_: Throwable) { "" }
+                            openCodeViewerAndEditorSubPage(targetItem.name, targetItem.path, content) { updated ->
+                                try {
+                                    f.writeText(updated)
+                                    refreshSftpListInPlace(false, null)
+                                } catch (_: Throwable) {}
+                            }
+                        }
+                    }
+                    if (srv == null) {
+                        val f = File(targetItem.path)
+                        if (f.canRead() && f.length() <= 16L * 1024L * 1024L) {
+                            val bytes = try { f.readBytes() } catch (_: Throwable) { ByteArray(0) }
+                            openImageViewerSubPage(targetItem.name, targetItem.path, bytes, editTextFallback)
+                        } else {
+                            Thread {
+                                val rawB64 = nativeExecLocalRootCmd("head -c 12582912 -- ${shellEscapeSingle(targetItem.path)} | base64")
+                                    .removePrefix("OK\n").removePrefix("ERR\n").trim()
+                                val bytes = try { android.util.Base64.decode(rawB64, android.util.Base64.DEFAULT) } catch (_: Throwable) { ByteArray(0) }
+                                runOnUiThread {
+                                    openImageViewerSubPage(targetItem.name, targetItem.path, bytes, editTextFallback)
+                                }
+                            }.start()
+                        }
+                    } else {
+                        Toast.makeText(this@TermuxActivity, tr("Загрузка изображения…", "Loading image…"), Toast.LENGTH_SHORT).show()
+                        Thread {
+                            val (ok, rawB64) = runRemoteSftpViaCpp26(srv, "head -c 12582912 -- ${shellEscapeSingle(targetItem.path)} | base64")
+                            val bytes = if (ok) {
+                                try { android.util.Base64.decode(rawB64.trim(), android.util.Base64.DEFAULT) } catch (_: Throwable) { ByteArray(0) }
+                            } else ByteArray(0)
+                            runOnUiThread {
+                                if (ok && bytes.isNotEmpty()) {
+                                    openImageViewerSubPage(targetItem.name, "${srv.label}:${targetItem.path}", bytes)
+                                } else {
+                                    Toast.makeText(this@TermuxActivity, tr("Не удалось загрузить изображение", "Failed to load image"), Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }.start()
+                    }
+                }
+
                 val actions = ArrayList<Triple<M3Icon, String, () -> Unit>>()
+                if (!item.isDirectory && isImageFileName(item.name)) {
+                    actions.add(Triple(M3Icon.EYE, tr("Просмотр изображения", "View image")) {
+                        mDlg.dismiss()
+                        openImageEntryInExplorer(item)
+                    })
+                }
                 if (!item.isDirectory) {
-                    actions.add(Triple(M3Icon.EDIT, tr("Изменить текст", "Edit text")) {
+                    actions.add(Triple(M3Icon.EDIT, tr("Изменить текст (C++26 Syntax)", "Edit text (C++26 Syntax)")) {
                         mDlg.dismiss()
                         if (srv == null) {
                             val f = File(item.path)
@@ -11873,15 +12594,17 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             fun syncAllRowsSelectionInPlace(changedPath: String? = null) {
                 for (ref in activeRowRefs) {
                     val isSel = selectedSftpPaths.contains(ref.item.path)
+                    val isImgItem = !ref.item.isDirectory && isImageFileName(ref.item.name)
                     val iconType = when {
                         isSel -> M3Icon.CHECK
+                        isImgItem -> M3Icon.EYE
                         !ref.item.isDirectory -> M3Icon.FILE
                         ref.item.isExpanded -> M3Icon.FOLDER_OPEN
                         else -> M3Icon.FOLDER
                     }
                     val iconTint = when {
                         isSel -> uiOnAccent
-                        ref.item.isDirectory -> uiAccent
+                        ref.item.isDirectory || isImgItem -> uiAccent
                         else -> COLOR_TEXT_BRIGHT
                     }
                     val badgeFill = when {
@@ -12095,15 +12818,17 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                         val newlyExpandedChildRows = ArrayList<LinearLayout>()
                         for (item in entries) {
                             val isItemSelected = selectedSftpPaths.contains(item.path)
+                            val isImgItem = !item.isDirectory && isImageFileName(item.name)
                             val iconType = when {
                                 isItemSelected -> M3Icon.CHECK
+                                isImgItem -> M3Icon.EYE
                                 !item.isDirectory -> M3Icon.FILE
                                 item.isExpanded -> M3Icon.FOLDER_OPEN
                                 else -> M3Icon.FOLDER
                             }
                             val iconTint = when {
                                 isItemSelected -> uiOnAccent
-                                item.isDirectory -> uiAccent
+                                item.isDirectory || isImgItem -> uiAccent
                                 else -> COLOR_TEXT_BRIGHT
                             }
                             val badgeFill = when {
@@ -12217,6 +12942,24 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                                             remoteCurrentPath = item.path
                                             rebuildBreadcrumbs(true)
                                             refreshSftpListInPlace(false, null)
+                                        }
+                                    } else if (isImageFileName(item.name)) {
+                                        triggerFolderShakeAnimation(itemIconBadge, 1)
+                                        if (srv == null) {
+                                            val f = File(item.path)
+                                            if (f.canRead() && f.length() <= 16L * 1024L * 1024L) {
+                                                val bytes = try { f.readBytes() } catch (_: Throwable) { ByteArray(0) }
+                                                openImageViewerSubPage(item.name, item.path, bytes) {
+                                                    val content = try { f.readText() } catch (_: Throwable) { "" }
+                                                    openCodeViewerAndEditorSubPage(item.name, item.path, content) { updated ->
+                                                        try { f.writeText(updated); refreshSftpListInPlace(false, null) } catch (_: Throwable) {}
+                                                    }
+                                                }
+                                            } else {
+                                                openEntryMenu(item)
+                                            }
+                                        } else {
+                                            openEntryMenu(item)
                                         }
                                     } else {
                                         triggerFolderShakeAnimation(itemIconBadge, 1)
@@ -14063,6 +14806,61 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
     }
 
     private var prevSessionCountForTabs: Int = 1
+    internal var splitScreenEnabled: Boolean = false
+    internal var splitTopSessionIdx: Int = 0
+    internal var splitBottomSessionIdx: Int = 1
+    internal var splitVerticalRatio: Float = 0.50f
+
+    internal fun toggleSplitScreenMode(preferredSecondIdx: Int = -1) {
+        terminalSurface.stopTextSelection()
+        if (splitScreenEnabled) {
+            splitScreenEnabled = false
+            terminalSurface.syncSize(forceResize = true)
+            rebuildTabs()
+            terminalSurface.invalidateAllRows()
+            Toast.makeText(
+                this,
+                tr("Двухоконный терминал выключен", "Split-screen terminal disabled"),
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+        if (nativeGetSessionCount() < 2) {
+            createSession(false, runStartupCmd = true)
+        }
+        val cnt = nativeGetSessionCount()
+        if (cnt < 2) return
+        val curActive = nativeGetActiveIndex().coerceIn(0, cnt - 1)
+        if (preferredSecondIdx in 0 until cnt && preferredSecondIdx != curActive) {
+            splitTopSessionIdx = curActive
+            splitBottomSessionIdx = preferredSecondIdx
+        } else if (curActive == 0) {
+            splitTopSessionIdx = 0
+            splitBottomSessionIdx = 1
+        } else {
+            splitTopSessionIdx = 0
+            splitBottomSessionIdx = curActive
+        }
+        splitScreenEnabled = true
+        terminalSurface.syncSize(forceResize = true)
+        rebuildTabs()
+        terminalSurface.invalidateAllRows()
+        Toast.makeText(
+            this,
+            tr("Двухоконный терминал: Сессия ${splitTopSessionIdx + 1} ▲ и Сессия ${splitBottomSessionIdx + 1} ▼", "Split-screen: Session ${splitTopSessionIdx + 1} ▲ & Session ${splitBottomSessionIdx + 1} ▼"),
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    internal fun swapSplitScreenPanes() {
+        if (!splitScreenEnabled || nativeGetSessionCount() < 2) return
+        val tmp = splitTopSessionIdx
+        splitTopSessionIdx = splitBottomSessionIdx
+        splitBottomSessionIdx = tmp
+        terminalSurface.syncSize(forceResize = true)
+        rebuildTabs()
+        terminalSurface.invalidateAllRows()
+    }
 
     internal fun closeCurrentSession() {
         val active = nativeGetActiveIndex()
@@ -14086,6 +14884,10 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
         if (rem <= 0) {
             finish()
         } else {
+            if (rem < 2 && splitScreenEnabled) {
+                splitScreenEnabled = false
+            }
+            terminalSurface.syncSize(forceResize = true)
             rebuildTabs(
                 closedTabIndex = closedIdx,
                 closedTabWasRoot = closedWasRoot,
@@ -14110,12 +14912,27 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
             setPadding(dp(4), 0, dp(4), dp(12))
         })
-        val actions = listOf(
-            Triple(M3Icon.COPY, tr("Вставить из буфера", "Paste from clipboard")) { pasteFromClipboard() },
-            Triple(M3Icon.FILE, tr("История вывода", "Transcript history")) { terminalSurface.showTranscriptCopyDialog() },
-            Triple(M3Icon.REFRESH, tr("Очистить экран (Ctrl+L)", "Clear screen (Ctrl+L)")) { dispatchExtraKeyWithHoldSupport("CTRL+L") },
-            Triple(M3Icon.TRASH, tr("Закрыть сессию", "Close session")) { closeCurrentSession() }
+        val actions = ArrayList<Triple<M3Icon, String, () -> Unit>>()
+        actions.add(
+            Triple(
+                M3Icon.HUB_GRID,
+                if (splitScreenEnabled) tr("Выключить двухоконный режим", "Disable split-screen")
+                else tr("Двухоконный терминал (Split)", "Split-screen terminal")
+            ) {
+                toggleSplitScreenMode()
+            }
         )
+        if (splitScreenEnabled && nativeGetSessionCount() >= 2) {
+            actions.add(
+                Triple(M3Icon.REFRESH, tr("Поменять окна местами (▲/▼)", "Swap split panes (▲/▼)")) {
+                    swapSplitScreenPanes()
+                }
+            )
+        }
+        actions.add(Triple(M3Icon.COPY, tr("Вставить из буфера", "Paste from clipboard")) { pasteFromClipboard() })
+        actions.add(Triple(M3Icon.FILE, tr("История вывода", "Transcript history")) { terminalSurface.showTranscriptCopyDialog() })
+        actions.add(Triple(M3Icon.REFRESH, tr("Очистить экран (Ctrl+L)", "Clear screen (Ctrl+L)")) { dispatchExtraKeyWithHoldSupport("CTRL+L") })
+        actions.add(Triple(M3Icon.TRASH, tr("Закрыть сессию", "Close session")) { closeCurrentSession() })
         for ((idx, act) in actions.withIndex()) {
             val isDel = (act.first == M3Icon.TRASH)
             val row = LinearLayout(this).apply {
@@ -14322,8 +15139,15 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
             val releaseTask = Runnable { animateTabHold(false) }
 
+            val splitPrefix = if (splitScreenEnabled && count >= 2) {
+                when (i) {
+                    splitTopSessionIdx -> "▲"
+                    splitBottomSessionIdx -> "▼"
+                    else -> ""
+                }
+            } else ""
             val tab = TextView(this).apply {
-                text = (if (isRoot) "# " else "$ ") + (i + 1)
+                text = splitPrefix + (if (isRoot) "# " else "$ ") + (i + 1)
                 gravity = Gravity.CENTER
                 setSingleLine(true)
                 typeface = Typeface.DEFAULT_BOLD
@@ -14362,11 +15186,18 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 setOnClickListener {
                     if (nativeGetSessionCount() > idx) {
                         terminalSurface.stopTextSelection()
+                        if (splitScreenEnabled && nativeGetSessionCount() >= 2 && idx != splitTopSessionIdx && idx != splitBottomSessionIdx) {
+                            if (nativeGetActiveIndex() == splitTopSessionIdx) {
+                                splitTopSessionIdx = idx
+                            } else {
+                                splitBottomSessionIdx = idx
+                            }
+                        }
                         if (nativeGetActiveIndex() == idx) {
                             terminalSurface.resetScrollAndBlink()
                         } else {
                             nativeSwitchSession(idx)
-                            terminalSurface.syncSize()
+                            terminalSurface.syncSize(forceResize = true)
                             rebuildTabs()
                             terminalSurface.invalidateAllRows()
                         }
@@ -15106,6 +15937,47 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             syncSize()
         }
 
+        internal var splitTopRows: Int = 12
+        internal var splitBotRows: Int = 12
+        private var isDraggingSplitDivider: Boolean = false
+        private var splitDividerDownAction: Int = 0 // 0 = drag, 1 = swap, 2 = close
+
+        internal fun isDualPaneActive(): Boolean {
+            val cnt = nativeGetSessionCount()
+            if (cnt < 2) {
+                if (splitScreenEnabled) splitScreenEnabled = false
+                return false
+            }
+            return splitScreenEnabled
+        }
+
+        private fun normalizeSplitSessionIndices() {
+            val cnt = nativeGetSessionCount()
+            if (cnt < 2) return
+            splitTopSessionIdx = splitTopSessionIdx.coerceIn(0, cnt - 1)
+            splitBottomSessionIdx = splitBottomSessionIdx.coerceIn(0, cnt - 1)
+            if (splitTopSessionIdx == splitBottomSessionIdx) {
+                splitBottomSessionIdx = (splitTopSessionIdx + 1) % cnt
+            }
+            val active = nativeGetActiveIndex()
+            if (active in 0 until cnt && active != splitTopSessionIdx && active != splitBottomSessionIdx) {
+                splitBottomSessionIdx = active
+            }
+        }
+
+        internal fun computeSplitBounds(): FloatArray {
+            val topOff = computeGridTopOffsetPx()
+            val activeBotY = (height - max(currentSysNavBottomPx, currentImeBottomPx)).toFloat()
+                .coerceAtLeast(topOff + cellHeight * 4f + dpF(30f))
+            val divH = dpF(28f)
+            val usableH = (activeBotY - topOff - divH).coerceAtLeast(cellHeight * 4f)
+            val ratio = splitVerticalRatio.coerceIn(0.25f, 0.75f)
+            val topPaneH = (usableH * ratio).coerceAtLeast(cellHeight * 2f)
+            val divTopY = topOff + topPaneH
+            val divBotY = divTopY + divH
+            return floatArrayOf(topOff, divTopY, divTopY, divBotY, divBotY, activeBotY)
+        }
+
         internal fun syncSize(forceResize: Boolean = false) {
             val w = width
             val h = height
@@ -15113,11 +15985,42 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             if (!isImeCurrentlyOpen || h > unoccludedHeightPx) {
                 unoccludedHeightPx = h
             }
+            val newCols = max(4, (w / cellWidth).toInt())
+            if (isDualPaneActive()) {
+                normalizeSplitSessionIndices()
+                val b = computeSplitBounds()
+                val newTopRows = max(2, ((b[1] - b[0]) / cellHeight).toInt())
+                val newBotRows = max(2, ((b[5] - b[4]) / cellHeight).toInt())
+                val changed = (newCols != cols || newTopRows != splitTopRows || newBotRows != splitBotRows)
+                cols = newCols
+                splitTopRows = newTopRows
+                splitBotRows = newBotRows
+                rows = if (nativeGetActiveIndex() == splitTopSessionIdx) newTopRows else newBotRows
+                if (changed || forceResize) {
+                    rowNodesValid?.fill(false)
+                    nativeResizeSessionAt(
+                        splitTopSessionIdx,
+                        newTopRows,
+                        cols,
+                        cellWidth.roundToInt(),
+                        cellHeight.roundToInt()
+                    )
+                    nativeResizeSessionAt(
+                        splitBottomSessionIdx,
+                        newBotRows,
+                        cols,
+                        cellWidth.roundToInt(),
+                        cellHeight.roundToInt()
+                    )
+                }
+                postInvalidateOnAnimation()
+                return
+            }
+
             val effectiveH = max(h, unoccludedHeightPx)
             val topOff = computeGridTopOffsetPx()
             val navBot = currentSysNavBottomPx.toFloat()
             val usableGridH = (effectiveH.toFloat() - topOff - navBot).coerceAtLeast(cellHeight * 2f)
-            val newCols = max(4, (w / cellWidth).toInt())
             val newRows = max(2, (usableGridH / cellHeight).toInt())
             val changed = (newCols != cols || newRows != rows)
             cols = newCols
@@ -15281,6 +16184,121 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                     }
                 }
             }
+
+            if (isDualPaneActive()) {
+                normalizeSplitSessionIndices()
+                val topDirty = nativeConsumeSessionFrameDirty(splitTopSessionIdx)
+                val botDirty = nativeConsumeSessionFrameDirty(splitBottomSessionIdx)
+                if (topDirty || botDirty) {
+                    lastInputTimeMs = SystemClock.uptimeMillis()
+                }
+                val b = computeSplitBounds()
+                val topPaneTop = b[0]
+                val topPaneBot = b[1]
+                val divTop = b[2]
+                val divBot = b[3]
+                val botPaneTop = b[4]
+                val botPaneBot = b[5]
+
+                val curTopRows = max(2, ((topPaneBot - topPaneTop) / cellHeight).toInt())
+                val curBotRows = max(2, ((botPaneBot - botPaneTop) / cellHeight).toInt())
+                if (curTopRows != splitTopRows || curBotRows != splitBotRows) {
+                    splitTopRows = curTopRows
+                    splitBotRows = curBotRows
+                    nativeResizeSessionAt(splitTopSessionIdx, curTopRows, cols, cellWidth.roundToInt(), cellHeight.roundToInt())
+                    nativeResizeSessionAt(splitBottomSessionIdx, curBotRows, cols, cellWidth.roundToInt(), cellHeight.roundToInt())
+                }
+
+                val activeIdx = nativeGetActiveIndex()
+                val topFocused = (activeIdx == splitTopSessionIdx)
+                val botFocused = (activeIdx == splitBottomSessionIdx)
+
+                // 1. Render Top Pane
+                canvas.save()
+                canvas.clipRect(0f, topPaneTop, width.toFloat(), topPaneBot)
+                val topOffScroll = if (topFocused) max(0, scrollOffset) else 0
+                for (r in 0 until splitTopRows) {
+                    val yTop = topPaneTop + r * cellHeight
+                    if (yTop < topPaneBot) {
+                        drawSessionRow(canvas, splitTopSessionIdx, topOffScroll, r, yTop)
+                    }
+                }
+                drawPaneCursorSimple(canvas, splitTopSessionIdx, topPaneTop, splitTopRows, topFocused)
+                if (topFocused) {
+                    bgPaint.style = Paint.Style.FILL
+                    bgPaint.color = withAlpha(uiAccent, 210)
+                    cursorRectF.set(0f, topPaneTop + dpF(4f), dpF(2.8f), topPaneBot - dpF(4f))
+                    canvas.drawRoundRect(cursorRectF, dpF(1.4f), dpF(1.4f), bgPaint)
+                }
+                canvas.restore()
+
+                // 2. Render Bottom Pane
+                canvas.save()
+                canvas.clipRect(0f, botPaneTop, width.toFloat(), botPaneBot)
+                val botOffScroll = if (botFocused) max(0, scrollOffset) else 0
+                for (r in 0 until splitBotRows) {
+                    val yTop = botPaneTop + r * cellHeight
+                    if (yTop < botPaneBot) {
+                        drawSessionRow(canvas, splitBottomSessionIdx, botOffScroll, r, yTop)
+                    }
+                }
+                drawPaneCursorSimple(canvas, splitBottomSessionIdx, botPaneTop, splitBotRows, botFocused)
+                if (botFocused) {
+                    bgPaint.style = Paint.Style.FILL
+                    bgPaint.color = withAlpha(uiAccent, 210)
+                    cursorRectF.set(0f, botPaneTop + dpF(4f), dpF(2.8f), botPaneBot - dpF(4f))
+                    canvas.drawRoundRect(cursorRectF, dpF(1.4f), dpF(1.4f), bgPaint)
+                }
+                canvas.restore()
+
+                // 3. Render Material 3 Expressive Draggable Split Divider Bar
+                bgPaint.style = Paint.Style.FILL
+                bgPaint.color = uiSurfaceLow
+                cursorRectF.set(dpF(8f), divTop + dpF(2f), width - dpF(8f), divBot - dpF(2f))
+                canvas.drawRoundRect(cursorRectF, dpF(12f), dpF(12f), bgPaint)
+
+                // Center pill drag handle
+                val handleW = if (isDraggingSplitDivider) dpF(46f) else dpF(34f)
+                val handleH = dpF(4f)
+                val divCy = (divTop + divBot) * 0.5f
+                bgPaint.color = if (isDraggingSplitDivider) uiAccent else withAlpha(COLOR_TEXT_BRIGHT, 140)
+                cursorRectF.set(width * 0.5f - handleW * 0.5f, divCy - handleH * 0.5f, width * 0.5f + handleW * 0.5f, divCy + handleH * 0.5f)
+                canvas.drawRoundRect(cursorRectF, handleH * 0.5f, handleH * 0.5f, bgPaint)
+
+                // Left session indicator badge on divider
+                val prevSize = textPaint.textSize
+                val prevType = textPaint.typeface
+                textPaint.typeface = Typeface.DEFAULT_BOLD
+                textPaint.textSize = dpF(10.8f)
+                val topSym = if (nativeIsSessionRoot(splitTopSessionIdx)) "#" else "$"
+                val botSym = if (nativeIsSessionRoot(splitBottomSessionIdx)) "#" else "$"
+                textPaint.color = if (topFocused) uiAccent else COLOR_TEXT_DIM
+                val topLbl = "▲ $topSym${splitTopSessionIdx + 1}"
+                canvas.drawText(topLbl, dpF(20f), divCy + dpF(3.8f), textPaint)
+                val topLblW = textPaint.measureText(topLbl)
+                textPaint.color = if (botFocused) uiAccent else COLOR_TEXT_DIM
+                canvas.drawText("▼ $botSym${splitBottomSessionIdx + 1}", dpF(28f) + topLblW, divCy + dpF(3.8f), textPaint)
+
+                // Right action buttons on divider: [⇅] Swap and [✕] Close Split
+                bgPaint.color = uiSurfaceHigh
+                cursorRectF.set(width - dpF(78f), divTop + dpF(4f), width - dpF(46f), divBot - dpF(4f))
+                canvas.drawRoundRect(cursorRectF, dpF(8f), dpF(8f), bgPaint)
+                textPaint.color = uiAccent
+                textPaint.textAlign = Paint.Align.CENTER
+                canvas.drawText("⇅", width - dpF(62f), divCy + dpF(3.8f), textPaint)
+
+                bgPaint.color = COLOR_ROOT_CONTAINER
+                cursorRectF.set(width - dpF(42f), divTop + dpF(4f), width - dpF(14f), divBot - dpF(4f))
+                canvas.drawRoundRect(cursorRectF, dpF(8f), dpF(8f), bgPaint)
+                textPaint.color = COLOR_PASTEL_RED
+                canvas.drawText("✕", width - dpF(28f), divCy + dpF(3.8f), textPaint)
+
+                textPaint.textAlign = Paint.Align.LEFT
+                textPaint.textSize = prevSize
+                textPaint.typeface = prevType
+                return
+            }
+
             val nodes = rowNodes ?: arrayOfNulls<RenderNode>(rows).also { rowNodes = it }
             val valid = rowNodesValid ?: BooleanArray(rows).also { rowNodesValid = it }
 
@@ -15611,6 +16629,100 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             canvas.drawCircle(circleX, circleY, handleInnerRadiusPx, handlePaint)
         }
 
+        private fun drawPaneCursorSimple(
+            canvas: Canvas,
+            sessionIdx: Int,
+            paneTopY: Float,
+            paneRows: Int,
+            isFocusedPane: Boolean
+        ) {
+            val cursorState = nativeGetSessionCursorState(sessionIdx)
+            if (cursorState < 0) return
+            val cRow = (cursorState ushr 16) and 0x1FFF
+            val cCol = cursorState and 0xFFFF
+            if (cRow !in 0 until paneRows || cCol !in 0 until cols) return
+
+            val cx = cCol * cellWidth
+            val cy = paneTopY + cRow * cellHeight
+            val cornerPx = dpF(cursorRadiusTenths / 10f)
+            val centerY = cy + cellHeight * 0.5f
+            val halfH = cellHeight * 0.5f - dpF(0.6f)
+
+            if (isFocusedPane) {
+                val aInt = (cursorAlphaPct.coerceIn(15, 100) * 2.55f).roundToInt().coerceIn(40, 255)
+                bgPaint.color = (aInt shl 24) or (uiAccent and 0x00FFFFFF)
+                bgPaint.style = Paint.Style.FILL
+                cursorRectF.set(cx, centerY - halfH, cx + cellWidth, centerY + halfH)
+                canvas.drawRoundRect(cursorRectF, cornerPx, cornerPx, bgPaint)
+            } else {
+                bgPaint.color = withAlpha(uiAccent, 140)
+                bgPaint.style = Paint.Style.STROKE
+                bgPaint.strokeWidth = dpF(1.5f)
+                cursorRectF.set(cx + dpF(0.8f), centerY - halfH, cx + cellWidth - dpF(0.8f), centerY + halfH)
+                canvas.drawRoundRect(cursorRectF, cornerPx, cornerPx, bgPaint)
+                bgPaint.style = Paint.Style.FILL
+            }
+        }
+
+        private fun drawSessionRow(rc: Canvas, sessionIdx: Int, paneScrollOffset: Int, r: Int, top: Float) {
+            val bottom = top + cellHeight
+            val baseY = top + cellBaseline
+
+            val packed = nativePackSessionRowRender(sessionIdx, max(0, paneScrollOffset), r, bgRunsBuf, glyphRunsBuf)
+            val bgCount = (packed ushr 16) and 0xFFFF
+            val glCount = packed and 0xFFFF
+
+            bgPaint.style = Paint.Style.FILL
+            for (i in 0 until bgCount) {
+                val base = i * 3
+                val startCol = bgRunsBuf[base]
+                val endCol = bgRunsBuf[base + 1]
+                bgPaint.color = bgRunsBuf[base + 2]
+                rc.drawRect(startCol * cellWidth, top, endCol * cellWidth, bottom, bgPaint)
+            }
+
+            var lastFlags = -1
+            for (i in 0 until glCount) {
+                val base = i * 4
+                val cp = glyphRunsBuf[base]
+                val col = glyphRunsBuf[base + 1]
+                val fg = glyphRunsBuf[base + 2]
+                val flags = glyphRunsBuf[base + 3]
+                val x = col * cellWidth
+
+                if (cp == -1) {
+                    val x0 = (flags ushr 24) and 0xFF
+                    val y0 = (flags ushr 16) and 0xFF
+                    val x1 = (flags ushr 8) and 0xFF
+                    val y1 = flags and 0xFF
+                    graphicPaint.color = fg
+                    graphicPaint.style = Paint.Style.FILL
+                    rc.drawRect(
+                        x + cellWidth * (x0 * 0.0625f),
+                        top + cellHeight * (y0 * 0.0625f),
+                        x + cellWidth * (x1 * 0.0625f),
+                        top + cellHeight * (y1 * 0.0625f),
+                        graphicPaint
+                    )
+                    continue
+                }
+
+                val styleBits = flags and 5
+                if (styleBits != lastFlags) {
+                    lastFlags = styleBits
+                    textPaint.typeface = when {
+                        (styleBits and 5) == 5 -> boldItalicTypeface
+                        (styleBits and 1) != 0 -> boldTypeface
+                        (styleBits and 4) != 0 -> italicTypeface
+                        else -> baseTypeface
+                    }
+                }
+                textPaint.color = fg
+                val charCount = Character.toChars(cp, charBuf, 0)
+                rc.drawText(charBuf, 0, charCount, x, baseY, textPaint)
+            }
+        }
+
         private fun drawSingleRow(rc: Canvas, r: Int, top: Float) {
             val bottom = top + cellHeight
             val baseY = top + cellBaseline
@@ -15702,6 +16814,83 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
+            if (isDualPaneActive() && event.pointerCount == 1) {
+                val b = computeSplitBounds()
+                val topOff = b[0]
+                val divTop = b[2]
+                val divBot = b[3]
+                val activeBotY = b[5]
+
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        if (event.y in (divTop - dpF(8f))..(divBot + dpF(8f))) {
+                            stopTextSelection()
+                            triggerHaptic(0.8f)
+                            isDraggingSplitDivider = true
+                            splitDividerDownAction = when {
+                                event.x >= width - dpF(44f) -> 2 // Close split
+                                event.x >= width - dpF(82f) -> 1 // Swap panes
+                                else -> 0 // Drag ratio
+                            }
+                            invalidate()
+                            return true
+                        } else if (event.y < divTop) {
+                            if (nativeGetActiveIndex() != splitTopSessionIdx) {
+                                stopTextSelection()
+                                triggerHaptic(0.65f)
+                                nativeSwitchSession(splitTopSessionIdx)
+                                rows = splitTopRows
+                                scrollOffset = 0
+                                rebuildTabs()
+                                syncInputConnectionWithGrid()
+                                invalidateAllRows()
+                            }
+                        } else if (event.y > divBot) {
+                            if (nativeGetActiveIndex() != splitBottomSessionIdx) {
+                                stopTextSelection()
+                                triggerHaptic(0.65f)
+                                nativeSwitchSession(splitBottomSessionIdx)
+                                rows = splitBotRows
+                                scrollOffset = 0
+                                rebuildTabs()
+                                syncInputConnectionWithGrid()
+                                invalidateAllRows()
+                            }
+                        }
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (isDraggingSplitDivider) {
+                            if (splitDividerDownAction == 0) {
+                                val span = (activeBotY - topOff - dpF(28f)).coerceAtLeast(cellHeight * 4f)
+                                val newRatio = ((event.y - topOff - dpF(14f)) / span).coerceIn(0.25f, 0.75f)
+                                if (abs(newRatio - splitVerticalRatio) > 0.008f) {
+                                    splitVerticalRatio = newRatio
+                                    syncSize(forceResize = false)
+                                }
+                            }
+                            return true
+                        }
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        if (isDraggingSplitDivider) {
+                            val act = splitDividerDownAction
+                            isDraggingSplitDivider = false
+                            splitDividerDownAction = 0
+                            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                                when (act) {
+                                    2 -> toggleSplitScreenMode()
+                                    1 -> swapSplitScreenPanes()
+                                    else -> syncSize(forceResize = true)
+                                }
+                            } else {
+                                invalidate()
+                            }
+                            return true
+                        }
+                    }
+                }
+            }
+
             if (nativeIsSelectingText() && event.pointerCount == 1) {
                 lastDragTouchX = event.x
                 lastDragTouchY = event.y
@@ -16468,6 +17657,36 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             isDir: Boolean,
             bitMaskOverride: Int
         ): String
+
+        @JvmStatic
+        external fun nativeResizeSessionAt(
+            index: Int,
+            rows: Int,
+            cols: Int,
+            cellW: Int,
+            cellH: Int
+        )
+
+        @JvmStatic
+        external fun nativeConsumeSessionFrameDirty(index: Int): Boolean
+
+        @JvmStatic
+        external fun nativeGetSessionCursorState(index: Int): Int
+
+        @JvmStatic
+        external fun nativePackSessionRowRender(
+            index: Int,
+            scrollOffset: Int,
+            screenRow: Int,
+            outBgRuns: IntArray,
+            outGlyphs: IntArray
+        ): Int
+
+        @JvmStatic
+        external fun nativeTokenizeCodeSyntax(
+            codeStr: String,
+            fileNameStr: String
+        ): IntArray
     }
 }
 
