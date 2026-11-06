@@ -283,7 +283,9 @@ internal enum class M3Icon {
     SELECT_ALL,
     CUT,
     ARCHIVE_ZIP,
-    INFO
+    INFO,
+    SPLIT_SCREEN,
+    SWAP_VERT
 }
 
 private data class Quadruple<out A, out B, out C, out D>(
@@ -332,6 +334,66 @@ internal data class SftpItemEntry(
     val depth: Int = 0,
     val isExpanded: Boolean = false
 )
+
+internal class M3SplitTabIndicatorDrawable(
+    val isTopPane: Boolean,
+    var accentColor: Int,
+    var isFocusedPane: Boolean,
+    private val density: Float
+) : android.graphics.drawable.Drawable() {
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val rectF = RectF()
+
+    override fun getIntrinsicWidth(): Int = (14f * density).roundToInt()
+    override fun getIntrinsicHeight(): Int = (13f * density).roundToInt()
+
+    override fun draw(canvas: Canvas) {
+        val b = bounds
+        val w = b.width().toFloat()
+        val h = b.height().toFloat()
+        val pad = 1f * density
+        val rW = w - pad * 2f
+        val halfH = (h - pad * 2f - 2f * density) * 0.5f
+        val r = 2.2f * density
+
+        val topY = b.top + pad
+        val botY = topY + halfH + 2f * density
+
+        // Top pane
+        rectF.set(b.left + pad, topY, b.left + pad + rW, topY + halfH)
+        if (isTopPane) {
+            fillPaint.color = accentColor
+            fillPaint.alpha = if (isFocusedPane) 255 else 190
+            canvas.drawRoundRect(rectF, r, r, fillPaint)
+        } else {
+            strokePaint.color = accentColor
+            strokePaint.strokeWidth = 1.25f * density
+            strokePaint.alpha = if (isFocusedPane) 180 else 110
+            canvas.drawRoundRect(rectF, r, r, strokePaint)
+        }
+
+        // Bottom pane
+        rectF.set(b.left + pad, botY, b.left + pad + rW, botY + halfH)
+        if (!isTopPane) {
+            fillPaint.color = accentColor
+            fillPaint.alpha = if (isFocusedPane) 255 else 190
+            canvas.drawRoundRect(rectF, r, r, fillPaint)
+        } else {
+            strokePaint.color = accentColor
+            strokePaint.strokeWidth = 1.25f * density
+            strokePaint.alpha = if (isFocusedPane) 180 else 110
+            canvas.drawRoundRect(rectF, r, r, strokePaint)
+        }
+    }
+
+    override fun setAlpha(alpha: Int) {}
+    override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {}
+    override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
+}
 
 class TermuxActivity : Activity() {
 
@@ -5636,8 +5698,8 @@ class TermuxActivity : Activity() {
 
             when (icon) {
                 M3Icon.ADD -> {
-                    canvas.drawLine(x(12f), y(5f), x(12f), y(19f), strokePaint)
-                    canvas.drawLine(x(5f), y(12f), x(19f), y(12f), strokePaint)
+                    canvas.drawLine(x(12f), y(5.5f), x(12f), y(18.5f), strokePaint)
+                    canvas.drawLine(x(5.5f), y(12f), x(18.5f), y(12f), strokePaint)
                 }
                 M3Icon.ROOT_HASH -> {
                     canvas.drawLine(x(9.5f), y(4.5f), x(7.5f), y(19.5f), strokePaint)
@@ -5646,35 +5708,48 @@ class TermuxActivity : Activity() {
                     canvas.drawLine(x(4.5f), y(14.5f), x(19.5f), y(14.5f), strokePaint)
                 }
                 M3Icon.HUB_GRID -> {
-                    val r = 2.2f * u
-                    rect.set(x(3.5f), y(3.5f), x(10.2f), y(10.2f))
+                    val r = 2.4f * u
+                    rect.set(x(3.8f), y(3.8f), x(10.5f), y(10.5f))
                     canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(13.8f), y(3.5f), x(20.5f), y(10.2f))
+                    rect.set(x(13.5f), y(3.8f), x(20.2f), y(10.5f))
                     canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(3.5f), y(13.8f), x(10.2f), y(20.5f))
+                    rect.set(x(3.8f), y(13.5f), x(10.5f), y(20.2f))
                     canvas.drawRoundRect(rect, r, r, strokePaint)
-                    rect.set(x(13.8f), y(13.8f), x(20.5f), y(20.5f))
-                    fillPaint.alpha = 70
+                    rect.set(x(13.5f), y(13.5f), x(20.2f), y(20.2f))
+                    fillPaint.color = (0x3A shl 24) or (tintColor and 0x00FFFFFF)
                     canvas.drawRoundRect(rect, r, r, fillPaint)
-                    fillPaint.alpha = 255
                     canvas.drawRoundRect(rect, r, r, strokePaint)
                 }
                 M3Icon.SETTINGS -> {
-                    canvas.drawLine(x(4f), y(7f), x(20f), y(7f), strokePaint)
-                    canvas.drawLine(x(4f), y(17f), x(20f), y(17f), strokePaint)
-                    fillPaint.color = COLOR_SURFACE
-                    canvas.drawCircle(x(9f), y(7f), 2.8f * u, fillPaint)
-                    canvas.drawCircle(x(15f), y(17f), 2.8f * u, fillPaint)
-                    canvas.drawCircle(x(9f), y(7f), 2.8f * u, strokePaint)
-                    canvas.drawCircle(x(15f), y(17f), 2.8f * u, strokePaint)
+                    val cx = x(12f); val cy = y(12f)
+                    val rOuter = 8.5f * u
+                    val rInner = 6.4f * u
+                    val rHole = 3.0f * u
+                    path.reset()
+                    for (i in 0 until 6) {
+                        val a0 = (i * 60f - 13f) * (Math.PI.toFloat() / 180f)
+                        val a1 = (i * 60f + 13f) * (Math.PI.toFloat() / 180f)
+                        val aValley = (i * 60f + 30f) * (Math.PI.toFloat() / 180f)
+                        val x0 = cx + rOuter * cos(a0); val y0 = cy + rOuter * sin(a0)
+                        val x1 = cx + rOuter * cos(a1); val y1 = cy + rOuter * sin(a1)
+                        val xV = cx + rInner * cos(aValley); val yV = cy + rInner * sin(aValley)
+                        if (i == 0) path.moveTo(x0, y0) else path.lineTo(x0, y0)
+                        path.lineTo(x1, y1)
+                        path.lineTo(xV, yV)
+                    }
+                    path.close()
+                    fillPaint.color = (0x28 shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawPath(path, fillPaint)
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawCircle(cx, cy, rHole, strokePaint)
                 }
                 M3Icon.CLOSE -> {
-                    canvas.drawLine(x(6f), y(6f), x(18f), y(18f), strokePaint)
-                    canvas.drawLine(x(18f), y(6f), x(6f), y(18f), strokePaint)
+                    canvas.drawLine(x(6.4f), y(6.4f), x(17.6f), y(17.6f), strokePaint)
+                    canvas.drawLine(x(17.6f), y(6.4f), x(6.4f), y(17.6f), strokePaint)
                 }
                 M3Icon.SEARCH -> {
-                    canvas.drawCircle(x(10.8f), y(10.8f), 6.2f * u, strokePaint)
-                    canvas.drawLine(x(15.4f), y(15.4f), x(20.2f), y(20.2f), strokePaint)
+                    canvas.drawCircle(x(10.5f), y(10.5f), 6.0f * u, strokePaint)
+                    canvas.drawLine(x(15.0f), y(15.0f), x(20.0f), y(20.0f), strokePaint)
                 }
                 M3Icon.TREE -> {
                     val r = 1.8f * u
@@ -5692,9 +5767,16 @@ class TermuxActivity : Activity() {
                     canvas.drawPath(path, strokePaint)
                 }
                 M3Icon.EYE -> {
-                    rect.set(x(2.5f), y(6.5f), x(21.5f), y(17.5f))
-                    canvas.drawOval(rect, strokePaint)
-                    canvas.drawCircle(x(12f), y(12f), 2.4f * u, fillPaint)
+                    path.moveTo(x(2.5f), y(12f))
+                    path.quadTo(x(12f), y(4.5f), x(21.5f), y(12f))
+                    path.quadTo(x(12f), y(19.5f), x(2.5f), y(12f))
+                    path.close()
+                    fillPaint.color = (0x24 shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawPath(path, fillPaint)
+                    canvas.drawPath(path, strokePaint)
+                    canvas.drawCircle(x(12f), y(12f), 3.4f * u, strokePaint)
+                    fillPaint.color = tintColor
+                    canvas.drawCircle(x(12f), y(12f), 1.8f * u, fillPaint)
                 }
                 M3Icon.CREATE_FOLDER -> {
                     path.moveTo(x(3f), y(7f))
@@ -6084,6 +6166,32 @@ class TermuxActivity : Activity() {
                     fillPaint.color = tintColor
                     canvas.drawCircle(x(12.0f), y(8.0f), 1.3f * u, fillPaint)
                     canvas.drawLine(x(12.0f), y(11.4f), x(12.0f), y(16.4f), strokePaint)
+                }
+                M3Icon.SPLIT_SCREEN -> {
+                    val r = 2.4f * u
+                    rect.set(x(4f), y(3.8f), x(20f), y(10.6f))
+                    fillPaint.color = (0x3C shl 24) or (tintColor and 0x00FFFFFF)
+                    canvas.drawRoundRect(rect, r, r, fillPaint)
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                    rect.set(x(4f), y(13.4f), x(20f), y(20.2f))
+                    canvas.drawRoundRect(rect, r, r, strokePaint)
+                }
+                M3Icon.SWAP_VERT -> {
+                    val a1X = x(8.5f)
+                    canvas.drawLine(a1X, y(18.5f), a1X, y(5.5f), strokePaint)
+                    path.reset()
+                    path.moveTo(a1X - 3.4f * u, y(9.2f))
+                    path.lineTo(a1X, y(5.4f))
+                    path.lineTo(a1X + 3.4f * u, y(9.2f))
+                    canvas.drawPath(path, strokePaint)
+
+                    val a2X = x(15.5f)
+                    canvas.drawLine(a2X, y(5.5f), a2X, y(18.5f), strokePaint)
+                    path.reset()
+                    path.moveTo(a2X - 3.4f * u, y(14.8f))
+                    path.lineTo(a2X, y(18.6f))
+                    path.lineTo(a2X + 3.4f * u, y(14.8f))
+                    canvas.drawPath(path, strokePaint)
                 }
             }
         }
@@ -14847,7 +14955,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
         terminalSurface.invalidateAllRows()
         Toast.makeText(
             this,
-            tr("Двухоконный терминал: Сессия ${splitTopSessionIdx + 1} ▲ и Сессия ${splitBottomSessionIdx + 1} ▼", "Split-screen: Session ${splitTopSessionIdx + 1} ▲ & Session ${splitBottomSessionIdx + 1} ▼"),
+            tr("Двухоконный терминал: Сессия ${splitTopSessionIdx + 1} (Верх) и Сессия ${splitBottomSessionIdx + 1} (Низ)", "Split-screen: Session ${splitTopSessionIdx + 1} (Top) & Session ${splitBottomSessionIdx + 1} (Bottom)"),
             Toast.LENGTH_SHORT
         ).show()
     }
@@ -14915,7 +15023,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
         val actions = ArrayList<Triple<M3Icon, String, () -> Unit>>()
         actions.add(
             Triple(
-                M3Icon.HUB_GRID,
+                M3Icon.SPLIT_SCREEN,
                 if (splitScreenEnabled) tr("Выключить двухоконный режим", "Disable split-screen")
                 else tr("Двухоконный терминал (Split)", "Split-screen terminal")
             ) {
@@ -14924,7 +15032,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
         )
         if (splitScreenEnabled && nativeGetSessionCount() >= 2) {
             actions.add(
-                Triple(M3Icon.REFRESH, tr("Поменять окна местами (▲/▼)", "Swap split panes (▲/▼)")) {
+                Triple(M3Icon.SWAP_VERT, tr("Поменять окна местами", "Swap split panes")) {
                     swapSplitScreenPanes()
                 }
             )
@@ -15001,11 +15109,12 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
         val pressAnims = arrayOfNulls<ValueAnimator>(count)
         val switchProg = FloatArray(count) { idx -> if (idx == active) 1f else 0f }
 
+        val isSplit = splitScreenEnabled && count >= 2
         val tabH = dp(31)
         val outerR = tabH * 0.5f
         val innerR = dpF(5f)
-        val inactiveTabW = dpF(46f)
-        val activeTabW = dpF(60f)
+        val inactiveTabW = if (isSplit) dpF(56f) else dpF(46f)
+        val activeTabW = if (isSplit) dpF(70f) else dpF(60f)
         val deltaW = FloatArray(count)
 
         var ghostClosingTab: TextView? = null
@@ -15074,6 +15183,12 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
                 val tv = tabViews[i]
                 tv.setTextColor(txtCol)
+                val splitDrawable = tv.compoundDrawables.firstOrNull() as? M3SplitTabIndicatorDrawable
+                if (splitDrawable != null) {
+                    splitDrawable.accentColor = txtCol
+                    splitDrawable.isFocusedPane = (selF > 0.45f)
+                    tv.invalidate()
+                }
                 val pressSquash = safeClamp(pSelf, 0f, 1f)
                 tv.scaleY = (1f - 0.05f * pressSquash).coerceIn(0.90f, 1.04f)
                 val lp = tv.layoutParams as LinearLayout.LayoutParams
@@ -15139,21 +15254,33 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
             val releaseTask = Runnable { animateTabHold(false) }
 
-            val splitPrefix = if (splitScreenEnabled && count >= 2) {
-                when (i) {
-                    splitTopSessionIdx -> "▲"
-                    splitBottomSessionIdx -> "▼"
-                    else -> ""
-                }
-            } else ""
+            val isSplitTop = splitScreenEnabled && count >= 2 && (i == splitTopSessionIdx)
+            val isSplitBot = splitScreenEnabled && count >= 2 && (i == splitBottomSessionIdx)
+            val isSplitTab = isSplitTop || isSplitBot
+
+            val tabText = (if (isRoot) "# " else "$ ") + (i + 1)
             val tab = TextView(this).apply {
-                text = splitPrefix + (if (isRoot) "# " else "$ ") + (i + 1)
+                text = tabText
                 gravity = Gravity.CENTER
                 setSingleLine(true)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                 setPadding(dp(6), 0, dp(6), 0)
                 background = bg
+                if (isSplitTab) {
+                    val density = resources.displayMetrics.density
+                    val iconDrawable = M3SplitTabIndicatorDrawable(
+                        isTopPane = isSplitTop,
+                        accentColor = if (i == active) uiOnAccentContainer else blendColor(COLOR_TEXT_DIM, uiAccent, 0.45f),
+                        isFocusedPane = (i == active),
+                        density = density
+                    )
+                    iconDrawable.setBounds(0, 0, (14f * density).roundToInt(), (13f * density).roundToInt())
+                    setCompoundDrawables(iconDrawable, null, null, null)
+                    compoundDrawablePadding = dp(5)
+                } else {
+                    setCompoundDrawables(null, null, null, null)
+                }
                 layoutParams = LinearLayout.LayoutParams(
                     if (i == active) activeTabW.roundToInt() else inactiveTabW.roundToInt(),
                     tabH
@@ -16257,43 +16384,155 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 cursorRectF.set(dpF(8f), divTop + dpF(2f), width - dpF(8f), divBot - dpF(2f))
                 canvas.drawRoundRect(cursorRectF, dpF(12f), dpF(12f), bgPaint)
 
-                // Center pill drag handle
-                val handleW = if (isDraggingSplitDivider) dpF(46f) else dpF(34f)
-                val handleH = dpF(4f)
+                // Subtle contour outline
+                bgPaint.style = Paint.Style.STROKE
+                bgPaint.strokeWidth = dpF(1f)
+                bgPaint.color = withAlpha(uiAccent, 35)
+                canvas.drawRoundRect(cursorRectF, dpF(12f), dpF(12f), bgPaint)
+                bgPaint.style = Paint.Style.FILL
+
                 val divCy = (divTop + divBot) * 0.5f
-                bgPaint.color = if (isDraggingSplitDivider) uiAccent else withAlpha(COLOR_TEXT_BRIGHT, 140)
+
+                // Center pill drag handle (Material 3 Expressive handle)
+                val handleW = if (isDraggingSplitDivider) dpF(44f) else dpF(32f)
+                val handleH = dpF(4f)
+                bgPaint.color = if (isDraggingSplitDivider) uiAccent else withAlpha(COLOR_TEXT_DIM, 175)
                 cursorRectF.set(width * 0.5f - handleW * 0.5f, divCy - handleH * 0.5f, width * 0.5f + handleW * 0.5f, divCy + handleH * 0.5f)
                 canvas.drawRoundRect(cursorRectF, handleH * 0.5f, handleH * 0.5f, bgPaint)
 
-                // Left session indicator badge on divider
+                // Left: Two Material 3 Expressive Session Chips (Top pane & Bottom pane)
+                val chipH = dpF(20f)
+                val chipR = dpF(7f)
+                val topSym = if (nativeIsSessionRoot(splitTopSessionIdx)) "#" else "$"
+                val botSym = if (nativeIsSessionRoot(splitBottomSessionIdx)) "#" else "$"
+
                 val prevSize = textPaint.textSize
                 val prevType = textPaint.typeface
                 textPaint.typeface = Typeface.DEFAULT_BOLD
-                textPaint.textSize = dpF(10.8f)
-                val topSym = if (nativeIsSessionRoot(splitTopSessionIdx)) "#" else "$"
-                val botSym = if (nativeIsSessionRoot(splitBottomSessionIdx)) "#" else "$"
-                textPaint.color = if (topFocused) uiAccent else COLOR_TEXT_DIM
-                val topLbl = "▲ $topSym${splitTopSessionIdx + 1}"
-                canvas.drawText(topLbl, dpF(20f), divCy + dpF(3.8f), textPaint)
-                val topLblW = textPaint.measureText(topLbl)
-                textPaint.color = if (botFocused) uiAccent else COLOR_TEXT_DIM
-                canvas.drawText("▼ $botSym${splitBottomSessionIdx + 1}", dpF(28f) + topLblW, divCy + dpF(3.8f), textPaint)
+                textPaint.textSize = dpF(11.2f)
 
-                // Right action buttons on divider: [⇅] Swap and [✕] Close Split
+                // Helper to draw a miniature M3 split icon inside a chip
+                fun drawMiniSplitGlyph(cx: Float, cy: Float, isTop: Boolean, isFocused: Boolean) {
+                    val gw = dpF(9.5f)
+                    val gh = dpF(9.5f)
+                    val halfGh = dpF(3.8f)
+                    val gap = dpF(1.4f)
+                    val r = dpF(1.6f)
+                    val topY = cy - gh * 0.5f
+                    val botY = topY + halfGh + gap
+
+                    // Top pane
+                    cursorRectF.set(cx - gw * 0.5f, topY, cx + gw * 0.5f, topY + halfGh)
+                    if (isTop) {
+                        bgPaint.style = Paint.Style.FILL
+                        bgPaint.color = if (isFocused) uiAccent else blendColor(COLOR_TEXT_DIM, uiAccent, 0.45f)
+                        canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
+                    } else {
+                        bgPaint.style = Paint.Style.STROKE
+                        bgPaint.strokeWidth = dpF(1f)
+                        bgPaint.color = if (isFocused) withAlpha(uiAccent, 170) else withAlpha(COLOR_TEXT_DIM, 120)
+                        canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
+                        bgPaint.style = Paint.Style.FILL
+                    }
+
+                    // Bottom pane
+                    cursorRectF.set(cx - gw * 0.5f, botY, cx + gw * 0.5f, botY + halfGh)
+                    if (!isTop) {
+                        bgPaint.style = Paint.Style.FILL
+                        bgPaint.color = if (isFocused) uiAccent else blendColor(COLOR_TEXT_DIM, uiAccent, 0.45f)
+                        canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
+                    } else {
+                        bgPaint.style = Paint.Style.STROKE
+                        bgPaint.strokeWidth = dpF(1f)
+                        bgPaint.color = if (isFocused) withAlpha(uiAccent, 170) else withAlpha(COLOR_TEXT_DIM, 120)
+                        canvas.drawRoundRect(cursorRectF, r, r, bgPaint)
+                        bgPaint.style = Paint.Style.FILL
+                    }
+                }
+
+                // 1) Top Pane Chip
+                val topTxt = "$topSym${splitTopSessionIdx + 1}"
+                val topTxtW = textPaint.measureText(topTxt)
+                val chip1W = dpF(18f) + topTxtW + dpF(8f)
+                val chip1Left = dpF(14f)
+                cursorRectF.set(chip1Left, divCy - chipH * 0.5f, chip1Left + chip1W, divCy + chipH * 0.5f)
+                bgPaint.style = Paint.Style.FILL
+                bgPaint.color = if (topFocused) uiAccentContainer else uiSurfaceHigh
+                canvas.drawRoundRect(cursorRectF, chipR, chipR, bgPaint)
+
+                drawMiniSplitGlyph(chip1Left + dpF(10f), divCy, isTop = true, isFocused = topFocused)
+                textPaint.color = if (topFocused) uiOnAccentContainer else COLOR_TEXT_DIM
+                canvas.drawText(topTxt, chip1Left + dpF(18f), divCy + dpF(3.8f), textPaint)
+
+                // 2) Bottom Pane Chip
+                val botTxt = "$botSym${splitBottomSessionIdx + 1}"
+                val botTxtW = textPaint.measureText(botTxt)
+                val chip2W = dpF(18f) + botTxtW + dpF(8f)
+                val chip2Left = chip1Left + chip1W + dpF(5f)
+                cursorRectF.set(chip2Left, divCy - chipH * 0.5f, chip2Left + chip2W, divCy + chipH * 0.5f)
+                bgPaint.style = Paint.Style.FILL
+                bgPaint.color = if (botFocused) uiAccentContainer else uiSurfaceHigh
+                canvas.drawRoundRect(cursorRectF, chipR, chipR, bgPaint)
+
+                drawMiniSplitGlyph(chip2Left + dpF(10f), divCy, isTop = false, isFocused = botFocused)
+                textPaint.color = if (botFocused) uiOnAccentContainer else COLOR_TEXT_DIM
+                canvas.drawText(botTxt, chip2Left + dpF(18f), divCy + dpF(3.8f), textPaint)
+
+                // Right: Two Material 3 Expressive Action Buttons: [Swap ⇅] and [Close ✕]
+                // 1) Swap Button
+                val swRight = width - dpF(46f)
+                val swLeft = width - dpF(76f)
+                val btnH = dpF(20f)
+                val btnR = dpF(7f)
+                cursorRectF.set(swLeft, divCy - btnH * 0.5f, swRight, divCy + btnH * 0.5f)
+                bgPaint.style = Paint.Style.FILL
                 bgPaint.color = uiSurfaceHigh
-                cursorRectF.set(width - dpF(78f), divTop + dpF(4f), width - dpF(46f), divBot - dpF(4f))
-                canvas.drawRoundRect(cursorRectF, dpF(8f), dpF(8f), bgPaint)
-                textPaint.color = uiAccent
-                textPaint.textAlign = Paint.Align.CENTER
-                canvas.drawText("⇅", width - dpF(62f), divCy + dpF(3.8f), textPaint)
+                canvas.drawRoundRect(cursorRectF, btnR, btnR, bgPaint)
 
+                // Vector Swap Arrows (Official M3 swap_vert symbol)
+                val swCenterX = (swLeft + swRight) * 0.5f
+                handlePaint.style = Paint.Style.STROKE
+                handlePaint.strokeWidth = dpF(1.65f)
+                handlePaint.strokeCap = Paint.Cap.ROUND
+                handlePaint.strokeJoin = Paint.Join.ROUND
+                handlePaint.color = uiAccent
+
+                // Arrow 1: pointing up on left
+                val a1X = swCenterX - dpF(2.8f)
+                val aTop = divCy - dpF(4.4f)
+                val aBot = divCy + dpF(4.4f)
+                canvas.drawLine(a1X, aBot, a1X, aTop, handlePaint)
+                wavePath.reset()
+                wavePath.moveTo(a1X - dpF(2.4f), aTop + dpF(2.6f))
+                wavePath.lineTo(a1X, aTop)
+                wavePath.lineTo(a1X + dpF(2.4f), aTop + dpF(2.6f))
+                canvas.drawPath(wavePath, handlePaint)
+
+                // Arrow 2: pointing down on right
+                val a2X = swCenterX + dpF(2.8f)
+                canvas.drawLine(a2X, aTop, a2X, aBot, handlePaint)
+                wavePath.reset()
+                wavePath.moveTo(a2X - dpF(2.4f), aBot - dpF(2.6f))
+                wavePath.lineTo(a2X, aBot)
+                wavePath.lineTo(a2X + dpF(2.4f), aBot - dpF(2.6f))
+                canvas.drawPath(wavePath, handlePaint)
+
+                // 2) Close Button
+                val clRight = width - dpF(12f)
+                val clLeft = width - dpF(38f)
+                cursorRectF.set(clLeft, divCy - btnH * 0.5f, clRight, divCy + btnH * 0.5f)
+                bgPaint.style = Paint.Style.FILL
                 bgPaint.color = COLOR_ROOT_CONTAINER
-                cursorRectF.set(width - dpF(42f), divTop + dpF(4f), width - dpF(14f), divBot - dpF(4f))
-                canvas.drawRoundRect(cursorRectF, dpF(8f), dpF(8f), bgPaint)
-                textPaint.color = COLOR_PASTEL_RED
-                canvas.drawText("✕", width - dpF(28f), divCy + dpF(3.8f), textPaint)
+                canvas.drawRoundRect(cursorRectF, btnR, btnR, bgPaint)
 
-                textPaint.textAlign = Paint.Align.LEFT
+                // Vector Close Cross (Official M3 close symbol)
+                val clCenterX = (clLeft + clRight) * 0.5f
+                handlePaint.color = COLOR_PASTEL_RED
+                handlePaint.strokeWidth = dpF(1.75f)
+                val s = dpF(3.6f)
+                canvas.drawLine(clCenterX - s, divCy - s, clCenterX + s, divCy + s, handlePaint)
+                canvas.drawLine(clCenterX + s, divCy - s, clCenterX - s, divCy + s, handlePaint)
+
                 textPaint.textSize = prevSize
                 textPaint.typeface = prevType
                 return
@@ -16828,8 +17067,10 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                             triggerHaptic(0.8f)
                             isDraggingSplitDivider = true
                             splitDividerDownAction = when {
-                                event.x >= width - dpF(44f) -> 2 // Close split
-                                event.x >= width - dpF(82f) -> 1 // Swap panes
+                                event.x >= width - dpF(42f) -> 2 // Close split
+                                event.x >= width - dpF(80f) -> 1 // Swap panes
+                                event.x in dpF(12f)..dpF(72f) -> 3 // Top session chip tap
+                                event.x in dpF(72f)..dpF(135f) -> 4 // Bottom session chip tap
                                 else -> 0 // Drag ratio
                             }
                             invalidate()
@@ -16880,6 +17121,28 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                                 when (act) {
                                     2 -> toggleSplitScreenMode()
                                     1 -> swapSplitScreenPanes()
+                                    3 -> {
+                                        if (nativeGetActiveIndex() != splitTopSessionIdx) {
+                                            nativeSwitchSession(splitTopSessionIdx)
+                                            rows = splitTopRows
+                                            scrollOffset = 0
+                                            rebuildTabs()
+                                            syncInputConnectionWithGrid()
+                                            invalidateAllRows()
+                                            triggerHaptic(0.7f)
+                                        }
+                                    }
+                                    4 -> {
+                                        if (nativeGetActiveIndex() != splitBottomSessionIdx) {
+                                            nativeSwitchSession(splitBottomSessionIdx)
+                                            rows = splitBotRows
+                                            scrollOffset = 0
+                                            rebuildTabs()
+                                            syncInputConnectionWithGrid()
+                                            invalidateAllRows()
+                                            triggerHaptic(0.7f)
+                                        }
+                                    }
                                     else -> syncSize(forceResize = true)
                                 }
                             } else {
