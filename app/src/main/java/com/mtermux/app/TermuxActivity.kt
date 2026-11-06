@@ -580,9 +580,10 @@ class TermuxActivity : Activity() {
             background = GradientDrawable(
                 GradientDrawable.Orientation.BOTTOM_TOP,
                 intArrayOf(
-                    0x70000000.toInt(),
+                    0x98000000.toInt(),
+                    0x68000000.toInt(),
                     0x38000000.toInt(),
-                    0x12000000.toInt(),
+                    0x14000000.toInt(),
                     0x00000000
                 )
             )
@@ -593,7 +594,7 @@ class TermuxActivity : Activity() {
             bottomVignetteView,
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(76),
+                dp(96),
                 Gravity.BOTTOM
             )
         )
