@@ -894,9 +894,7 @@ exit 0
     }
 
     const char* reloadPath = "/data/data/com.mtermux/file/usr/bin/termux-reload-settings";
-    const char* reloadScript = "#!/data/data/com.mtermux/file/usr/bin/sh
-exit 0
-";
+    const char* reloadScript = "#!/data/data/com.mtermux/file/usr/bin/sh\nexit 0\n";
     unlink(reloadPath);
     int rfd = open(reloadPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
     if (rfd >= 0) {
