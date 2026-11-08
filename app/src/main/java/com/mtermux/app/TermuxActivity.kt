@@ -78,6 +78,7 @@ import android.view.inputmethod.TextAttribute
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.OverScroller
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -15828,18 +15829,45 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             }
         }
 
+        private val flingScroller = OverScroller(context)
+        private val flingRunnable = object : Runnable {
+            override fun run() {
+                if (!flingScroller.computeScrollOffset()) return
+                val maxSb = nativeGetActiveScrollback()
+                val minSb = -max(0, rows - 2)
+                val targetOffset = safeClampInt((flingScroller.currY / max(1f, cellHeight)).roundToInt(), minSb, max(0, maxSb))
+                if (targetOffset != scrollOffset) {
+                    val prevOffset = scrollOffset
+                    scrollOffset = targetOffset
+                    if (scrollOffset > 1 && scrollOffset > prevOffset) {
+                        setExtraKeysScrollHidden(true)
+                    } else if (scrollOffset < prevOffset || scrollOffset <= 0) {
+                        setExtraKeysScrollHidden(false)
+                    }
+                    actionMode?.invalidateContentRect()
+                    invalidateAllRows()
+                }
+                if (!flingScroller.isFinished) {
+                    postOnAnimation(this)
+                }
+            }
+        }
+
         private val selectionAutoScrollRunnable = object : Runnable {
             override fun run() {
                 if (!isDraggingSelectionHandle || !nativeIsSelectingText()) {
                     isAutoScrollRunning = false
                     return
                 }
-                val edgeZone = cellHeight * 2.2f
+                val topEdgeTrigger = computeGridTopOffsetPx() + cellHeight * 1.6f
+                val botEdgeTrigger = height.toFloat() - computeTotalBottomOcclusionPx() - cellHeight * 1.6f
                 var delta = 0
-                if (lastDragTouchY < edgeZone) {
-                    delta = if (lastDragTouchY < cellHeight * 0.4f) 2 else 1
-                } else if (lastDragTouchY > height - edgeZone) {
-                    delta = if (lastDragTouchY > height - cellHeight * 0.4f) -2 else -1
+                if (lastDragTouchY < topEdgeTrigger) {
+                    val overRatio = ((topEdgeTrigger - lastDragTouchY) / max(1f, cellHeight)).coerceAtLeast(0f)
+                    delta = (2 + (overRatio * 1.25f).toInt()).coerceIn(2, 6)
+                } else if (lastDragTouchY > botEdgeTrigger) {
+                    val overRatio = ((lastDragTouchY - botEdgeTrigger) / max(1f, cellHeight)).coerceAtLeast(0f)
+                    delta = -(2 + (overRatio * 1.25f).toInt()).coerceIn(2, 6)
                 }
                 if (delta != 0) {
                     val maxSb = nativeGetActiveScrollback()
@@ -15858,7 +15886,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                         handleRadiusPx
                     )
                     invalidateAllRows()
-                    postDelayed(this, 36L)
+                    postDelayed(this, 20L)
                 } else {
                     isAutoScrollRunning = false
                 }
@@ -15884,6 +15912,14 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             gestureDetector = GestureDetector(
                 context,
                 object : GestureDetector.SimpleOnGestureListener() {
+                    override fun onDown(e: MotionEvent): Boolean {
+                        if (!flingScroller.isFinished) {
+                            flingScroller.abortAnimation()
+                            removeCallbacks(flingRunnable)
+                        }
+                        return true
+                    }
+
                     override fun onSingleTapUp(e: MotionEvent): Boolean {
                         if (nativeIsSelectingText()) {
                             stopTextSelection()
@@ -15942,6 +15978,26 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                             actionMode?.invalidateContentRect()
                             invalidateAllRows()
                         }
+                        return true
+                    }
+
+                    override fun onFling(
+                        e1: MotionEvent?,
+                        e2: MotionEvent,
+                        velocityX: Float,
+                        velocityY: Float
+                    ): Boolean {
+                        if (scaleDetector.isInProgress || nativeIsSelectingText()) return false
+                        if (abs(velocityY) < 120f) return false
+                        val maxSb = nativeGetActiveScrollback()
+                        val minSb = -max(0, rows - 2)
+                        val startY = (scrollOffset * cellHeight).roundToInt()
+                        val minY = (minSb * cellHeight).roundToInt()
+                        val maxY = (max(0, maxSb) * cellHeight).roundToInt()
+                        flingScroller.abortAnimation()
+                        removeCallbacks(flingRunnable)
+                        flingScroller.fling(0, startY, 0, velocityY.roundToInt(), 0, 0, minY, maxY)
+                        postOnAnimation(flingRunnable)
                         return true
                     }
                 }
@@ -16206,6 +16262,10 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
         }
 
         internal fun resetScrollAndBlink() {
+            if (!flingScroller.isFinished) {
+                flingScroller.abortAnimation()
+                removeCallbacks(flingRunnable)
+            }
             scrollOffset = 0
             if (isExtraKeysScrollHidden) {
                 setExtraKeysScrollHidden(false)
@@ -17515,11 +17575,12 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 if (dragRes == 1) {
                     isDraggingSelectionHandle = true
                     actionMode?.hide(-1)
-                    val edgeZone = cellHeight * 2.2f
-                    if (event.y < edgeZone || event.y > height - edgeZone) {
+                    val topEdgeTrigger = computeGridTopOffsetPx() + cellHeight * 1.6f
+                    val botEdgeTrigger = height.toFloat() - computeTotalBottomOcclusionPx() - cellHeight * 1.6f
+                    if (event.y < topEdgeTrigger || event.y > botEdgeTrigger) {
                         if (!isAutoScrollRunning) {
                             isAutoScrollRunning = true
-                            postDelayed(selectionAutoScrollRunnable, 36L)
+                            postDelayed(selectionAutoScrollRunnable, 20L)
                         }
                     } else {
                         isAutoScrollRunning = false

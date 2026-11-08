@@ -73,6 +73,26 @@ jobs:
           restore-keys: |
             mtermux-gradle-cxx-v5-${{ runner.os }}-
 
+      - name: Cache CMake 4.5.0-rc3
+        id: cache-cmake
+        uses: actions/cache@main
+        with:
+          path: ${{ env.ANDROID_HOME }}/cmake/4.5.0-rc3
+          key: mtermux-cmake-4.5.0-rc3-${{ runner.os }}
+
+      - name: Install CMake 4.5.0-rc3
+        run: |
+          CMAKE_DIR="${ANDROID_HOME}/cmake/4.5.0-rc3"
+          if [ ! -x "${CMAKE_DIR}/bin/cmake" ]; then
+            mkdir -p "${CMAKE_DIR}"
+            curl -fsSL "https://github.com/Kitware/CMake/releases/download/v4.5.0-rc3/cmake-4.5.0-rc3-linux-x86_64.tar.gz" | tar -xz --strip-components=1 -C "${CMAKE_DIR}"
+          fi
+          echo "${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+          "${CMAKE_DIR}/bin/cmake" --version
+          grep -v '^cmake.dir=' local.properties 2>/dev/null > local.properties.tmp || true
+          echo "cmake.dir=${CMAKE_DIR}" >> local.properties.tmp
+          mv local.properties.tmp local.properties
+
       - name: SDK Licenses
         run: |
           JAVA_HOME="${JAVA_HOME_25_X64:-$JAVA_HOME}" yes 2>/dev/null | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
@@ -143,6 +163,7 @@ jobs:
           java_ver = sh("java -version").splitlines()[0] if sh("java -version") else "Unknown"
           python_ver = sh("python3 --version")
           node_ver = sh("node -v")
+          cmake_ver = sh("cmake --version").splitlines()[0] if sh("cmake --version") else "N/A"
           ccache_ver = sh("ccache --version").splitlines()[0] if sh("ccache --version") else "N/A"
           ccache_stats = sh("ccache -s")
 
@@ -211,6 +232,7 @@ jobs:
           | **Android NDK** | `{versions.get('ndk', '30.0.16248370')}` (`c++_static`, 16 KB page size aligned) |
           | **Java / JDK Toolchain** | `{java_ver}` |
           | **Python / Node.js** | `{python_ver}` / `{node_ver}` |
+          | **CMake** | `{cmake_ver}` |
           | **CCache** | `{ccache_ver}` |
 
           ## 3. Ключевые пакеты в составе Bootstrap (`{total_bs_pkgs}` пакетов из коробки)

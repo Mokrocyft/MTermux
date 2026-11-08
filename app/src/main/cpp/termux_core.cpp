@@ -848,15 +848,17 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     std::string dstSo = std::string(LIB_PATH) + "/libmtermux-redirect.so";
 
     ensureExecutablePermissionsInDir("/data/data/com.mtermux/file/usr/var/lib/dpkg/info");
+    mkdirsRecursive("/data/data/com.mtermux/file/usr/var/log/apt", 0700);
     mkdirsRecursive("/data/data/com.mtermux/file/usr/etc/apt/apt.conf.d", 0700);
     unlink("/data/data/com.mtermux/file/usr/etc/apt/apt.conf.d/00mtermux");
     const char* aptConfPath = "/data/data/com.mtermux/file/usr/etc/apt/apt.conf.d/00mtermux";
     const char* aptConfText =
-        "Dir \"/data/data/com.mtermux/file/usr\";\n"
+        "Dir \"/\";\n"
         "Dir::State \"/data/data/com.mtermux/file/usr/var/lib/apt\";\n"
         "Dir::State::status \"/data/data/com.mtermux/file/usr/var/lib/dpkg/status\";\n"
         "Dir::Cache \"/data/data/com.mtermux/cach/apt\";\n"
         "Dir::Cache::archives \"/data/data/com.mtermux/cach/apt/archives\";\n"
+        "Dir::Log \"/data/data/com.mtermux/file/usr/var/log/apt\";\n"
         "Dir::Etc \"/data/data/com.mtermux/file/usr/etc/apt\";\n"
         "Dir::Bin::dpkg \"/data/data/com.mtermux/file/usr/bin/dpkg\";\n"
         "Dir::Bin::Methods \"/data/data/com.mtermux/file/usr/lib/apt/methods\";\n"
