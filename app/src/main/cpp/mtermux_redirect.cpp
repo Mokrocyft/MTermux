@@ -373,6 +373,41 @@ static std::vector<std::string> buildSanitizedEnvStrings(char* const envp[], con
     return out;
 }
 
+
+static void ensureDirectExecWrappedInRedirect() noexcept {
+    char libDir[512] = {0};
+    const char* envLib = getenv("MTERMUX_NATIVE_LIB_DIR");
+    if (envLib && envLib[0]) {
+        snprintf(libDir, sizeof(libDir), "%s", envLib);
+    } else {
+        int fd = rawOpenAt(AT_FDCWD, "/data/data/com.mtermux/file/usr/etc/.mtermux_native_lib_dir", O_RDONLY | O_CLOEXEC, 0);
+        if (fd < 0) return;
+        ssize_t n = read(fd, libDir, sizeof(libDir) - 1);
+        close(fd);
+        if (n <= 0) return;
+        libDir[n] = '\0';
+    }
+    std::string execProxy = std::string(libDir) + "/libmtermux-exec.so";
+    if (rawAccessAt(AT_FDCWD, execProxy.c_str(), X_OK) != 0) return;
+
+    std::string realDir = std::string(USR_BIN_PATH) + "/.mtermux-real";
+    syscall(__NR_mkdirat, AT_FDCWD, realDir.c_str(), 0700);
+
+    static const char* const kBins[] = {"git", "ssh", "scp", "sftp", "ssh-keygen", "gpg", "gpgv"};
+    for (const char* name : kBins) {
+        std::string binPath = std::string(USR_BIN_PATH) + "/" + name;
+        struct stat st{};
+        if (syscall(__NR_newfstatat, AT_FDCWD, binPath.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
+        if (S_ISREG(st.st_mode)) {
+            std::string realPath = realDir + "/" + name;
+            if (syscall(__NR_renameat, AT_FDCWD, binPath.c_str(), AT_FDCWD, realPath.c_str()) == 0) {
+                syscall(__NR_fchmodat, AT_FDCWD, realPath.c_str(), 0700, 0);
+                syscall(__NR_symlinkat, execProxy.c_str(), AT_FDCWD, binPath.c_str());
+            }
+        }
+    }
+}
+
 static int executeResolvedPath(const char* rawFilename, char* const argv[], char* const envp[], int depth = 0) noexcept {
     if (!rawFilename || !rawFilename[0] || depth > 4) {
         errno = ENOENT;
@@ -395,6 +430,14 @@ static int executeResolvedPath(const char* rawFilename, char* const argv[], char
 
     // Ensure any newly created script or binary under com.mtermux has its 16-byte tokens patched before exec
     patchInstalledFileIfNeeded(targetPath);
+    {
+        const char* base = strrchr(targetPath, '/');
+        base = base ? (base + 1) : targetPath;
+        if (strcmp(base, "gh") == 0 || strcmp(base, "go") == 0 ||
+            strcmp(base, "lazygit") == 0 || strcmp(base, "rclone") == 0) {
+            ensureDirectExecWrappedInRedirect();
+        }
+    }
 
     std::vector<std::string> envStore = buildSanitizedEnvStrings(envp, targetPath);
     std::vector<char*> envPtrs;

@@ -831,6 +831,15 @@ static void unwrapBinaryFromDirectExec(const char* binName) noexcept {
 }
 
 static void wrapCommonDirectExecBinaries(const char* nativeLibDir) noexcept {
+    if (nativeLibDir && nativeLibDir[0]) {
+        mkdirsRecursive("/data/data/com.mtermux/file/usr/etc", 0700);
+        const char* libDirMarker = "/data/data/com.mtermux/file/usr/etc/.mtermux_native_lib_dir";
+        int lfd = open(libDirMarker, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (lfd >= 0) {
+            writeAllFd(lfd, nativeLibDir, strlen(nativeLibDir));
+            close(lfd);
+        }
+    }
     static const char* const kUnwrapBins[] = {
         "bash", "sh", "zsh", "dash",
         "less", "curl", "tar", "bsdtar",
@@ -2724,6 +2733,9 @@ static bool startSessionProcess(
     envStrings.emplace_back("ANDROID__BUILD_VERSION_SDK=37");
     envStrings.emplace_back("TERMUX_VERSION=0.119.0");
     envStrings.emplace_back("BROWSER=/data/data/com.mtermux/file/usr/bin/termux-open-url");
+    if (nativeLibDir && nativeLibDir[0]) {
+        envStrings.emplace_back(std::string("MTERMUX_NATIVE_LIB_DIR=") + nativeLibDir);
+    }
     envStrings.emplace_back("SHELL=" + std::string(userShell));
 
     std::string execPath;
