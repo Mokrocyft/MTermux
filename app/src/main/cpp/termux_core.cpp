@@ -749,7 +749,7 @@ static void installUnifiedRedirectLibrary(const char* nativeLibDir) noexcept {
     }
 }
 
-static void installBuiltInSudoWrapper() noexcept {
+static void installBuiltInSudoWrapper(const char* nativeLibDir) noexcept {
     const char* sudoPath = "/data/data/com.mtermux/file/usr/bin/sudo";
     const char* sudoScript = R"SH(#!/data/data/com.mtermux/file/usr/bin/sh
 for s in /data/adb/ksu/bin/su /data/adb/ap/bin/su /debug_ramdisk/su /sbin/su /system/bin/su /system/xbin/su; do
@@ -821,28 +821,30 @@ fi
 /system/bin/cmd activity start -a android.intent.action.VIEW -d "$URL" >/dev/null 2>&1 || true
 exit 0
 )SH";
-    unlink(openUrlPath);
-    int oufd = open(openUrlPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
-    if (oufd >= 0) {
-        writeAllFd(oufd, openUrlScript, strlen(openUrlScript));
-        close(oufd);
-        chmod(openUrlPath, 0755);
-    }
+    std::string nativeOpenBin = (nativeLibDir && nativeLibDir[0])
+        ? (std::string(nativeLibDir) + "/libmtermux-open.so") : std::string();
+    bool hasNativeOpen = (!nativeOpenBin.empty() && access(nativeOpenBin.c_str(), X_OK) == 0);
 
     static const char* const openAliases[] = {
+        "/data/data/com.mtermux/file/usr/bin/termux-open-url",
         "/data/data/com.mtermux/file/usr/bin/xdg-open",
         "/data/data/com.mtermux/file/usr/bin/termux-open",
         "/data/data/com.mtermux/file/usr/bin/sensible-browser",
         "/data/data/com.mtermux/file/usr/bin/www-browser",
         "/data/data/com.mtermux/file/usr/bin/x-www-browser"
     };
+    (void)openUrlPath;
     for (const char* p : openAliases) {
         unlink(p);
-        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
-        if (fd >= 0) {
-            writeAllFd(fd, openUrlScript, strlen(openUrlScript));
-            close(fd);
-            chmod(p, 0755);
+        if (hasNativeOpen) {
+            symlink(nativeOpenBin.c_str(), p);
+        } else {
+            int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+            if (fd >= 0) {
+                writeAllFd(fd, openUrlScript, strlen(openUrlScript));
+                close(fd);
+                chmod(p, 0755);
+            }
         }
     }
 
@@ -882,14 +884,22 @@ exit 0
         "/data/data/com.mtermux/file/usr/bin/wl-copy",
         "/data/data/com.mtermux/file/usr/bin/pbcopy"
     };
+    std::string nativeClipBin = (nativeLibDir && nativeLibDir[0])
+        ? (std::string(nativeLibDir) + "/libmtermux-clip.so") : std::string();
+    bool hasNativeClip = (!nativeClipBin.empty() && access(nativeClipBin.c_str(), X_OK) == 0);
+
     (void)clipSetPath;
     for (const char* p : clipAliases) {
         unlink(p);
-        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
-        if (fd >= 0) {
-            writeAllFd(fd, clipSetScript, strlen(clipSetScript));
-            close(fd);
-            chmod(p, 0755);
+        if (hasNativeClip) {
+            symlink(nativeClipBin.c_str(), p);
+        } else {
+            int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+            if (fd >= 0) {
+                writeAllFd(fd, clipSetScript, strlen(clipSetScript));
+                close(fd);
+                chmod(p, 0755);
+            }
         }
     }
 
@@ -978,7 +988,7 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
     ensureExecutablePermissionsInDir("/data/data/com.mtermux/file/usr/lib/apt");
 
     installUnifiedRedirectLibrary(nativeLibDir);
-    installBuiltInSudoWrapper();
+    installBuiltInSudoWrapper(nativeLibDir);
     std::string dstSo = std::string(LIB_PATH) + "/libmtermux-redirect.so";
 
     ensureExecutablePermissionsInDir("/data/data/com.mtermux/file/usr/var/lib/dpkg/info");

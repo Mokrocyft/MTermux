@@ -78,14 +78,27 @@ jobs:
         uses: actions/cache@main
         with:
           path: ${{ env.ANDROID_HOME }}/cmake/4.5.0-rc3
-          key: mtermux-cmake-4.5.0-rc3-${{ runner.os }}
+          key: mtermux-cmake-v2-4.5.0-rc3-${{ runner.os }}
 
       - name: Install CMake 4.5.0-rc3
         run: |
           CMAKE_DIR="${ANDROID_HOME}/cmake/4.5.0-rc3"
-          if [ ! -x "${CMAKE_DIR}/bin/cmake" ]; then
+          if [ ! -x "${CMAKE_DIR}/bin/cmake.real" ]; then
             mkdir -p "${CMAKE_DIR}"
             curl -fsSL "https://github.com/Kitware/CMake/releases/download/v4.5.0-rc3/cmake-4.5.0-rc3-linux-x86_64.tar.gz" | tar -xz --strip-components=1 -C "${CMAKE_DIR}"
+            mv "${CMAKE_DIR}/bin/cmake" "${CMAKE_DIR}/bin/cmake.real"
+            cat << 'WRAP' > "${CMAKE_DIR}/bin/cmake"
+#!/usr/bin/env bash
+args=()
+for a in "$@"; do
+  case "$a" in
+    -H*) args+=("-S${a#-H}") ;;
+    *)   args+=("$a") ;;
+  esac
+done
+exec "$(dirname "$0")/cmake.real" "${args[@]}"
+WRAP
+            chmod +x "${CMAKE_DIR}/bin/cmake"
           fi
           echo "${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
           "${CMAKE_DIR}/bin/cmake" --version
@@ -133,11 +146,11 @@ jobs:
             cp -f "$RELEASE_IDSIG" dist/MTermux-release.apk.idsig
           fi
 
-          APKSIGNER=$(find ${ANDROID_HOME}/build-tools -name apksigner | sort -V | tail -n 1)
+          APKSIGNER_JAR=$(find ${ANDROID_HOME}/build-tools -name apksigner.jar | sort -V | tail -n 1)
           SIGN_VERIFY_OUT="N/A"
-          if [ -n "$APKSIGNER" ]; then
+          if [ -n "$APKSIGNER_JAR" ]; then
             if [ ! -f dist/MTermux-release.apk.idsig ]; then
-              JAVA_OPTS="--enable-native-access=ALL-UNNAMED" "$APKSIGNER" sign \
+              java --enable-native-access=ALL-UNNAMED -jar "$APKSIGNER_JAR" sign \
                 --ks app/testkey_untrusted.jks \
                 --ks-key-alias alias \
                 --ks-pass pass:xrj45yWGLbsO7W0v \
@@ -149,7 +162,7 @@ jobs:
                 --out dist/MTermux-release.apk \
                 dist/MTermux-release.apk
             fi
-            SIGN_VERIFY_OUT=$(JAVA_OPTS="--enable-native-access=ALL-UNNAMED" "$APKSIGNER" verify --verbose --v4-signature-file dist/MTermux-release.apk.idsig dist/MTermux-release.apk || true)
+            SIGN_VERIFY_OUT=$(java --enable-native-access=ALL-UNNAMED -jar "$APKSIGNER_JAR" verify --verbose --v4-signature-file dist/MTermux-release.apk.idsig dist/MTermux-release.apk || true)
             echo "$SIGN_VERIFY_OUT"
           fi
 

@@ -81,3 +81,41 @@ set(COMMON_LINK_FLAGS
 
 target_link_options(mtermux-core PRIVATE ${COMMON_LINK_FLAGS})
 target_link_options(mtermux-redirect PRIVATE ${COMMON_LINK_FLAGS})
+
+add_executable(mtermux-open
+    mtermux_open.cpp
+)
+
+add_executable(mtermux-clip
+    mtermux_clip.cpp
+)
+
+set_target_properties(mtermux-open PROPERTIES
+    OUTPUT_NAME "mtermux-open"
+    PREFIX "lib"
+    SUFFIX ".so"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+)
+
+set_target_properties(mtermux-clip PROPERTIES
+    OUTPUT_NAME "mtermux-clip"
+    PREFIX "lib"
+    SUFFIX ".so"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+)
+
+target_compile_options(mtermux-open PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${COMMON_CXX_FLAGS}>
+)
+
+target_compile_options(mtermux-clip PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${COMMON_CXX_FLAGS}>
+)
+
+if(HAS_ARMV8_2)
+    target_compile_options(mtermux-open PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
+    target_compile_options(mtermux-clip PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
+endif()
+
+target_link_options(mtermux-open PRIVATE ${COMMON_LINK_FLAGS} -pie)
+target_link_options(mtermux-clip PRIVATE ${COMMON_LINK_FLAGS} -pie)
