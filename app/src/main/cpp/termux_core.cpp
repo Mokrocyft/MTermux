@@ -800,7 +800,47 @@ static void wrapBinaryForDirectExec(const char* binName, const std::string& exec
     }
 }
 
+static void unwrapBinaryFromDirectExec(const char* binName) noexcept {
+    std::string binPath = std::string(BIN_PATH) + "/" + binName;
+    std::string realPath = std::string(BIN_PATH) + "/.mtermux-real/" + binName;
+    struct stat st{};
+    if (lstat(binPath.c_str(), &st) != 0 || !S_ISLNK(st.st_mode)) return;
+    char linkBuf[PATH_MAX] = {0};
+    ssize_t n = readlink(binPath.c_str(), linkBuf, sizeof(linkBuf) - 1);
+    if (n <= 0) return;
+    linkBuf[n] = '\0';
+    if (strstr(linkBuf, "libmtermux-exec.so") == nullptr) return;
+
+    struct stat rst{};
+    if (lstat(realPath.c_str(), &rst) != 0) return;
+    if (S_ISLNK(rst.st_mode)) {
+        char rBuf[PATH_MAX] = {0};
+        ssize_t rn = readlink(realPath.c_str(), rBuf, sizeof(rBuf) - 1);
+        if (rn > 0) {
+            rBuf[rn] = '\0';
+            unlink(binPath.c_str());
+            symlink(rBuf, binPath.c_str());
+            unlink(realPath.c_str());
+        }
+    } else if (S_ISREG(rst.st_mode)) {
+        unlink(binPath.c_str());
+        if (rename(realPath.c_str(), binPath.c_str()) == 0) {
+            chmod(binPath.c_str(), 0700);
+        }
+    }
+}
+
 static void wrapCommonDirectExecBinaries(const char* nativeLibDir) noexcept {
+    static const char* const kUnwrapBins[] = {
+        "bash", "sh", "zsh", "dash",
+        "less", "curl", "tar", "bsdtar",
+        "unzip", "gzip", "xz", "sed", "awk", "grep", "find",
+        "env", "nano", "vim"
+    };
+    for (const char* name : kUnwrapBins) {
+        unwrapBinaryFromDirectExec(name);
+    }
+
     if (!nativeLibDir || !nativeLibDir[0]) return;
     std::string execProxyPath = std::string(nativeLibDir) + "/libmtermux-exec.so";
     if (access(execProxyPath.c_str(), X_OK) != 0) return;
@@ -809,11 +849,7 @@ static void wrapCommonDirectExecBinaries(const char* nativeLibDir) noexcept {
     mkdirsRecursive(realDir.c_str(), 0700);
 
     static const char* const kDirectExecBins[] = {
-        "bash", "sh", "zsh", "dash",
-        "git", "ssh", "scp", "sftp", "ssh-keygen",
-        "gpg", "gpgv", "less", "curl", "tar", "bsdtar",
-        "unzip", "gzip", "xz", "sed", "awk", "grep", "find",
-        "env", "nano", "vim"
+        "git", "ssh", "scp", "sftp", "ssh-keygen", "gpg", "gpgv"
     };
     for (const char* name : kDirectExecBins) {
         wrapBinaryForDirectExec(name, execProxyPath);
