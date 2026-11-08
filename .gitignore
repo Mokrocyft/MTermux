@@ -16,6 +16,7 @@ local.properties
 app/src/main/assets/bootstrap-aarch64.zip
 dist/
 *.jks
+!app/testkey_untrusted.jks
 *.keystore
 *.idsig
 

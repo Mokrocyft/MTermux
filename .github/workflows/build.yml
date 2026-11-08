@@ -114,6 +114,10 @@ jobs:
           export PATH="$JAVA_HOME/bin:$PATH"
           java -version
 
+          if [ ! -f app/testkey_untrusted.jks ]; then
+            keytool -genkeypair -v -keystore app/testkey_untrusted.jks -alias alias -keyalg RSA -keysize 2048 -validity 10000 -storepass xrj45yWGLbsO7W0v -keypass xrj45yWGLbsO7W0v -dname "CN=MTermux, OU=Dev, O=MTermux, L=Unknown, ST=Unknown, C=US"
+          fi
+
           ./gradlew assembleRelease \
             -Dorg.gradle.java.installations.paths="${JAVA_HOME_28_X64:-},${JAVA_HOME_25_X64:-}" \
             --build-cache \
