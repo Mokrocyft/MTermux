@@ -5292,12 +5292,17 @@ class TermuxActivity : Activity() {
                 }
             }
 
+            var didExpandForClose = false
+            var prevProgressImeBottom = -1
+
             targetView.setWindowInsetsAnimationCallback(
                 object : WindowInsetsAnimation.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
                     override fun onPrepare(animation: WindowInsetsAnimation) {
                         if ((animation.typeMask and WindowInsets.Type.ime()) != 0) {
                             isImeAnimating = true
                             isImeTransitionActive = true
+                            didExpandForClose = false
+                            prevProgressImeBottom = -1
                             imeTransitionAnimator?.cancel()
                             if (isExtraKeysScrollHidden) {
                                 isExtraKeysScrollHidden = false
@@ -5318,8 +5323,8 @@ class TermuxActivity : Activity() {
                     ): WindowInsetsAnimation.Bounds {
                         if ((animation.typeMask and WindowInsets.Type.ime()) != 0) {
                             val targetImeVisible = targetView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) ?: isImeCurrentlyOpen
-                            if (!targetImeVisible && ::terminalSurface.isInitialized) {
-                                // Keyboard is closing: expand PTY rows immediately at frame 0 so text glides down attached to keyboard!
+                            if ((!targetImeVisible || isImeCurrentlyOpen) && ::terminalSurface.isInitialized && !targetImeVisible) {
+                                didExpandForClose = true
                                 terminalSurface.syncSizeForUnoccludedHeight()
                                 terminalSurface.invalidate()
                             }
@@ -5347,6 +5352,12 @@ class TermuxActivity : Activity() {
                         if (ime.bottom > maxObservedImePx) {
                             maxObservedImePx = ime.bottom
                         }
+                        if (!didExpandForClose && prevProgressImeBottom >= 0 && ime.bottom < prevProgressImeBottom && ::terminalSurface.isInitialized) {
+                            didExpandForClose = true
+                            terminalSurface.syncSizeForUnoccludedHeight()
+                        }
+                        prevProgressImeBottom = ime.bottom
+
                         currentStatusBarTopPx = max(sysBars.top, fallbackStatusBarPx)
                         currentSysNavBottomPx = sysBars.bottom
                         currentImeBottomPx = ime.bottom
