@@ -448,6 +448,7 @@ class TermuxActivity : Activity() {
     private lateinit var bottomVignetteView: View
     private lateinit var extraKeysRoot: LinearLayout
     private var isImeCurrentlyOpen: Boolean = false
+    internal var isImeTransitionActive: Boolean = false
     private var isExtraKeysScrollHidden: Boolean = false
     internal var autoHideExtraKeysOnScroll: Boolean = true
     private var currentExtraKeysImeLiftPx: Float = 0f
@@ -5296,6 +5297,7 @@ class TermuxActivity : Activity() {
                     override fun onPrepare(animation: WindowInsetsAnimation) {
                         if ((animation.typeMask and WindowInsets.Type.ime()) != 0) {
                             isImeAnimating = true
+                            isImeTransitionActive = true
                             imeTransitionAnimator?.cancel()
                             if (isExtraKeysScrollHidden) {
                                 isExtraKeysScrollHidden = false
@@ -5308,6 +5310,21 @@ class TermuxActivity : Activity() {
                                 updateExtraKeysTranslationY()
                             }
                         }
+                    }
+
+                    override fun onStart(
+                        animation: WindowInsetsAnimation,
+                        bounds: WindowInsetsAnimation.Bounds
+                    ): WindowInsetsAnimation.Bounds {
+                        if ((animation.typeMask and WindowInsets.Type.ime()) != 0) {
+                            val targetImeVisible = targetView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) ?: isImeCurrentlyOpen
+                            if (!targetImeVisible && ::terminalSurface.isInitialized) {
+                                // Keyboard is closing: expand PTY rows immediately at frame 0 so text glides down attached to keyboard!
+                                terminalSurface.syncSizeForUnoccludedHeight()
+                                terminalSurface.invalidate()
+                            }
+                        }
+                        return bounds
                     }
 
                     override fun onProgress(
@@ -5340,13 +5357,16 @@ class TermuxActivity : Activity() {
                         val span = max(dp(160), maxObservedImePx - sysBars.bottom).toFloat()
                         val rawFrac = safeClamp((ime.bottom - sysBars.bottom).toFloat() / span, 0f, 1f)
                         applyExtraKeysImeState(curBottom.toFloat(), rawFrac)
-                        terminalSurface.postInvalidateOnAnimation()
+                        if (::terminalSurface.isInitialized) {
+                            terminalSurface.invalidate()
+                        }
                         return insets
                     }
 
                     override fun onEnd(animation: WindowInsetsAnimation) {
                         if ((animation.typeMask and WindowInsets.Type.ime()) != 0) {
                             isImeAnimating = false
+                            isImeTransitionActive = false
                             val curInsets = targetView.rootWindowInsets
                             val sysB = curInsets?.getInsets(
                                 WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
@@ -5361,7 +5381,7 @@ class TermuxActivity : Activity() {
                             applyExtraKeysImeState(finalBot.toFloat(), if (nowOpen) 1f else 0f)
                             if (::terminalSurface.isInitialized) {
                                 terminalSurface.syncSize()
-                                terminalSurface.postInvalidateOnAnimation()
+                                terminalSurface.invalidate()
                             }
                         }
                     }
@@ -5400,6 +5420,10 @@ class TermuxActivity : Activity() {
                         val endF = if (nowOpen) 1f else 0f
 
                         imeTransitionAnimator?.cancel()
+                        isImeTransitionActive = true
+                        if (!nowOpen && ::terminalSurface.isInitialized) {
+                            terminalSurface.syncSizeForUnoccludedHeight()
+                        }
                         imeTransitionAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
                             duration = 250L
                             interpolator = aosp17SpatialInterpolator
@@ -5408,15 +5432,16 @@ class TermuxActivity : Activity() {
                                 val curBot = startBottom + (endBottom - startBottom) * t
                                 applyExtraKeysImeState(curBot, startF + (endF - startF) * t)
                                 if (::terminalSurface.isInitialized) {
-                                    terminalSurface.postInvalidateOnAnimation()
+                                    terminalSurface.invalidate()
                                 }
                             }
                             addListener(object : android.animation.AnimatorListenerAdapter() {
                                 override fun onAnimationEnd(animation: android.animation.Animator) {
+                                    isImeTransitionActive = false
                                     applyExtraKeysImeState(endBottom, endF)
                                     if (::terminalSurface.isInitialized) {
                                         terminalSurface.syncSize()
-                                        terminalSurface.postInvalidateOnAnimation()
+                                        terminalSurface.invalidate()
                                     }
                                 }
                             })
@@ -16478,6 +16503,27 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             return floatArrayOf(topOff, divTopY, divTopY, divBotY, divBotY, activeBotY)
         }
 
+        internal fun syncSizeForUnoccludedHeight() {
+            val w = width
+            val h = height
+            if (w <= 0 || h <= 0 || isDualPaneActive()) return
+            val topOff = computeGridTopOffsetPx()
+            val extraH = if (::extraKeysRoot.isInitialized && extraKeysRoot.visibility == View.VISIBLE) {
+                (extraKeysRoot.height.takeIf { it > 0 } ?: dp(41)).toFloat()
+            } else 0f
+            val closedBottom = currentSysNavBottomPx.toFloat() + dpF(14f) + extraH
+            val usableGridH = (h.toFloat() - topOff - closedBottom).coerceAtLeast(cellHeight * 2f)
+            val newCols = max(4, (w / cellWidth).toInt())
+            val newRows = max(2, (usableGridH / cellHeight).toInt())
+            if (newCols != cols || newRows != rows || rowNodes == null || rowNodes?.size != newRows) {
+                cols = newCols
+                rows = newRows
+                rowNodes = arrayOfNulls(rows)
+                rowNodesValid = BooleanArray(rows)
+                nativeResizeActive(rows, cols, cellWidth.roundToInt(), cellHeight.roundToInt())
+            }
+        }
+
         internal fun syncSize(forceResize: Boolean = false) {
             val w = width
             val h = height
@@ -17186,7 +17232,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                         val nowNs = System.nanoTime()
 
                         var stillMoving = false
-                        if (!cursorPosInitialized || !cursorSmoothMove) {
+                        if (!cursorPosInitialized || !cursorSmoothMove || isImeTransitionActive) {
                             animCursorX = targetX
                             animCursorY = targetY
                             cursorPosInitialized = true
