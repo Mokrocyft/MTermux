@@ -715,6 +715,11 @@ static void ensureExecutablePermissionsInDir(const char* dirPath) noexcept {
                 ensureExecutablePermissionsInDir(full.c_str());
             } else if (S_ISREG(st.st_mode)) {
                 chmod(full.c_str(), 0700);
+            } else if (S_ISLNK(st.st_mode)) {
+                struct stat targetSt{};
+                if (stat(full.c_str(), &targetSt) == 0 && S_ISREG(targetSt.st_mode)) {
+                    chmod(full.c_str(), 0700);
+                }
             }
         }
     }
@@ -796,6 +801,108 @@ exec "$SU_BIN" $MM_FLAG "$@"
         writeAllFd(sfd, suScript, strlen(suScript));
         close(sfd);
         chmod(suWrapperPath, 0700);
+    }
+
+    // Built-in Android Intent & OSC-52/OSC-777 Terminal Integration Tools
+    // (100% compatible with Go's gh cli, Python webbrowser, Node open, CMake, etc. - bypasses fork/exec EACCES!)
+    const char* openUrlPath = "/data/data/com.mtermux/file/usr/bin/termux-open-url";
+    const char* openUrlScript = R"SH(#!/data/data/com.mtermux/file/usr/bin/sh
+if [ $# -eq 0 ]; then
+  echo "Usage: termux-open-url <url>" >&2
+  exit 1
+fi
+URL="$1"
+if [ -w /dev/tty ]; then
+  printf ']777;open;%s' "$URL" > /dev/tty 2>/dev/null || true
+else
+  printf ']777;open;%s' "$URL" 2>/dev/null || true
+fi
+/system/bin/am start --user 0 -a android.intent.action.VIEW -d "$URL" >/dev/null 2>&1 || \
+/system/bin/cmd activity start -a android.intent.action.VIEW -d "$URL" >/dev/null 2>&1 || true
+exit 0
+)SH";
+    unlink(openUrlPath);
+    int oufd = open(openUrlPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+    if (oufd >= 0) {
+        writeAllFd(oufd, openUrlScript, strlen(openUrlScript));
+        close(oufd);
+        chmod(openUrlPath, 0755);
+    }
+
+    static const char* const openAliases[] = {
+        "/data/data/com.mtermux/file/usr/bin/xdg-open",
+        "/data/data/com.mtermux/file/usr/bin/termux-open",
+        "/data/data/com.mtermux/file/usr/bin/sensible-browser",
+        "/data/data/com.mtermux/file/usr/bin/www-browser",
+        "/data/data/com.mtermux/file/usr/bin/x-www-browser"
+    };
+    for (const char* p : openAliases) {
+        unlink(p);
+        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+        if (fd >= 0) {
+            writeAllFd(fd, openUrlScript, strlen(openUrlScript));
+            close(fd);
+            chmod(p, 0755);
+        }
+    }
+
+    const char* clipSetPath = "/data/data/com.mtermux/file/usr/bin/termux-clipboard-set";
+    const char* clipSetScript = R"SH(#!/data/data/com.mtermux/file/usr/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -version|--version|-v)
+      echo "xclip version 0.13"
+      exit 0
+      ;;
+    -o|-out)
+      exit 0
+      ;;
+  esac
+done
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ ! -f "$1" ]; then
+  DATA=$(printf "%s" "$*")
+else
+  DATA=$(cat)
+fi
+if [ -n "$DATA" ]; then
+  B64=$(printf "%s" "$DATA" | base64 | tr -d '
+')
+  if [ -w /dev/tty ]; then
+    printf ']52;c;%s' "$B64" > /dev/tty 2>/dev/null || printf ']52;c;%s' "$B64"
+  else
+    printf ']52;c;%s' "$B64"
+  fi
+fi
+exit 0
+)SH";
+    static const char* const clipAliases[] = {
+        "/data/data/com.mtermux/file/usr/bin/termux-clipboard-set",
+        "/data/data/com.mtermux/file/usr/bin/xclip",
+        "/data/data/com.mtermux/file/usr/bin/xsel",
+        "/data/data/com.mtermux/file/usr/bin/wl-copy",
+        "/data/data/com.mtermux/file/usr/bin/pbcopy"
+    };
+    (void)clipSetPath;
+    for (const char* p : clipAliases) {
+        unlink(p);
+        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+        if (fd >= 0) {
+            writeAllFd(fd, clipSetScript, strlen(clipSetScript));
+            close(fd);
+            chmod(p, 0755);
+        }
+    }
+
+    const char* reloadPath = "/data/data/com.mtermux/file/usr/bin/termux-reload-settings";
+    const char* reloadScript = "#!/data/data/com.mtermux/file/usr/bin/sh
+exit 0
+";
+    unlink(reloadPath);
+    int rfd = open(reloadPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+    if (rfd >= 0) {
+        writeAllFd(rfd, reloadScript, strlen(reloadScript));
+        close(rfd);
+        chmod(reloadPath, 0755);
     }
 }
 
@@ -2136,6 +2243,15 @@ public:
                 mOsc52Clipboard = decodeBase64(mOscBuffer.substr(secondSemi + 1));
                 if (!mOsc52Clipboard.empty()) mOsc52Changed = true;
             }
+        } else if (code == 777) {
+            std::string rest = mOscBuffer.substr(semi + 1);
+            if (rest.rfind("open;", 0) == 0) {
+                std::string url = rest.substr(5);
+                if (!url.empty()) {
+                    mOsc52Clipboard = "__MTERMUX_OPEN_URL__:" + url;
+                    mOsc52Changed = true;
+                }
+            }
         }
     }
 
@@ -2491,6 +2607,7 @@ static bool startSessionProcess(
     envStrings.emplace_back("ANDROID_ROOT=/system");
     envStrings.emplace_back("ANDROID__BUILD_VERSION_SDK=37");
     envStrings.emplace_back("TERMUX_VERSION=0.119.0");
+    envStrings.emplace_back("BROWSER=/data/data/com.mtermux/file/usr/bin/termux-open-url");
     envStrings.emplace_back("SHELL=" + std::string(userShell));
 
     std::string execPath;

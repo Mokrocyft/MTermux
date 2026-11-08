@@ -461,20 +461,55 @@ static int executeResolvedPath(const char* rawFilename, char* const argv[], char
     }
 
     int rc = rawExecveSyscall(targetPath, effectiveArgv, envPtrs.data());
-    if (rc < 0 && errno == EACCES) {
-        syscall(__NR_fchmodat, AT_FDCWD, targetPath, 0700, 0);
-        rc = rawExecveSyscall(targetPath, effectiveArgv, envPtrs.data());
-        if (rc < 0 && errno == EACCES) {
-            std::vector<char*> linkerArgs;
-            linkerArgs.push_back(const_cast<char*>("/system/bin/linker64"));
-            linkerArgs.push_back(const_cast<char*>(targetPath));
-            if (effectiveArgv && effectiveArgv[0] != nullptr) {
-                for (size_t i = 1; effectiveArgv[i] != nullptr; ++i) {
-                    linkerArgs.push_back(effectiveArgv[i]);
-                }
+    if (rc < 0 && errno == ENOEXEC) {
+        std::vector<char*> shArgs;
+        shArgs.push_back(const_cast<char*>(USR_SH_PATH));
+        shArgs.push_back(const_cast<char*>(targetPath));
+        if (effectiveArgv && effectiveArgv[0] != nullptr) {
+            for (size_t i = 1; effectiveArgv[i] != nullptr; ++i) {
+                shArgs.push_back(effectiveArgv[i]);
             }
-            linkerArgs.push_back(nullptr);
-            return rawExecveSyscall("/system/bin/linker64", linkerArgs.data(), envPtrs.data());
+        }
+        shArgs.push_back(nullptr);
+        return executeResolvedPath(USR_SH_PATH, shArgs.data(), envPtrs.data(), depth + 1);
+    }
+    if (rc < 0 && errno == EACCES) {
+        syscall(__NR_fchmodat, AT_FDCWD, targetPath, 0755, 0);
+        rc = rawExecveSyscall(targetPath, effectiveArgv, envPtrs.data());
+        if (rc < 0 && (errno == EACCES || errno == ENOEXEC)) {
+            int checkFd = rawOpenAt(AT_FDCWD, targetPath, O_RDONLY | O_CLOEXEC, 0);
+            bool isElfBin = false;
+            if (checkFd >= 0) {
+                unsigned char magic[4] = {0};
+                if (read(checkFd, magic, 4) == 4 &&
+                    magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
+                    isElfBin = true;
+                }
+                close(checkFd);
+            }
+            if (isElfBin) {
+                std::vector<char*> linkerArgs;
+                linkerArgs.push_back(const_cast<char*>("/system/bin/linker64"));
+                linkerArgs.push_back(const_cast<char*>(targetPath));
+                if (effectiveArgv && effectiveArgv[0] != nullptr) {
+                    for (size_t i = 1; effectiveArgv[i] != nullptr; ++i) {
+                        linkerArgs.push_back(effectiveArgv[i]);
+                    }
+                }
+                linkerArgs.push_back(nullptr);
+                return rawExecveSyscall("/system/bin/linker64", linkerArgs.data(), envPtrs.data());
+            } else {
+                std::vector<char*> shArgs;
+                shArgs.push_back(const_cast<char*>(USR_SH_PATH));
+                shArgs.push_back(const_cast<char*>(targetPath));
+                if (effectiveArgv && effectiveArgv[0] != nullptr) {
+                    for (size_t i = 1; effectiveArgv[i] != nullptr; ++i) {
+                        shArgs.push_back(effectiveArgv[i]);
+                    }
+                }
+                shArgs.push_back(nullptr);
+                return executeResolvedPath(USR_SH_PATH, shArgs.data(), envPtrs.data(), depth + 1);
+            }
         }
     }
     return rc;

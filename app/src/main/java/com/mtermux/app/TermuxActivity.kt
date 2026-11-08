@@ -16563,7 +16563,26 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
                 }
                 val oscClip = nativeConsumeOsc52Clipboard()
                 if (!oscClip.isNullOrEmpty()) {
-                    copyToClipboard(oscClip, false)
+                    if (oscClip.startsWith("__MTERMUX_OPEN_URL__:")) {
+                        val rawUrl = oscClip.removePrefix("__MTERMUX_OPEN_URL__:").trim()
+                        if (rawUrl.isNotEmpty()) {
+                            post {
+                                try {
+                                    val uri = if (rawUrl.contains("://")) {
+                                        android.net.Uri.parse(rawUrl)
+                                    } else {
+                                        android.net.Uri.fromFile(File(rawUrl))
+                                    }
+                                    val viewIntent = Intent(Intent.ACTION_VIEW, uri).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    startActivity(viewIntent)
+                                } catch (_: Throwable) {}
+                            }
+                        }
+                    } else {
+                        copyToClipboard(oscClip, false)
+                    }
                 }
             }
 
