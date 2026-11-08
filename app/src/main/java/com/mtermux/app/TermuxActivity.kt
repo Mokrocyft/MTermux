@@ -488,13 +488,6 @@ class TermuxActivity : Activity() {
                 }
                 updateExtraKeysTranslationY()
             }
-            addListener(object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: android.animation.Animator) {
-                    if (::terminalSurface.isInitialized) {
-                        terminalSurface.syncSize()
-                    }
-                }
-            })
             start()
         }
     }
@@ -8486,7 +8479,117 @@ class TermuxActivity : Activity() {
         topNavRow.addView(hubTabsOuter)
         mainCol.addView(topNavRow)
 
-        val contentFrame = FrameLayout(this).apply {
+        val contentFrame = object : FrameLayout(this) {
+            private var downX = 0f
+            private var downY = 0f
+            private var downTimeMs = 0L
+            private var isSwipingTab = false
+            private val touchSlopPx = ViewConfiguration.get(context).scaledTouchSlop
+
+            private fun canChildScrollHoriz(v: View, dx: Int, x: Int, y: Int): Boolean {
+                if (v is ViewGroup) {
+                    val scrollX = v.scrollX
+                    val scrollY = v.scrollY
+                    for (i in v.childCount - 1 downTo 0) {
+                        val child = v.getChildAt(i)
+                        if (child.visibility == View.VISIBLE &&
+                            x + scrollX >= child.left && x + scrollX < child.right &&
+                            y + scrollY >= child.top && y + scrollY < child.bottom
+                        ) {
+                            if (canChildScrollHoriz(child, dx, x + scrollX - child.left, y + scrollY - child.top)) {
+                                return true
+                            }
+                        }
+                    }
+                }
+                return v !== this && v.canScrollHorizontally(dx)
+            }
+
+            override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downX = ev.x
+                        downY = ev.y
+                        downTimeMs = SystemClock.uptimeMillis()
+                        isSwipingTab = false
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = ev.x - downX
+                        val dy = ev.y - downY
+                        val edgeGuard = dpF(26f)
+                        val inEdge = (downX < edgeGuard || downX > width - edgeGuard)
+                        if (!isSwipingTab && !inEdge &&
+                            abs(dx) > touchSlopPx * 1.4f &&
+                            abs(dx) > abs(dy) * 1.45f &&
+                            !canChildScrollHoriz(this, (-dx).toInt(), ev.x.toInt(), ev.y.toInt())
+                        ) {
+                            if ((dx > 0f && activeTab > 0) || (dx < 0f && activeTab < 2)) {
+                                isSwipingTab = true
+                                parent?.requestDisallowInterceptTouchEvent(true)
+                                return true
+                            }
+                        }
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        isSwipingTab = false
+                    }
+                }
+                return super.onInterceptTouchEvent(ev)
+            }
+
+            override fun onTouchEvent(ev: MotionEvent): Boolean {
+                if (!isSwipingTab) return super.onTouchEvent(ev)
+                val activeChild = if (childCount > 0) getChildAt(0) else null
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = ev.x - downX
+                        val clampedDx = when {
+                            activeTab == 0 && dx > 0f -> dx * 0.22f
+                            activeTab == 2 && dx < 0f -> dx * 0.22f
+                            else -> dx * 0.55f
+                        }
+                        activeChild?.let { ch ->
+                            ch.translationX = clampedDx
+                            val frac = (abs(dx) / max(1f, width.toFloat())).coerceIn(0f, 1f)
+                            ch.alpha = 1f - 0.22f * frac
+                        }
+                        return true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        val dx = ev.x - downX
+                        val dt = max(1L, SystemClock.uptimeMillis() - downTimeMs)
+                        val velPxPerSec = abs(dx) * 1000f / dt.toFloat()
+                        val triggered = (ev.actionMasked == MotionEvent.ACTION_UP) &&
+                            (abs(dx) > dpF(56f) || (abs(dx) > dpF(24f) && velPxPerSec > 420f))
+                        isSwipingTab = false
+                        if (triggered && dx < 0f && activeTab < 2) {
+                            previousTab = activeTab
+                            activeTab += 1
+                            termDrawerExpanded = false
+                            trashConfirmExpanded = false
+                            triggerHaptic(0.8f)
+                            renderActiveTab()
+                        } else if (triggered && dx > 0f && activeTab > 0) {
+                            previousTab = activeTab
+                            activeTab -= 1
+                            termDrawerExpanded = false
+                            trashConfirmExpanded = false
+                            triggerHaptic(0.8f)
+                            renderActiveTab()
+                        } else {
+                            activeChild?.animate()
+                                ?.translationX(0f)
+                                ?.alpha(1f)
+                                ?.setDuration(180L)
+                                ?.setInterpolator(aosp17SpatialInterpolator)
+                                ?.start()
+                        }
+                        return true
+                    }
+                }
+                return super.onTouchEvent(ev)
+            }
+        }.apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
@@ -16255,7 +16358,7 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             } else {
                 max(currentSysNavBottomPx, currentImeBottomPx).toFloat() + (if (!isImeCurrentlyOpen) dpF(14f) else 0f)
             }
-            val extraH = if (::extraKeysRoot.isInitialized && extraKeysRoot.visibility == View.VISIBLE && !isExtraKeysScrollHidden) {
+            val extraH = if (::extraKeysRoot.isInitialized && extraKeysRoot.visibility == View.VISIBLE) {
                 (extraKeysRoot.height.takeIf { it > 0 } ?: dp(41)).toFloat()
             } else 0f
             return baseLift + extraH
@@ -16984,20 +17087,20 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
 
             val gridTopOffPx = computeGridTopOffsetPx()
             val effectiveRow0Y = computeEffectiveRow0Y()
-            val activeBottomLimitY = (height.toFloat() - computeTotalBottomOcclusionPx()).coerceAtLeast(gridTopOffPx + cellHeight)
+            val imeTopY = (height - currentImeBottomPx).toFloat().coerceAtLeast(gridTopOffPx + cellHeight)
             val switchSlideY = dpF(4f) * (1f - sessionSwitchAnimProg)
 
             canvas.save()
-            canvas.clipRect(0f, gridTopOffPx, width.toFloat(), activeBottomLimitY)
+            canvas.clipRect(0f, 0f, width.toFloat(), imeTopY)
 
             // 1. Draw scrollback rows ABOVE row 0 only when scrollback rows actually exist above row 0!
-            if (scrollOffset < cachedMaxScrollback && effectiveRow0Y > gridTopOffPx) {
+            if (scrollOffset < cachedMaxScrollback && effectiveRow0Y > 0f) {
                 val availAbove = (cachedMaxScrollback - max(0, scrollOffset)).coerceIn(0, 8)
-                val topExtraCount = min(availAbove, ceil(((effectiveRow0Y - gridTopOffPx) / cellHeight).toDouble()).toInt().coerceIn(0, 8))
+                val topExtraCount = min(availAbove, ceil((effectiveRow0Y / cellHeight).toDouble()).toInt().coerceIn(0, 8))
                 for (k in topExtraCount downTo 1) {
                     val rNeg = -k
                     val yTop = effectiveRow0Y + rNeg * cellHeight
-                    if (yTop + cellHeight > gridTopOffPx && yTop < activeBottomLimitY) {
+                    if (yTop + cellHeight > 0f && yTop < imeTopY) {
                         drawSingleRow(canvas, rNeg, yTop)
                     }
                 }
@@ -17040,13 +17143,12 @@ prefs.edit().putString(KEY_SFTP_LAST_SAVED_PATH, localCurrentDir.absolutePath).a
             // 3. Draw rows BELOW row (rows - 1) only when scrolled up into history (scrollOffset > 0)!
             if (scrollOffset > 0) {
                 val bottomRowEndY = effectiveRow0Y + rows * cellHeight
-                val visibleLimitY = height - computeTotalBottomOcclusionPx()
-                if (bottomRowEndY < visibleLimitY) {
-                    val botExtraCount = min(scrollOffset, ceil(((visibleLimitY - bottomRowEndY) / cellHeight).toDouble()).toInt().coerceIn(0, 8))
+                if (bottomRowEndY < imeTopY) {
+                    val botExtraCount = min(scrollOffset, ceil(((imeTopY - bottomRowEndY) / cellHeight).toDouble()).toInt().coerceIn(0, 8))
                     for (k in 0 until botExtraCount) {
                         val rAfter = rows + k
                         val yTop = effectiveRow0Y + rAfter * cellHeight
-                        if (yTop < visibleLimitY) {
+                        if (yTop < imeTopY) {
                             drawSingleRow(canvas, rAfter, yTop)
                         }
                     }
