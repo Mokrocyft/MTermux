@@ -404,6 +404,16 @@ static void ensureDirectExecWrappedInRedirect() noexcept {
                 syscall(__NR_fchmodat, AT_FDCWD, realPath.c_str(), 0700, 0);
                 syscall(__NR_symlinkat, execProxy.c_str(), AT_FDCWD, binPath.c_str());
             }
+        } else if (S_ISLNK(st.st_mode)) {
+            char lbuf[PATH_MAX] = {0};
+            ssize_t ln = readlinkat(AT_FDCWD, binPath.c_str(), lbuf, sizeof(lbuf) - 1);
+            if (ln > 0) {
+                lbuf[ln] = '\0';
+                if (strstr(lbuf, "libmtermux-exec.so") != nullptr && strcmp(lbuf, execProxy.c_str()) != 0) {
+                    syscall(__NR_unlinkat, AT_FDCWD, binPath.c_str(), 0);
+                    syscall(__NR_symlinkat, execProxy.c_str(), AT_FDCWD, binPath.c_str());
+                }
+            }
         }
     }
 }

@@ -764,7 +764,11 @@ static void wrapBinaryForDirectExec(const char* binName, const std::string& exec
         if (n > 0) {
             linkBuf[n] = '\0';
             if (strstr(linkBuf, "libmtermux-exec.so") != nullptr) {
-                return; // Already wrapped!
+                if (strcmp(linkBuf, execProxyPath.c_str()) != 0) {
+                    unlink(binPath.c_str());
+                    symlink(execProxyPath.c_str(), binPath.c_str());
+                }
+                return; // Already wrapped (and symlink updated to current nativeLibraryDir if needed)!
             }
             std::string targetStr(linkBuf);
             std::string baseTarget = targetStr;
@@ -3002,9 +3006,12 @@ static void sendCodepointInternal(NeoTerminalEngine* engine, int codepoint, bool
 
 static void* bootstrapWorkerThread(void* /*arg*/) {
     bool extracted = false;
-    if ((access("/data/data/com.mtermux/file/usr/bin/bash", R_OK) != 0 ||
-         access("/data/data/com.mtermux/file/usr/bin/ssh", R_OK) != 0) &&
-        blob_size > 0) {
+    struct stat bashSt{};
+    struct stat realBashSt{};
+    bool hasBash = (lstat("/data/data/com.mtermux/file/usr/bin/bash", &bashSt) == 0) ||
+                   (lstat("/data/data/com.mtermux/file/usr/bin/.mtermux-real/bash", &realBashSt) == 0);
+    bool hasDpkgStatus = (access("/data/data/com.mtermux/file/usr/var/lib/dpkg/status", R_OK) == 0);
+    if ((!hasBash || !hasDpkgStatus) && blob_size > 0) {
         extracted = extractBootstrapInCpp26(
             reinterpret_cast<const uint8_t*>(blob),
             static_cast<size_t>(blob_size)
