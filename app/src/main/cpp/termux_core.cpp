@@ -749,6 +749,77 @@ static void installUnifiedRedirectLibrary(const char* nativeLibDir) noexcept {
     }
 }
 
+
+static void wrapBinaryForDirectExec(const char* binName, const std::string& execProxyPath) noexcept {
+    std::string binPath = std::string(BIN_PATH) + "/" + binName;
+    std::string realDir = std::string(BIN_PATH) + "/.mtermux-real";
+    std::string realPath = realDir + "/" + binName;
+
+    struct stat st{};
+    if (lstat(binPath.c_str(), &st) != 0) return;
+
+    if (S_ISLNK(st.st_mode)) {
+        char linkBuf[PATH_MAX] = {0};
+        ssize_t n = readlink(binPath.c_str(), linkBuf, sizeof(linkBuf) - 1);
+        if (n > 0) {
+            linkBuf[n] = '\0';
+            if (strstr(linkBuf, "libmtermux-exec.so") != nullptr) {
+                return; // Already wrapped!
+            }
+            std::string targetStr(linkBuf);
+            std::string baseTarget = targetStr;
+            size_t slashPos = baseTarget.rfind('/');
+            if (slashPos != std::string::npos) baseTarget = baseTarget.substr(slashPos + 1);
+            std::string realSibling = realDir + "/" + baseTarget;
+            char resolved[PATH_MAX] = {0};
+            if (access(realSibling.c_str(), R_OK) == 0) {
+                unlink(realPath.c_str());
+                symlink(realSibling.c_str(), realPath.c_str());
+            } else if (realpath(binPath.c_str(), resolved) != nullptr &&
+                       strstr(resolved, "libmtermux-exec.so") == nullptr) {
+                unlink(realPath.c_str());
+                symlink(resolved, realPath.c_str());
+            } else {
+                if (targetStr[0] != '/') {
+                    targetStr = std::string(BIN_PATH) + "/" + targetStr;
+                }
+                unlink(realPath.c_str());
+                symlink(targetStr.c_str(), realPath.c_str());
+            }
+            unlink(binPath.c_str());
+            symlink(execProxyPath.c_str(), binPath.c_str());
+        }
+        return;
+    }
+
+    if (S_ISREG(st.st_mode)) {
+        if (rename(binPath.c_str(), realPath.c_str()) == 0) {
+            chmod(realPath.c_str(), 0700);
+            symlink(execProxyPath.c_str(), binPath.c_str());
+        }
+    }
+}
+
+static void wrapCommonDirectExecBinaries(const char* nativeLibDir) noexcept {
+    if (!nativeLibDir || !nativeLibDir[0]) return;
+    std::string execProxyPath = std::string(nativeLibDir) + "/libmtermux-exec.so";
+    if (access(execProxyPath.c_str(), X_OK) != 0) return;
+
+    std::string realDir = std::string(BIN_PATH) + "/.mtermux-real";
+    mkdirsRecursive(realDir.c_str(), 0700);
+
+    static const char* const kDirectExecBins[] = {
+        "bash", "sh", "zsh", "dash",
+        "git", "ssh", "scp", "sftp", "ssh-keygen",
+        "gpg", "gpgv", "less", "curl", "tar", "bsdtar",
+        "unzip", "gzip", "xz", "sed", "awk", "grep", "find",
+        "env", "nano", "vim"
+    };
+    for (const char* name : kDirectExecBins) {
+        wrapBinaryForDirectExec(name, execProxyPath);
+    }
+}
+
 static void installBuiltInSudoWrapper(const char* nativeLibDir) noexcept {
     const char* sudoPath = "/data/data/com.mtermux/file/usr/bin/sudo";
     const char* sudoScript = R"SH(#!/data/data/com.mtermux/file/usr/bin/sh
@@ -989,6 +1060,7 @@ static void initializeEnvironmentAndAutoUpdater(const char* nativeLibDir, bool j
 
     installUnifiedRedirectLibrary(nativeLibDir);
     installBuiltInSudoWrapper(nativeLibDir);
+    wrapCommonDirectExecBinaries(nativeLibDir);
     std::string dstSo = std::string(LIB_PATH) + "/libmtermux-redirect.so";
 
     ensureExecutablePermissionsInDir("/data/data/com.mtermux/file/usr/var/lib/dpkg/info");

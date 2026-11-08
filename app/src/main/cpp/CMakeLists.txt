@@ -119,3 +119,24 @@ endif()
 
 target_link_options(mtermux-open PRIVATE ${COMMON_LINK_FLAGS} -pie)
 target_link_options(mtermux-clip PRIVATE ${COMMON_LINK_FLAGS} -pie)
+
+add_executable(mtermux-exec
+    mtermux_exec.cpp
+)
+
+set_target_properties(mtermux-exec PROPERTIES
+    OUTPUT_NAME "mtermux-exec"
+    PREFIX "lib"
+    SUFFIX ".so"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+)
+
+target_compile_options(mtermux-exec PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${COMMON_CXX_FLAGS}>
+)
+
+if(HAS_ARMV8_2)
+    target_compile_options(mtermux-exec PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+crypto+dotprod+fp16>)
+endif()
+
+target_link_options(mtermux-exec PRIVATE ${COMMON_LINK_FLAGS} -pie)
