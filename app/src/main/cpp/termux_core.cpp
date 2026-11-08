@@ -746,27 +746,62 @@ static void installUnifiedRedirectLibrary(const char* nativeLibDir) noexcept {
 
 static void installBuiltInSudoWrapper() noexcept {
     const char* sudoPath = "/data/data/com.mtermux/file/usr/bin/sudo";
-    if (access(sudoPath, X_OK) == 0) return;
     const char* sudoScript =
         "#!/data/data/com.mtermux/file/usr/bin/sh\n"
-        "for s in /debug_ramdisk/su /sbin/su /system/bin/su /system/xbin/su /data/adb/ksu/bin/su /data/adb/ap/bin/su; do\n"
+        "for s in /data/adb/ksu/bin/su /data/adb/ap/bin/su /debug_ramdisk/su /sbin/su /system/bin/su /system/xbin/su; do\n"
         "  if [ -x \"$s\" ]; then SU_BIN=\"$s\"; break; fi\n"
         "done\n"
-        "if [ -z \"$SU_BIN\" ]; then SU_BIN=su; fi\n"
+        "if [ -z \"$SU_BIN\" ]; then echo 'No su binary found on device' >&2; exit 1; fi\n"
+        "MM_FLAG=\"\"\n"
+        "case \"$SU_BIN\" in /data/adb/ksu/*|/data/adb/ap/*|/debug_ramdisk/*|/sbin/*) MM_FLAG=\"--mount-master\" ;; esac\n"
+        "ENV_PREFIX='export PATH=/data/data/com.mtermux/file/usr/bin:/data/data/com.mtermux/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; "
+        "export LD_LIBRARY_PATH=/data/data/com.mtermux/file/usr/lib; "
+        "export PREFIX=/data/data/com.mtermux/file/usr; "
+        "export HOME=/data/data/com.mtermux/file/home; "
+        "export TMPDIR=/data/data/com.mtermux/file/usr/tmp; "
+        "export LD_PRELOAD=/data/data/com.mtermux/file/usr/lib/libmtermux-redirect.so'\n"
         "if [ $# -eq 0 ] || [ \"$1\" = \"-s\" ] || [ \"$1\" = \"-i\" ]; then\n"
-        "  exec \"$SU_BIN\" -c \"export PATH=/data/data/com.mtermux/file/usr/bin:/data/data/com.mtermux/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; export LD_LIBRARY_PATH=/data/data/com.mtermux/file/usr/lib; export PREFIX=/data/data/com.mtermux/file/usr; export HOME=/data/data/com.mtermux/file/home; export TMPDIR=/data/data/com.mtermux/file/usr/tmp; export LD_PRELOAD=/data/data/com.mtermux/file/usr/lib/libmtermux-redirect.so; exec /data/data/com.mtermux/file/usr/bin/bash -l\"\n"
+        "  INNER=\"$ENV_PREFIX; exec /data/data/com.mtermux/file/usr/bin/bash -l\"\n"
+        "else\n"
+        "  CMD=\"\"\n"
+        "  for arg in \"$@\"; do\n"
+        "    ESCAPED=$(printf \"%s\" \"$arg\" | sed \"s/'/'\\\\\\\\''/g\")\n"
+        "    CMD=\"$CMD '$ESCAPED'\"\n"
+        "  done\n"
+        "  INNER=\"$ENV_PREFIX; eval $CMD\"\n"
         "fi\n"
-        "CMD=\"\"\n"
-        "for arg in \"$@\"; do\n"
-        "  ESCAPED=$(printf \"%s\" \"$arg\" | sed \"s/'/'\\\\\\\\''/g\")\n"
-        "  CMD=\"$CMD '$ESCAPED'\"\n"
-        "done\n"
-        "exec \"$SU_BIN\" -c \"export PATH=/data/data/com.mtermux/file/usr/bin:/data/data/com.mtermux/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; export LD_LIBRARY_PATH=/data/data/com.mtermux/file/usr/lib; export PREFIX=/data/data/com.mtermux/file/usr; export HOME=/data/data/com.mtermux/file/home; export TMPDIR=/data/data/com.mtermux/file/usr/tmp; export LD_PRELOAD=/data/data/com.mtermux/file/usr/lib/libmtermux-redirect.so; eval $CMD\"\n";
+        "INNER_ESC=$(printf \"%s\" \"$INNER\" | sed \"s/'/'\\\\\\\\''/g\")\n"
+        "exec \"$SU_BIN\" $MM_FLAG -c \"if [ \\\"\$(readlink /proc/1/ns/mnt 2>/dev/null)\\\" != \\\"\$(readlink /proc/self/ns/mnt 2>/dev/null)\\\" ]; then if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; fi; fi; eval '$INNER_ESC'\"\n";
     int fd = open(sudoPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
     if (fd >= 0) {
         writeAllFd(fd, sudoScript, strlen(sudoScript));
         close(fd);
         chmod(sudoPath, 0700);
+    }
+
+    const char* suWrapperPath = "/data/data/com.mtermux/file/usr/bin/su";
+    const char* suScript =
+        "#!/data/data/com.mtermux/file/usr/bin/sh\n"
+        "for s in /data/adb/ksu/bin/su /data/adb/ap/bin/su /debug_ramdisk/su /sbin/su /system/bin/su /system/xbin/su; do\n"
+        "  if [ -x \"$s\" ]; then SU_BIN=\"$s\"; break; fi\n"
+        "done\n"
+        "if [ -z \"$SU_BIN\" ]; then echo 'No su program found on this device.' >&2; exit 1; fi\n"
+        "MM_FLAG=\"\"\n"
+        "case \" $* \" in *' --mount-master '*|*' -mm '*) ;; *) "
+        "case \"$SU_BIN\" in /data/adb/ksu/*|/data/adb/ap/*|/debug_ramdisk/*|/sbin/*) MM_FLAG=\"--mount-master\" ;; esac ;; esac\n"
+        "if [ $# -eq 0 ]; then\n"
+        "  exec \"$SU_BIN\" $MM_FLAG -c 'if [ \"$(readlink /proc/1/ns/mnt 2>/dev/null)\" != \"$(readlink /proc/self/ns/mnt 2>/dev/null)\" ]; then if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- /system/bin/sh; elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- /system/bin/sh; fi; fi; exec /system/bin/sh'\n"
+        "elif [ \"$1\" = \"-c\" ] && [ $# -ge 2 ]; then\n"
+        "  shift\n"
+        "  INNER_ESC=$(printf \"%s\" \"$1\" | sed \"s/'/'\\\\\\\\''/g\")\n"
+        "  exec \"$SU_BIN\" $MM_FLAG -c \"if [ \\\"\$(readlink /proc/1/ns/mnt 2>/dev/null)\\\" != \\\"\$(readlink /proc/self/ns/mnt 2>/dev/null)\\\" ]; then if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; fi; fi; eval '$INNER_ESC'\"\n"
+        "fi\n"
+        "exec \"$SU_BIN\" $MM_FLAG \"$@\"\n";
+    int sfd = open(suWrapperPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
+    if (sfd >= 0) {
+        writeAllFd(sfd, suScript, strlen(suScript));
+        close(sfd);
+        chmod(suWrapperPath, 0700);
     }
 }
 
@@ -2480,9 +2515,18 @@ static bool startSessionProcess(
             rootCmd += "export LD_PRELOAD=\"" + fullPreload + "\"; ";
         }
         rootCmd += "cd \"" + std::string(HOME_PATH) + "\" 2>/dev/null || true; ";
+        rootCmd += "if [ \"$(readlink /proc/1/ns/mnt 2>/dev/null)\" != \"$(readlink /proc/self/ns/mnt 2>/dev/null)\" ]; then ";
+        rootCmd += "if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- \"" + std::string(userShell) + "\" -l; ";
+        rootCmd += "elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- \"" + std::string(userShell) + "\" -l; fi; fi; ";
         rootCmd += "exec \"" + std::string(userShell) + "\" -l";
 
         argStrings.push_back(execPath);
+        if (execPath.find("/ksu/") != std::string::npos ||
+            execPath.find("/ap/") != std::string::npos ||
+            execPath.find("/debug_ramdisk/") != std::string::npos ||
+            execPath.find("/sbin/") != std::string::npos) {
+            argStrings.push_back("--mount-master");
+        }
         argStrings.push_back("-c");
         argStrings.push_back(rootCmd);
     } else if (hasLogin) {
@@ -3979,6 +4023,13 @@ static bool ensureRootDaemonStartedLockedCpp26() noexcept {
             if (devNull > 2) close(devNull);
         }
         unsetenv("LD_PRELOAD");
+        bool useMountMaster = (strstr(suBin, "/ksu/") != nullptr ||
+                               strstr(suBin, "/ap/") != nullptr ||
+                               strstr(suBin, "/debug_ramdisk/") != nullptr ||
+                               strstr(suBin, "/sbin/") != nullptr);
+        if (useMountMaster) {
+            execl(suBin, "su", "--mount-master", static_cast<char*>(nullptr));
+        }
         execl(suBin, "su", static_cast<char*>(nullptr));
         _exit(127);
     }
@@ -3989,7 +4040,11 @@ static bool ensureRootDaemonStartedLockedCpp26() noexcept {
     gRootDaemonInFd = inPipe[1];
     gRootDaemonOutFd = outPipe[0];
 
-    std::string initCmd = "export PATH=\"" + std::string(BIN_PATH) + ":/system/bin:/system/xbin:/sbin:$PATH\"\n";
+    std::string initCmd =
+        "if [ \"$(readlink /proc/1/ns/mnt 2>/dev/null)\" != \"$(readlink /proc/self/ns/mnt 2>/dev/null)\" ]; then "
+        "if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- /system/bin/sh; "
+        "elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- /system/bin/sh; fi; fi\n"
+        "export PATH=\"" + std::string(BIN_PATH) + ":/system/bin:/system/xbin:/sbin:$PATH\"\n";
     ssize_t wr = write(gRootDaemonInFd, initCmd.data(), initCmd.size());
     (void)wr;
     return true;
