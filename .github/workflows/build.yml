@@ -87,17 +87,7 @@ jobs:
             mkdir -p "${CMAKE_DIR}"
             curl -fsSL "https://github.com/Kitware/CMake/releases/download/v4.5.0-rc3/cmake-4.5.0-rc3-linux-x86_64.tar.gz" | tar -xz --strip-components=1 -C "${CMAKE_DIR}"
             mv "${CMAKE_DIR}/bin/cmake" "${CMAKE_DIR}/bin/cmake.real"
-            cat << 'WRAP' > "${CMAKE_DIR}/bin/cmake"
-#!/usr/bin/env bash
-args=()
-for a in "$@"; do
-  case "$a" in
-    -H*) args+=("-S${a#-H}") ;;
-    *)   args+=("$a") ;;
-  esac
-done
-exec "$(dirname "$0")/cmake.real" "${args[@]}"
-WRAP
+            printf '%s\n' '#!/usr/bin/env bash' 'args=()' 'for a in "$@"; do' '  case "$a" in' '    -H*) args+=("-S${a#-H}") ;;' '    *)   args+=("$a") ;;' '  esac' 'done' 'exec "$(dirname "$0")/cmake.real" "${args[@]}"' > "${CMAKE_DIR}/bin/cmake"
             chmod +x "${CMAKE_DIR}/bin/cmake"
           fi
           echo "${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
