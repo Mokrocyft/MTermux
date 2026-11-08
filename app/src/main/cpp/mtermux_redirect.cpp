@@ -428,6 +428,21 @@ static int executeResolvedPath(const char* rawFilename, char* const argv[], char
     }
     const char* targetPath = targetPathStr.c_str();
 
+    // Fix Go os.Executable() returning /system/bin/linker64 when gh auth setup-git writes ~/.gitconfig
+    std::vector<char*> patchedArgv;
+    if (strcmp(targetPath, "/system/bin/linker64") == 0 &&
+        argv && argv[0] && argv[1] && argv[1][0] != '/' &&
+        strcmp(argv[1], "auth") == 0 && argv[2] && strcmp(argv[2], "git-credential") == 0) {
+        static char ghPathBuf[] = "/data/data/com.mtermux/file/usr/bin/gh";
+        patchedArgv.push_back(argv[0]);
+        patchedArgv.push_back(ghPathBuf);
+        for (size_t i = 1; argv[i] != nullptr; ++i) {
+            patchedArgv.push_back(argv[i]);
+        }
+        patchedArgv.push_back(nullptr);
+        argv = patchedArgv.data();
+    }
+
     // Ensure any newly created script or binary under com.mtermux has its 16-byte tokens patched before exec
     patchInstalledFileIfNeeded(targetPath);
     {
