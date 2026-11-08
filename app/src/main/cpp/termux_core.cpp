@@ -746,32 +746,27 @@ static void installUnifiedRedirectLibrary(const char* nativeLibDir) noexcept {
 
 static void installBuiltInSudoWrapper() noexcept {
     const char* sudoPath = "/data/data/com.mtermux/file/usr/bin/sudo";
-    const char* sudoScript =
-        "#!/data/data/com.mtermux/file/usr/bin/sh\n"
-        "for s in /data/adb/ksu/bin/su /data/adb/ap/bin/su /debug_ramdisk/su /sbin/su /system/bin/su /system/xbin/su; do\n"
-        "  if [ -x \"$s\" ]; then SU_BIN=\"$s\"; break; fi\n"
-        "done\n"
-        "if [ -z \"$SU_BIN\" ]; then echo 'No su binary found on device' >&2; exit 1; fi\n"
-        "MM_FLAG=\"\"\n"
-        "case \"$SU_BIN\" in /data/adb/ksu/*|/data/adb/ap/*|/debug_ramdisk/*|/sbin/*) MM_FLAG=\"--mount-master\" ;; esac\n"
-        "ENV_PREFIX='export PATH=/data/data/com.mtermux/file/usr/bin:/data/data/com.mtermux/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; "
-        "export LD_LIBRARY_PATH=/data/data/com.mtermux/file/usr/lib; "
-        "export PREFIX=/data/data/com.mtermux/file/usr; "
-        "export HOME=/data/data/com.mtermux/file/home; "
-        "export TMPDIR=/data/data/com.mtermux/file/usr/tmp; "
-        "export LD_PRELOAD=/data/data/com.mtermux/file/usr/lib/libmtermux-redirect.so'\n"
-        "if [ $# -eq 0 ] || [ \"$1\" = \"-s\" ] || [ \"$1\" = \"-i\" ]; then\n"
-        "  INNER=\"$ENV_PREFIX; exec /data/data/com.mtermux/file/usr/bin/bash -l\"\n"
-        "else\n"
-        "  CMD=\"\"\n"
-        "  for arg in \"$@\"; do\n"
-        "    ESCAPED=$(printf \"%s\" \"$arg\" | sed \"s/'/'\\\\\\\\''/g\")\n"
-        "    CMD=\"$CMD '$ESCAPED'\"\n"
-        "  done\n"
-        "  INNER=\"$ENV_PREFIX; eval $CMD\"\n"
-        "fi\n"
-        "INNER_ESC=$(printf \"%s\" \"$INNER\" | sed \"s/'/'\\\\\\\\''/g\")\n"
-        "exec \"$SU_BIN\" $MM_FLAG -c \"if [ \\\"\$(readlink /proc/1/ns/mnt 2>/dev/null)\\\" != \\\"\$(readlink /proc/self/ns/mnt 2>/dev/null)\\\" ]; then if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; fi; fi; eval '$INNER_ESC'\"\n";
+    const char* sudoScript = R"SH(#!/data/data/com.mtermux/file/usr/bin/sh
+for s in /data/adb/ksu/bin/su /data/adb/ap/bin/su /debug_ramdisk/su /sbin/su /system/bin/su /system/xbin/su; do
+  if [ -x "$s" ]; then SU_BIN="$s"; break; fi
+done
+if [ -z "$SU_BIN" ]; then echo 'No su binary found on device' >&2; exit 1; fi
+MM_FLAG=""
+case "$SU_BIN" in /data/adb/ksu/*|/data/adb/ap/*|/debug_ramdisk/*|/sbin/*) MM_FLAG="--mount-master" ;; esac
+ENV_PREFIX='export PATH=/data/data/com.mtermux/file/usr/bin:/data/data/com.mtermux/file/usr/bin/applets:/sbin:/system/bin:/system/xbin; export LD_LIBRARY_PATH=/data/data/com.mtermux/file/usr/lib; export PREFIX=/data/data/com.mtermux/file/usr; export HOME=/data/data/com.mtermux/file/home; export TMPDIR=/data/data/com.mtermux/file/usr/tmp; export LD_PRELOAD=/data/data/com.mtermux/file/usr/lib/libmtermux-redirect.so'
+if [ $# -eq 0 ] || [ "$1" = "-s" ] || [ "$1" = "-i" ]; then
+  INNER="$ENV_PREFIX; exec /data/data/com.mtermux/file/usr/bin/bash -l"
+else
+  CMD=""
+  for arg in "$@"; do
+    ESCAPED=$(printf "%s" "$arg" | sed "s/'/'\\''/g")
+    CMD="$CMD '$ESCAPED'"
+  done
+  INNER="$ENV_PREFIX; eval $CMD"
+fi
+INNER_ESC=$(printf "%s" "$INNER" | sed "s/'/'\\''/g")
+exec "$SU_BIN" $MM_FLAG -c "if [ \"\$(readlink /proc/1/ns/mnt 2>/dev/null)\" != \"\$(readlink /proc/self/ns/mnt 2>/dev/null)\" ]; then if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; fi; fi; eval '$INNER_ESC'"
+)SH";
     int fd = open(sudoPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
     if (fd >= 0) {
         writeAllFd(fd, sudoScript, strlen(sudoScript));
@@ -780,23 +775,22 @@ static void installBuiltInSudoWrapper() noexcept {
     }
 
     const char* suWrapperPath = "/data/data/com.mtermux/file/usr/bin/su";
-    const char* suScript =
-        "#!/data/data/com.mtermux/file/usr/bin/sh\n"
-        "for s in /data/adb/ksu/bin/su /data/adb/ap/bin/su /debug_ramdisk/su /sbin/su /system/bin/su /system/xbin/su; do\n"
-        "  if [ -x \"$s\" ]; then SU_BIN=\"$s\"; break; fi\n"
-        "done\n"
-        "if [ -z \"$SU_BIN\" ]; then echo 'No su program found on this device.' >&2; exit 1; fi\n"
-        "MM_FLAG=\"\"\n"
-        "case \" $* \" in *' --mount-master '*|*' -mm '*) ;; *) "
-        "case \"$SU_BIN\" in /data/adb/ksu/*|/data/adb/ap/*|/debug_ramdisk/*|/sbin/*) MM_FLAG=\"--mount-master\" ;; esac ;; esac\n"
-        "if [ $# -eq 0 ]; then\n"
-        "  exec \"$SU_BIN\" $MM_FLAG -c 'if [ \"$(readlink /proc/1/ns/mnt 2>/dev/null)\" != \"$(readlink /proc/self/ns/mnt 2>/dev/null)\" ]; then if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- /system/bin/sh; elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- /system/bin/sh; fi; fi; exec /system/bin/sh'\n"
-        "elif [ \"$1\" = \"-c\" ] && [ $# -ge 2 ]; then\n"
-        "  shift\n"
-        "  INNER_ESC=$(printf \"%s\" \"$1\" | sed \"s/'/'\\\\\\\\''/g\")\n"
-        "  exec \"$SU_BIN\" $MM_FLAG -c \"if [ \\\"\$(readlink /proc/1/ns/mnt 2>/dev/null)\\\" != \\\"\$(readlink /proc/self/ns/mnt 2>/dev/null)\\\" ]; then if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; fi; fi; eval '$INNER_ESC'\"\n"
-        "fi\n"
-        "exec \"$SU_BIN\" $MM_FLAG \"$@\"\n";
+    const char* suScript = R"SH(#!/data/data/com.mtermux/file/usr/bin/sh
+for s in /data/adb/ksu/bin/su /data/adb/ap/bin/su /debug_ramdisk/su /sbin/su /system/bin/su /system/xbin/su; do
+  if [ -x "$s" ]; then SU_BIN="$s"; break; fi
+done
+if [ -z "$SU_BIN" ]; then echo 'No su program found on this device.' >&2; exit 1; fi
+MM_FLAG=""
+case " $* " in *' --mount-master '*|*' -mm '*) ;; *) case "$SU_BIN" in /data/adb/ksu/*|/data/adb/ap/*|/debug_ramdisk/*|/sbin/*) MM_FLAG="--mount-master" ;; esac ;; esac
+if [ $# -eq 0 ]; then
+  exec "$SU_BIN" $MM_FLAG -c 'if [ "$(readlink /proc/1/ns/mnt 2>/dev/null)" != "$(readlink /proc/self/ns/mnt 2>/dev/null)" ]; then if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- /system/bin/sh; elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- /system/bin/sh; fi; fi; exec /system/bin/sh'
+elif [ "$1" = "-c" ] && [ $# -ge 2 ]; then
+  shift
+  INNER_ESC=$(printf "%s" "$1" | sed "s/'/'\\''/g")
+  exec "$SU_BIN" $MM_FLAG -c "if [ \"\$(readlink /proc/1/ns/mnt 2>/dev/null)\" != \"\$(readlink /proc/self/ns/mnt 2>/dev/null)\" ]; then if command -v nsenter >/dev/null 2>&1; then exec nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; elif [ -x /system/bin/toybox ]; then exec /system/bin/toybox nsenter -t 1 -m -- /system/bin/sh -c '$INNER_ESC'; fi; fi; eval '$INNER_ESC'"
+fi
+exec "$SU_BIN" $MM_FLAG "$@"
+)SH";
     int sfd = open(suWrapperPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
     if (sfd >= 0) {
         writeAllFd(sfd, suScript, strlen(suScript));
